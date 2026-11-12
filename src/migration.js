@@ -260,7 +260,7 @@ export function migrationComment(blockers, removed, added) {
   const parts = [];
   if (blockers.length)
     parts.push(
-      `Recorded native blocked-by dependencies: ${blockers.map((n) => `#${n}`).join(", ")}.`,
+      `Recorded native blocked-by dependencies: ${blockers.map((n) => (typeof n === "number" ? `#${n}` : n)).join(", ")}.`,
     );
   if (removed.length || added.length)
     parts.push(
@@ -362,83 +362,82 @@ export async function applyMigration(plan, runtime = {}) {
         entry.steps[step] = true;
         await checkpoint();
       };
+      // Edges keep a repository-qualified identity: a reviewer may approve a cross-repository row.
+      const identity = (e) => {
+        const m = /github\.com\/([^/]+\/[^/]+)\/(issues|pull)\/(\d+)/i.exec(e.url ?? "");
+        return m
+          ? { repo: m[1], kind: m[2], number: Number(m[3]) }
+          : { repo, kind: "issues", number: e.blocker };
+      };
+      const keyOf = (r, n) => `${r.toLowerCase()}#${n}`;
+      for (const e of edges)
+        if (identity(e).kind === "pull")
+          throw new Error(`A pull request cannot be a blocker (${e.url}); edit the plan row.`);
       const nativeNow = new Set(
-        live.blockedBy.nodes
-          .filter((n) => sameRepo(n.repository.nameWithOwner, repo))
-          .map((n) => n.number),
+        live.blockedBy.nodes.map((n) => keyOf(n.repository.nameWithOwner, n.number)),
       );
+      const newEdges = edges.filter((e) => {
+        const id = identity(e);
+        return !nativeNow.has(keyOf(id.repo, id.number));
+      });
+      const blockerArg = (e) => {
+        const id = identity(e);
+        return sameRepo(id.repo, repo)
+          ? String(id.number)
+          : `https://github.com/${id.repo}/issues/${id.number}`;
+      };
+      const blockerName = (e) => {
+        const id = identity(e);
+        return sameRepo(id.repo, repo) ? `#${id.number}` : `${id.repo}#${id.number}`;
+      };
       const tags = live.labels.nodes.map((l) => l.name);
-      const newEdges = edges.filter((e) => !nativeNow.has(e.blocker));
       const remove = (labels?.remove ?? []).filter((l) => tags.includes(l));
       const add = (labels?.add ?? []).filter((l) => !tags.includes(l));
-      const commands = [
-        ...(entry.steps.edges
-          ? []
-          : newEdges.map((e) => [
+      const makesReady = add.includes(workflow.ready) || remove.includes(workflow.blocked);
+      // Making a ticket ready relies on GitHub keeping it Blocked, so a reviewer withholding its
+      // supporting edge (or an unreadable label list) must not turn missing evidence into pickup.
+      // Dry runs predict the open blockers after the pending edges; real runs re-read live.
+      const withholdReason = (open, incomplete) =>
+        !makesReady
+          ? null
+          : incomplete
+            ? "Label change withheld: more than 100 labels; review the label row."
+            : open > 0
+              ? null
+              : "Label change withheld: no open native blocker remains; review the label row.";
+      const predictedOpen =
+        (live.issueDependenciesSummary?.blockedBy ?? 0) +
+        (entry.steps.edges ? 0 : newEdges.filter((e) => e.state === "OPEN").length);
+      let withheld = entry.steps.labels
+        ? null
+        : withholdReason(predictedOpen, !!live.labels.pageInfo?.hasNextPage);
+      const edgeCommands = entry.steps.edges
+        ? []
+        : newEdges.map((e) => [
+            "issue",
+            "edit",
+            String(ticket.number),
+            "--repo",
+            repo,
+            "--add-blocked-by",
+            blockerArg(e),
+          ]);
+      const labelCommand =
+        entry.steps.labels || (!remove.length && !add.length)
+          ? null
+          : [
               "issue",
               "edit",
               String(ticket.number),
               "--repo",
               repo,
-              "--add-blocked-by",
-              String(e.blocker),
-            ])),
-        ...(entry.steps.labels || (!remove.length && !add.length)
-          ? []
+              ...remove.flatMap((l) => ["--remove-label", l]),
+              ...add.flatMap((l) => ["--add-label", l]),
+            ];
+      const commentCommand = () =>
+        withheld && !edges.length
+          ? null
           : [
-              [
-                "issue",
-                "edit",
-                String(ticket.number),
-                "--repo",
-                repo,
-                ...remove.flatMap((l) => ["--remove-label", l]),
-                ...add.flatMap((l) => ["--add-label", l]),
-              ],
-            ]),
-        [
-          "issue",
-          "comment",
-          String(ticket.number),
-          "--repo",
-          repo,
-          "--body",
-          migrationComment(
-            edges.map((e) => e.blocker),
-            labels?.remove ?? [],
-            labels?.add ?? [],
-          ),
-        ],
-      ];
-      result.commands = commands;
-      if (runtime.dryRun) {
-        result.status = "would-apply";
-        continue;
-      }
-      if (!entry.steps.edges) {
-        for (let i = 0; i < newEdges.length; i++) {
-          await write(commands.shift());
-          // Checkpoint after every write, so a later failure cannot leave our own edit
-          // looking like someone else's change to the guard on the next run.
-          await checkpoint();
-        }
-        await recorded("edges");
-      }
-      if (!entry.steps.labels) {
-        // Making a ticket ready relies on GitHub keeping it Blocked: re-check live, so a
-        // reviewer withholding its supporting edge cannot turn missing evidence into pickup.
-        const makesReady = add.includes(workflow.ready) || remove.includes(workflow.blocked);
-        const incompleteLabels = !!live.labels.pageInfo?.hasNextPage;
-        if (makesReady && (incompleteLabels || !(live.issueDependenciesSummary?.blockedBy > 0))) {
-          Object.assign(result, {
-            status: "skipped",
-            reason: incompleteLabels
-              ? "Label change withheld: more than 100 labels; review the label row."
-              : "Label change withheld: no open native blocker remains; review the label row.",
-          });
-          if (edges.length) {
-            // Still explain the edges that were recorded; claim no label change.
-            await write([
               "issue",
               "comment",
               String(ticket.number),
@@ -446,20 +445,45 @@ export async function applyMigration(plan, runtime = {}) {
               repo,
               "--body",
               migrationComment(
-                edges.map((e) => e.blocker),
-                [],
-                [],
+                edges.map(blockerName),
+                withheld ? [] : (labels?.remove ?? []),
+                withheld ? [] : (labels?.add ?? []),
               ),
-            ]);
-            await recorded("comment");
-          }
-          continue;
-        }
-        if (remove.length || add.length) await write(commands.shift());
-        await recorded("labels");
+            ];
+      const planned = () =>
+        [...edgeCommands, withheld ? null : labelCommand, commentCommand()].filter(Boolean);
+      result.commands = planned();
+      if (withheld) Object.assign(result, { status: "skipped", reason: withheld });
+      if (runtime.dryRun) {
+        if (!withheld) result.status = "would-apply";
+        continue;
       }
-      await write(commands.at(-1));
-      await recorded("comment");
+      if (!entry.steps.edges) {
+        for (const command of edgeCommands) {
+          await write(command);
+          // Checkpoint after every write, so a later failure cannot leave our own edit
+          // looking like someone else's change to the guard on the next run.
+          await checkpoint();
+        }
+        await recorded("edges");
+      }
+      if (!entry.steps.labels && !withheld) {
+        withheld = withholdReason(
+          live.issueDependenciesSummary?.blockedBy ?? 0,
+          !!live.labels.pageInfo?.hasNextPage,
+        );
+        if (withheld) Object.assign(result, { status: "skipped", reason: withheld });
+        else {
+          if (labelCommand) await write(labelCommand);
+          await recorded("labels");
+        }
+      }
+      const comment = commentCommand();
+      result.commands = planned();
+      if (comment) {
+        await write(comment);
+        await recorded("comment");
+      }
     } catch (error) {
       stopped = !!error?.rateLimited;
       Object.assign(result, { status: "failed", reason: error.message });

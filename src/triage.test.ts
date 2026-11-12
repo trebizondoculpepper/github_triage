@@ -1421,6 +1421,45 @@ describe("dependency migration", () => {
     expect(p.tickets[0].labels).toMatchObject({ status: "review" });
     expect(p.tickets[0].labels!.reason).toContain("incomplete");
   });
+  it("applies an approved cross-repository row by URL, never as the same-numbered local issue", async () => {
+    const env = live({
+      issues: { 1: { body: "Depends on https://github.com/other/repo/issues/2." }, 2: {} },
+    });
+    const p = await plan(env);
+    expect(p.tickets[0].edges[0]).toMatchObject({
+      blocker: 2,
+      status: "review",
+      crossRepository: true,
+    });
+    p.tickets[0].edges[0].status = "apply"; // the reviewer approves it
+    const result = await apply(p, env);
+    expect(result.exitCode).toBe(0);
+    expect(env.writes[0]).toEqual([
+      "issue",
+      "edit",
+      "1",
+      "--repo",
+      repo,
+      "--add-blocked-by",
+      "https://github.com/other/repo/issues/2",
+    ]);
+    expect(env.writes[1].at(-1)).toContain("other/repo#2");
+    expect(env.writes[1].at(-1)).not.toContain("##");
+  });
+  it("dry run applies the readiness guard exactly as a real run would", async () => {
+    const env = live({
+      issues: { 1: { labels: ["status:blocked", "blocked:work"], body: "Depends on #2." }, 2: {} },
+    });
+    const p = await plan(env);
+    p.tickets[0].edges[0].status = "review"; // the reviewer withholds the only open edge
+    const dry = await apply(p, env, { dryRun: true });
+    expect(dry.results[0].status).toBe("skipped");
+    expect(dry.results[0].commands).toEqual([]);
+    expect(dry.exitCode).toBe(2);
+    const real = await apply(p, env);
+    expect(real.results[0].status).toBe(dry.results[0].status);
+    expect(env.writes).toEqual([]);
+  });
   it("skips edges and labels that already match", async () => {
     const env = live({
       issues: { 1: { labels: ["status:blocked", "blocked:work"], body: "Depends on #2." }, 2: {} },
