@@ -44,6 +44,7 @@ jobs:
       - run: node src/cli.js --help
       - run: npm run smoke
       - run: node scripts/smoke.mjs src/cli.js
+      - run: npm run package-test
 
   # Single stable check name for branch protection and the triage tool's
   # required "verify" check; passes only if every matrix job passed.
