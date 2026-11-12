@@ -334,7 +334,8 @@ export async function applyMigration(plan, runtime = {}) {
       continue;
     }
     const entry = (journal.tickets[ticket.number] ??= { steps: {} });
-    if (entry.steps.comment) {
+    // Complete only when every approved step is done; a withheld label step stays resumable.
+    if (entry.complete) {
       Object.assign(result, { status: "done-earlier", reason: "Completed in an earlier run." });
       continue;
     }
@@ -407,10 +408,15 @@ export async function applyMigration(plan, runtime = {}) {
               : "Label change withheld: no open native blocker remains; review the label row.";
       const predictedOpen =
         (live.issueDependenciesSummary?.blockedBy ?? 0) +
-        (entry.steps.edges ? 0 : newEdges.filter((e) => e.state === "OPEN").length);
-      let withheld = entry.steps.labels
-        ? null
-        : withholdReason(predictedOpen, !!live.labels.pageInfo?.hasNextPage);
+        (entry.steps.edges
+          ? 0
+          : // An edge with unknown state (e.g. cross-repository) may be open; real runs re-check live.
+            newEdges.filter((e) => e.state === "OPEN" || e.state == null).length);
+      // The prediction serves dry runs only; a real run decides from a live read after its edges.
+      let withheld =
+        runtime.dryRun && !entry.steps.labels
+          ? withholdReason(predictedOpen, !!live.labels.pageInfo?.hasNextPage)
+          : null;
       const edgeCommands = entry.steps.edges
         ? []
         : newEdges.map((e) => [
@@ -467,7 +473,7 @@ export async function applyMigration(plan, runtime = {}) {
         }
         await recorded("edges");
       }
-      if (!entry.steps.labels && !withheld) {
+      if (!entry.steps.labels) {
         withheld = withholdReason(
           live.issueDependenciesSummary?.blockedBy ?? 0,
           !!live.labels.pageInfo?.hasNextPage,
@@ -478,11 +484,31 @@ export async function applyMigration(plan, runtime = {}) {
           await recorded("labels");
         }
       }
-      const comment = commentCommand();
-      result.commands = planned();
-      if (comment) {
+      // Explain what has changed and not yet been explained: edges once, labels once.
+      const explainEdges = entry.steps.comment ? [] : edges;
+      const explainLabels = entry.steps.labels && labels && !entry.steps.labelComment;
+      if (explainEdges.length || explainLabels) {
+        const comment = [
+          "issue",
+          "comment",
+          String(ticket.number),
+          "--repo",
+          repo,
+          "--body",
+          migrationComment(
+            explainEdges.map(blockerName),
+            explainLabels ? labels.remove : [],
+            explainLabels ? labels.add : [],
+          ),
+        ];
         await write(comment);
-        await recorded("comment");
+        entry.steps.comment = true;
+        if (explainLabels) entry.steps.labelComment = true;
+        await checkpoint();
+      }
+      if (!withheld) {
+        entry.complete = true;
+        await save(journal);
       }
     } catch (error) {
       stopped = !!error?.rateLimited;

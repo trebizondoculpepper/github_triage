@@ -1236,7 +1236,13 @@ describe("dependency migration", () => {
       expect.arrayContaining(["--remove-label", "blocked:work", "--add-label", "status:ready"]),
     );
     expect(env.writes[2].at(-1)).toContain("#2");
-    expect(saved.tickets[1].steps).toEqual({ edges: true, labels: true, comment: true });
+    expect(saved.tickets[1].steps).toEqual({
+      edges: true,
+      labels: true,
+      comment: true,
+      labelComment: true,
+    });
+    expect(saved.tickets[1].complete).toBe(true);
     expect(saved.tickets[1].updatedAt).toBe(env.meta[1].updatedAt);
   });
   it("skips a ticket edited since planning and exits 2", async () => {
@@ -1459,6 +1465,79 @@ describe("dependency migration", () => {
     const real = await apply(p, env);
     expect(real.results[0].status).toBe(dry.results[0].status);
     expect(env.writes).toEqual([]);
+  });
+  it("re-checks live after writing an approved external edge instead of trusting the prediction", async () => {
+    const env = live({
+      issues: {
+        1: {
+          labels: ["status:blocked", "blocked:work"],
+          body: "Depends on #2 and https://github.com/other/repo/issues/5.",
+        },
+        2: {},
+      },
+    });
+    const p = await plan(env);
+    const [external, local] = p.tickets[0].edges;
+    local.status = "review"; // withhold the local edge
+    external.status = "apply"; // approve the external one (state unknown in the plan)
+    const result = await apply(p, env);
+    expect(result.results[0].status).toBe("applied");
+    expect(env.writes.some((w) => w.includes("--add-label") && w.includes("status:ready"))).toBe(
+      true,
+    );
+  });
+  it("keeps a withheld label step resumable until it is done", async () => {
+    const env = live({
+      issues: { 1: { labels: ["status:blocked", "blocked:work"], body: "Depends on #2." }, 2: {} },
+    });
+    const p = await plan(env);
+    let journal: Record<string, any> = {
+      schemaVersion: 1,
+      repository: repo,
+      planId: p.planId,
+      tickets: {},
+    };
+    const save = async (j: Record<string, any>) => void (journal = structuredClone(j));
+    // After planning, GitHub reports no open blocker, so the switch to ready is withheld.
+    const original = env.query;
+    let blockerOpen = false;
+    const query: Query = async (source, variables) => {
+      const data = (await original(source, variables)) as any;
+      const s = data.repository?.issue?.issueDependenciesSummary;
+      if (s && Number(variables.number) === 1 && !blockerOpen) s.blockedBy = 0;
+      return data;
+    };
+    const first = await applyMigration(p, {
+      query,
+      run: env.run,
+      pace: async () => {},
+      journal,
+      saveJournal: save,
+    });
+    expect(first.results[0].status).toBe("skipped");
+    expect(journal.tickets[1].complete).toBeUndefined();
+    expect(journal.tickets[1].steps.labels).toBeUndefined();
+    blockerOpen = true;
+    env.writes.length = 0;
+    const second = await applyMigration(p, {
+      query,
+      run: env.run,
+      pace: async () => {},
+      journal,
+      saveJournal: save,
+    });
+    expect(second.results[0].status).toBe("applied");
+    expect(env.writes.map((w) => w[1])).toEqual(["edit", "comment"]);
+    expect(env.writes[1].at(-1)).toContain("added `status:ready`");
+    expect(env.writes[1].at(-1)).not.toContain("blocked-by");
+    const third = await applyMigration(p, {
+      query,
+      run: env.run,
+      pace: async () => {},
+      journal,
+      saveJournal: save,
+    });
+    expect(third.results[0].status).toBe("done-earlier");
   });
   it("skips edges and labels that already match", async () => {
     const env = live({
