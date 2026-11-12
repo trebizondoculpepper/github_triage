@@ -13,9 +13,15 @@ import {
   depsArgumentsFor,
   main,
 } from "./cli.js";
-import { completeNative, dependencyReport, dependencyText } from "./dependencies.js";
+import {
+  applyDependencyChange,
+  completeNative,
+  dependencyReport,
+  dependencyText,
+  planDependencyChange,
+} from "./dependencies.js";
 import { briefing, dependencyDone, textReport } from "./briefing.js";
-import { collect, declaredDependencies, pages, type Query } from "./github.js";
+import { collect, declaredDependencies, graphqlAnswer, pages, type Query } from "./github.js";
 import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
 
 const repo = "example/project";
@@ -470,6 +476,7 @@ describe("compact briefing contract", () => {
 /** A fake repository of native edges served through the injected gh query boundary. */
 type Graph = {
   states?: Record<number, { state?: string; stateReason?: string | null; body?: string }>;
+  pullRequests?: Record<number, number[]>;
   edges: [blocked: number, blocker: number][];
   pageSize?: number;
 };
@@ -508,6 +515,27 @@ const graphQuery = (graph: Graph) => {
     const number = Number(variables.number);
     const cursor = variables.cursor as string | undefined;
     calls.push({ number, cursor });
+    if (source.includes("issueOrPullRequest")) {
+      if (graph.pullRequests?.[number])
+        return {
+          repository: {
+            issueOrPullRequest: {
+              __typename: "PullRequest",
+              number,
+              url: `https://github.com/${repo}/pull/${number}`,
+              closingIssuesReferences: page(graph.pullRequests[number].map((n) => ({ number: n }))),
+            },
+          },
+        };
+      const known = number in (graph.states ?? {}) || graph.edges.flat().includes(number);
+      return {
+        repository: {
+          issueOrPullRequest: known
+            ? { __typename: "Issue", number, url: url(number), state: state(number) }
+            : null,
+        },
+      };
+    }
     if (!(number in (graph.states ?? {})) && !graph.edges.flat().includes(number))
       return { repository: { issue: null } };
     if (cursor) {
@@ -712,5 +740,170 @@ describe("deps command line", () => {
         },
       }),
     ).rejects.toThrow("GitHub query failed.");
+  });
+});
+
+describe("deps add and deps remove", () => {
+  const writes = () => {
+    const calls: string[][] = [];
+    const run = async (args: string[]) => void calls.push(args);
+    return { calls, run };
+  };
+  const add = (on: number[], number = 1) => ({ action: "add" as const, number, on, note: "why" });
+  it("refuses self-edges, pull requests, missing issues and cycles, and no-ops existing edges", async () => {
+    // 2 is already a blocker of 1; 3 is blocked by 1, so 1 <- 3 would close a cycle.
+    const { query } = graphQuery({
+      states: { 4: {} },
+      edges: [
+        [1, 2],
+        [3, 1],
+      ],
+      pullRequests: { 9: [4] },
+    });
+    const plan = await planDependencyChange(repo, add([1, 2, 3, 9, 77, 4]), query);
+    const byBlocker = Object.fromEntries(plan.changes.map((c) => [c.blocker, c]));
+    expect(byBlocker[1].status).toBe("refused");
+    expect(byBlocker[2]).toMatchObject({ status: "noop", reason: "Already a native blocker." });
+    expect(byBlocker[3].status).toBe("refused");
+    expect(byBlocker[3].reason).toContain("cycle");
+    expect(byBlocker[9].reason).toContain("pull request");
+    expect(byBlocker[9].reason).toContain("#4");
+    expect(byBlocker[77].reason).toContain("does not exist");
+    expect(byBlocker[4]).toMatchObject({
+      status: "apply",
+      command: ["issue", "edit", "1", "--repo", repo, "--add-blocked-by", "4"],
+    });
+  });
+  it("detects a cycle through a longer upstream chain", async () => {
+    // 4 <- 3 <- 2 <- 1: making 1 blocked by 4 closes 1 -> 4 -> 3 -> 2 -> 1.
+    const { query } = graphQuery({
+      edges: [
+        [2, 1],
+        [3, 2],
+        [4, 3],
+      ],
+    });
+    const plan = await planDependencyChange(repo, add([4]), query);
+    expect(plan.changes[0].status).toBe("refused");
+    expect(plan.changes[0].reason.split(" -> ")).toHaveLength(5);
+  });
+  it("applies each edge, posts one comment naming the note, and changes no labels", async () => {
+    const { query } = graphQuery({ states: { 1: {}, 4: {}, 5: {} }, edges: [] });
+    const { calls, run } = writes();
+    const result = await applyDependencyChange(
+      await planDependencyChange(repo, add([4, 5]), query),
+      run,
+    );
+    expect(result.exitCode).toBe(0);
+    expect(calls.map((c) => c.slice(0, 2).join(" "))).toEqual([
+      "issue edit",
+      "issue edit",
+      "issue comment",
+    ]);
+    expect(calls[2].at(-1)).toContain("#4, #5");
+    expect(calls[2].at(-1)).toContain("Why: why");
+    expect(calls.flat().some((arg) => /^--(?:add|remove)-label$/.test(arg))).toBe(false);
+  });
+  it("reports partial failure with exit 2 and comments only on what changed", async () => {
+    const { query } = graphQuery({ states: { 1: {}, 4: {}, 5: {} }, edges: [] });
+    const calls: string[][] = [];
+    const run = async (args: string[]) => {
+      calls.push(args);
+      if (args.includes("5")) throw new Error("gh issue edit failed.");
+    };
+    const result = await applyDependencyChange(
+      await planDependencyChange(repo, add([4, 5]), query),
+      run,
+    );
+    expect(result.exitCode).toBe(2);
+    expect(result.changes.map((c) => c.status)).toEqual(["done", "failed"]);
+    expect(calls.at(-1)?.at(-1)).toContain("dependency: #4.");
+  });
+  it("exits 1 when nothing could be done and 0 for a pure no-op, with no comment either way", async () => {
+    const { query } = graphQuery({ edges: [[1, 2]] });
+    const { calls, run } = writes();
+    const refused = await applyDependencyChange(
+      await planDependencyChange(repo, add([1]), query),
+      run,
+    );
+    const noop = await applyDependencyChange(
+      await planDependencyChange(repo, add([2]), query),
+      run,
+    );
+    expect([refused.exitCode, noop.exitCode]).toEqual([1, 0]);
+    expect(calls).toEqual([]);
+  });
+  it("removes only existing edges", async () => {
+    const { query } = graphQuery({ states: { 3: {} }, edges: [[1, 2]] });
+    const plan = await planDependencyChange(
+      repo,
+      { action: "remove", number: 1, on: [2, 3], note: "done differently" },
+      query,
+    );
+    expect(plan.changes.map((c) => c.status)).toEqual(["apply", "noop"]);
+    expect(plan.changes[0].command).toContain("--remove-blocked-by");
+  });
+  it("dry run prints the exact commands and comment and calls no write", async () => {
+    const { query } = graphQuery({ states: { 1: {}, 4: {} }, edges: [] });
+    const { calls, run } = writes();
+    let text = "";
+    const runtime = {
+      collect: async () => {
+        throw new Error("briefing collection must not run");
+      },
+      currentRepository: async () => repo,
+      planDependencyChange: (r: string, request: Parameters<typeof planDependencyChange>[1]) =>
+        planDependencyChange(r, request, query),
+      ghRun: run,
+    };
+    const code = await main(
+      ["deps", "add", "1", "--on", "4", "--note", "needs the parser", "--dry-run"],
+      async (t) => void (text = t),
+      runtime,
+    );
+    expect(code).toBe(0);
+    expect(calls).toEqual([]);
+    expect(text).toContain("DRY RUN");
+    expect(text).toContain(`gh issue edit 1 --repo ${repo} --add-blocked-by 4`);
+    expect(text).toContain("Why: needs the parser");
+  });
+  it("validates add/remove arguments", () => {
+    expect(depsArgumentsFor(["add", "1", "--on", "2", "--on", "3", "--note", " x "])).toMatchObject(
+      {
+        action: "add",
+        number: 1,
+        on: [2, 3],
+        note: "x",
+        dryRun: false,
+      },
+    );
+    for (const bad of [
+      ["add", "1", "--note", "x"],
+      ["add", "1", "--on", "2"],
+      ["add", "1", "--on", "2", "--note", "  "],
+      ["add", "1", "--on", "abc", "--note", "x"],
+      ["remove", "--on", "2", "--note", "x"],
+      ["add", "1", "--on", "2", "--note", "x", "--tree"],
+      ["7", "--on", "2"],
+    ])
+      expect(() => depsArgumentsFor(bad)).toThrow();
+  });
+});
+
+describe("GraphQL NOT_FOUND answers", () => {
+  it("treats NOT_FOUND-only errors as a valid null answer and anything else as failure", () => {
+    const missing = JSON.stringify({
+      data: { repository: { issueOrPullRequest: null } },
+      errors: [{ type: "NOT_FOUND", message: "Could not resolve" }],
+    });
+    expect(graphqlAnswer(missing)).toEqual({ repository: { issueOrPullRequest: null } });
+    const forbidden = JSON.stringify({
+      data: { repository: null },
+      errors: [{ type: "NOT_FOUND" }, { type: "FORBIDDEN" }],
+    });
+    expect(graphqlAnswer(forbidden)).toBeNull();
+    expect(graphqlAnswer(JSON.stringify({ data: {}, errors: [] }))).toBeNull();
+    expect(graphqlAnswer("not json")).toBeNull();
+    expect(graphqlAnswer(undefined)).toBeNull();
   });
 });
