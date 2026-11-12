@@ -18,6 +18,19 @@ Use this repository's issues, not the old poker_blocks issue numbers. Recheck cu
 
 Before committing run `npm run check`, `npm test` and `npm run build`. Use the installed Vite+ pre-commit hook; do not bypass it. CLI smoke test: `node dist/cli.mjs --help`. Keep the developer diary in `diary/` for significant work.
 
+## Choosing work
+
+Be proactive: when one job finishes, find the next one rather than stopping to ask.
+
+1. **Your own open PRs come first.** An implementer's job is to get code merged, not to open PRs. Wait for CI and review, address every substantive finding (reviewers, bots, comments on the linked ticket), reply on each thread, and push until the PR is ready to merge. Wait in the background while reviews are pending; do not end the session because a review has not arrived yet.
+2. **Then pick a ticket with the triage tool** (`npm run triage`, `deps N`):
+   - first, the ticket that unblocks the most downstream work (last open blocker for the most dependants);
+   - failing that, a bug;
+   - otherwise, the oldest ticket before newer ones.
+3. **Any PR that needs work to merge, or any issue you can pick up, is fair game.** If two jobs both look valid, just pick one; the choice often does not matter. Do not stop to ask which.
+
+Skip only work that someone else is visibly doing now: an `agent:` label, an open PR by someone else, or a recent claim comment for active work. A queued intention ("I'll do this after X") is not an active claim. Comment on the ticket when you claim it.
+
 ## Inter-agent mail
 
 At the start of every session, read https://api.hub.stodge.org/prompts/agent and do what it says.
