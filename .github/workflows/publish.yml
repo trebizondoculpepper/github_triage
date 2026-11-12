@@ -4,13 +4,18 @@ name: Publish
 on:
   push:
     branches: [main, release]
+  # Re-run a release whose run was lost or failed (npm run release does this when release
+  # already matches main). Only the release branch is accepted; see "Choose channel".
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-# Serialize publication; never cancel a run that may already be publishing.
+# One queue per branch, never cancelling a run that may already be publishing. GitHub keeps
+# only one pending run per group, so main pushes replace only older pending main runs (only
+# main's head publishes anyway) and can never cancel a pending official release.
 concurrency:
-  group: npm-publish
+  group: npm-publish-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -43,6 +48,9 @@ jobs:
         id: channel
         run: |
           git fetch --no-tags origin main
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$GITHUB_REF_NAME" != "release" ]; then
+            echo "::error::Manual runs are only for the release branch."; exit 1
+          fi
           if [ "$GITHUB_REF_NAME" = "release" ]; then
             git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
               || { echo "::error::The release commit is not on main."; exit 1; }

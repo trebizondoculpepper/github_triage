@@ -16,7 +16,19 @@ if (git("ls-remote", "--heads", "origin", "release")) {
   release = git("rev-parse", "origin/release");
 }
 if (release === main) {
-  console.log(`release already points at origin/main (${main.slice(0, 7)}); nothing to do.`);
+  // The earlier publish run may have been lost or failed: request it again. A commit that is
+  // already published is recognised by the workflow and not republished.
+  try {
+    execFileSync("gh", ["workflow", "run", "publish.yml", "--ref", "release"], {
+      stdio: "inherit",
+    });
+    console.log(`release already points at ${main.slice(0, 7)}; re-requested its Publish run.`);
+  } catch {
+    console.error(
+      `release already points at ${main.slice(0, 7)}. To retry its publication, run: gh workflow run publish.yml --ref release`,
+    );
+    process.exit(1);
+  }
   process.exit(0);
 }
 if (release) {
