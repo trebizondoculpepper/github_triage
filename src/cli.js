@@ -11,7 +11,7 @@ import { briefing, textReport } from "./briefing.js";
 
 export const help = `Usage: npm run triage -- [options]
 Read-only LLM action briefing. Requires authenticated gh and Node 20+.
-  deps N [--tree]       Read native upstream/downstream dependencies
+  deps N [--tree]       Read native upstream/downstream dependencies (deps --help)
   --repo owner/name     Repository (default: current gh checkout)
   --json                Versioned structured output (use npm run --silent triage)
   --issue N             Include full issue body/history, even if closed
@@ -27,6 +27,41 @@ Read-only LLM action briefing. Requires authenticated gh and Node 20+.
 Exit: 0 complete; 2 incomplete evidence; 1 invalid arguments/API/cache failure.
 No GitHub mutations. Question/dependency hints require inspection, not blind action.
 `;
+export const depsHelp = `Usage: npm run triage -- deps N [--tree] [--json] [--repo owner/name]
+Read-only native GitHub issue dependencies for issue N.
+  --tree                Follow blockers and dependants transitively; report cycles
+  --json                Versioned structured output (use npm run --silent triage)
+  --repo owner/name     Repository (default: current gh checkout)
+  --help                Show usage
+Exit: 0 report printed; 1 invalid arguments/API failure.
+No GitHub mutations. deps add/remove and migrate are not implemented yet.
+`;
+/**
+ * @param {string[]} args
+ * @returns {{ number?: number, repo?: string, json?: boolean, tree?: boolean, help?: boolean }}
+ */
+export function depsArgumentsFor(args) {
+  const { values, positionals } = parseArgs({
+    args,
+    allowPositionals: true,
+    options: {
+      repo: { type: "string" },
+      json: { type: "boolean" },
+      tree: { type: "boolean" },
+      help: { type: "boolean" },
+    },
+  });
+  if (values.help) return { help: true };
+  if (
+    positionals.length !== 1 ||
+    !/^[1-9]\d*$/.test(positionals[0]) ||
+    !Number.isSafeInteger(Number(positionals[0]))
+  )
+    throw new Error("Usage: deps N [--tree] [--json] [--repo owner/name]");
+  if (values.repo && !/^[\w.-]+\/[\w.-]+$/.test(values.repo))
+    throw new Error("--repo must be owner/name.");
+  return { ...values, number: Number(positionals[0]) };
+}
 export function argumentsFor(args) {
   const { values } = parseArgs({
     args,
@@ -109,7 +144,7 @@ export async function checkpointSince(path, repository) {
 /**
  * @param {string[]} args
  * @param {(text: string) => Promise<void>} [output]
- * @param {{collect: typeof collect, currentRepository: typeof currentRepository}} [runtime]
+ * @param {{collect: typeof collect, currentRepository: typeof currentRepository, dependencyReport?: typeof dependencyReport}} [runtime]
  * @returns {Promise<number>}
  */
 export async function main(
@@ -118,28 +153,18 @@ export async function main(
     new Promise((resolve, reject) =>
       process.stdout.write(text, (error) => (error ? reject(error) : resolve())),
     ),
-  runtime = { collect, currentRepository },
+  runtime = { collect, currentRepository, dependencyReport },
 ) {
   if (args[0] === "deps") {
-    const { values, positionals } = parseArgs({
-      args: args.slice(1),
-      allowPositionals: true,
-      options: {
-        repo: { type: "string" },
-        json: { type: "boolean" },
-        tree: { type: "boolean" },
-      },
-    });
-    if (
-      positionals.length !== 1 ||
-      !/^[1-9]\d*$/.test(positionals[0]) ||
-      !Number.isSafeInteger(Number(positionals[0]))
-    )
-      throw new Error("Usage: deps N [--tree] [--json] [--repo owner/name]");
+    const values = depsArgumentsFor(args.slice(1));
+    if (values.help) {
+      await output(depsHelp);
+      return 0;
+    }
     const repository = values.repo ?? (await runtime.currentRepository());
     if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error("--repo must be owner/name.");
-    const report = await dependencyReport(repository, Number(positionals[0]), {
-      tree: values.tree,
+    const report = await (runtime.dependencyReport ?? dependencyReport)(repository, values.number, {
+      tree: !!values.tree,
     });
     await output(values.json ? JSON.stringify(report, null, 2) + "\n" : dependencyText(report));
     return 0;

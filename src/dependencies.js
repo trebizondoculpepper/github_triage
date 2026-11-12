@@ -34,15 +34,21 @@ export const nativeKnown = (item) =>
   !!item.issueDependenciesSummary && !!item.blockedBy && !!item.blocking;
 export const pickable = (item) =>
   nativeKnown(item) && item.issueDependenciesSummary.blockedBy === 0;
+/** How many open dependants this open ticket is the last open blocker for. */
 export const unblocks = (item) =>
-  (item.blocking?.nodes ?? []).filter(
-    (n) =>
-      n.state === "OPEN" && n.issueDependenciesSummary?.blockedBy === 1 && item.state === "OPEN",
-  ).length;
+  item?.state === "OPEN"
+    ? (item.blocking?.nodes ?? []).filter(
+        (n) => n.state === "OPEN" && n.issueDependenciesSummary?.blockedBy === 1,
+      ).length
+    : 0;
 export const dependencyDrift = (item, repository) =>
   declaredDependencies(item.body, repository).filter(
     (ref) => !(item.blockedBy?.nodes ?? []).some((n) => n.url === ref.url),
   );
+/**
+ * @param {import("./types.js").Issue} item
+ * @param {string} repository
+ */
 export function dependencyFacts(item, repository) {
   const known = nativeKnown(item);
   const blockers = item.blockedBy?.nodes ?? [];
@@ -84,51 +90,62 @@ export async function readDependencyIssue(repository, number, query = ghQuery) {
     throw new Error(`Issue #${number} unavailable; pull requests cannot be native blockers.`);
   return completeNative(item, repository, query);
 }
-export async function dependencyReport(repository, number, { tree = false } = {}, query = ghQuery) {
-  const startedAt = new Date().toISOString();
+/**
+ * Read one ticket's native dependencies; with `tree`, walk upstream and downstream
+ * transitively, reading each ticket once, and report upstream (blocked-by) cycles.
+ * @param {string} repository
+ * @param {number} number
+ * @param {{ tree?: boolean }} [options]
+ * @param {import("./github.js").Query} [query]
+ * @param {() => Date} [now]
+ */
+export async function dependencyReport(
+  repository,
+  number,
+  { tree = false } = {},
+  query = ghQuery,
+  now = () => new Date(),
+) {
+  const startedAt = now().toISOString();
+  /** @type {Map<string, ReturnType<typeof dependencyFacts>>} */
   const nodes = new Map();
-  const visiting = new Set();
-  const cycles = [];
-  async function visit(repo, n, path = []) {
+  /** @type {[string, number][]} */
+  const pending = [[repository, number]];
+  while (pending.length) {
+    const [repo, n] = pending.shift();
     const key = `${repo}#${n}`;
-    if (visiting.has(key)) {
-      cycles.push([...path, key]);
-      return;
-    }
-    if (nodes.has(key)) return;
+    if (nodes.has(key)) continue;
     const item = await readDependencyIssue(repo, n, query);
     nodes.set(key, dependencyFacts(item, repo));
-    if (!tree) return;
-    visiting.add(key);
-    for (const ref of [...item.blockedBy.nodes, ...item.blocking.nodes]) {
-      // Walk both directions for context; cycle detection uses upstream edges only below.
-      const refRepo = ref.repository.nameWithOwner;
-      if (!nodes.has(`${refRepo}#${ref.number}`)) await visit(refRepo, ref.number, []);
-    }
-    visiting.delete(key);
+    if (tree)
+      for (const ref of [...item.blockedBy.nodes, ...item.blocking.nodes])
+        pending.push([ref.repository.nameWithOwner, ref.number]);
   }
-  await visit(repository, number);
-  // Directed DFS distinguishes a dependency cycle from a normal reverse relationship.
+  // Directed DFS over blocked-by edges: a reverse (blocking) relationship is not a cycle.
+  const byUrl = new Map([...nodes.values()].map((node) => [node.url, node]));
+  /** @type {string[][]} */
+  const cycles = [];
   const done = new Set();
-  const stack = new Set();
-  function detect(url, path = []) {
-    if (stack.has(url)) {
-      cycles.push([...path, url]);
+  /** @type {string[]} */
+  const stack = [];
+  function detect(url) {
+    const at = stack.indexOf(url);
+    if (at >= 0) {
+      cycles.push([...stack.slice(at), url]);
       return;
     }
     if (done.has(url)) return;
-    stack.add(url);
-    const node = [...nodes.values()].find((n) => n.url === url);
-    for (const ref of node?.upstream ?? []) detect(ref.url, [...path, url]);
-    stack.delete(url);
+    stack.push(url);
+    for (const ref of byUrl.get(url)?.upstream ?? []) detect(ref.url);
+    stack.pop();
     done.add(url);
   }
-  if (tree) for (const node of nodes.values()) detect(node.url);
+  if (tree) for (const url of byUrl.keys()) detect(url);
   return {
     schemaVersion: 1,
     repository,
     startedAt,
-    fetchedAt: new Date().toISOString(),
+    fetchedAt: now().toISOString(),
     tree,
     nodes: [...nodes.values()],
     cycles,

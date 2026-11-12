@@ -5,7 +5,15 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { argumentsFor, atomicJson, cachedSnapshot, checkpointSince, main } from "./cli.js";
+import {
+  argumentsFor,
+  atomicJson,
+  cachedSnapshot,
+  checkpointSince,
+  depsArgumentsFor,
+  main,
+} from "./cli.js";
+import { completeNative, dependencyReport, dependencyText } from "./dependencies.js";
 import { briefing, dependencyDone, textReport } from "./briefing.js";
 import { collect, declaredDependencies, pages, type Query } from "./github.js";
 import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
@@ -456,5 +464,253 @@ describe("compact briefing contract", () => {
         throw new Error("failed");
       }),
     ).rejects.toThrow("failed");
+  });
+});
+
+/** A fake repository of native edges served through the injected gh query boundary. */
+type Graph = {
+  states?: Record<number, { state?: string; stateReason?: string | null; body?: string }>;
+  edges: [blocked: number, blocker: number][];
+  pageSize?: number;
+};
+const graphQuery = (graph: Graph) => {
+  const calls: { number: number; cursor?: string }[] = [];
+  const url = (n: number) => `https://github.com/${repo}/issues/${n}`;
+  const state = (n: number) => graph.states?.[n]?.state ?? "OPEN";
+  const blockersOf = (n: number) => graph.edges.filter(([a]) => a === n).map(([, b]) => b);
+  const dependantsOf = (n: number) => graph.edges.filter(([, b]) => b === n).map(([a]) => a);
+  const summary = (n: number) => ({
+    blockedBy: blockersOf(n).filter((b) => state(b) === "OPEN").length,
+    totalBlockedBy: blockersOf(n).length,
+    blocking: dependantsOf(n).filter(() => state(n) === "OPEN").length,
+    totalBlocking: dependantsOf(n).length,
+  });
+  const node = (n: number) => ({
+    number: n,
+    title: `Ticket ${n}`,
+    state: state(n),
+    stateReason: graph.states?.[n]?.stateReason ?? null,
+    url: url(n),
+    repository: { nameWithOwner: repo },
+    issueDependenciesSummary: summary(n),
+  });
+  const size = graph.pageSize ?? 100;
+  const connection = (numbers: number[], cursor?: string) => {
+    const start = cursor ? Number(cursor) : 0;
+    const more = start + size < numbers.length;
+    return page(
+      numbers.slice(start, start + size).map(node),
+      more,
+      more ? String(start + size) : null,
+    );
+  };
+  const query: Query = async (source, variables) => {
+    const number = Number(variables.number);
+    const cursor = variables.cursor as string | undefined;
+    calls.push({ number, cursor });
+    if (!(number in (graph.states ?? {})) && !graph.edges.flat().includes(number))
+      return { repository: { issue: null } };
+    if (cursor) {
+      const field = /blockedBy\(first:100,after/.test(source) ? "blockedBy" : "blocking";
+      const numbers = field === "blockedBy" ? blockersOf(number) : dependantsOf(number);
+      return { repository: { issue: { [field]: connection(numbers, cursor) } } };
+    }
+    return {
+      repository: {
+        issue: {
+          ...node(number),
+          body: graph.states?.[number]?.body ?? "",
+          updatedAt: time,
+          labels: page([]),
+          blockedBy: connection(blockersOf(number)),
+          blocking: connection(dependantsOf(number)),
+        },
+      },
+    };
+  };
+  return { query, calls, url };
+};
+const clock = () => new Date(time);
+
+describe("native dependency read command", () => {
+  it("follows nested blockedBy and blocking pages until the summary totals match", async () => {
+    const edges: [number, number][] = [2, 3, 4].map((b) => [1, b]);
+    edges.push([5, 1], [6, 1]);
+    const { query, calls } = graphQuery({ edges, pageSize: 2 });
+    const report = await dependencyReport(repo, 1, {}, query, clock);
+    expect(report.nodes[0].upstream.map((n) => n.number)).toEqual([2, 3, 4]);
+    expect(report.nodes[0].downstream.map((n) => n.number)).toEqual([5, 6]);
+    expect(calls.filter((call) => call.cursor)).toHaveLength(1);
+  });
+  it("rejects missing native evidence and a page total that disagrees with the summary", async () => {
+    const item = issue();
+    await expect(
+      completeNative({ ...item, blockedBy: undefined } as unknown as Issue, repo),
+    ).rejects.toThrow("Native dependency evidence missing");
+    item.issueDependenciesSummary!.totalBlockedBy = 2;
+    await expect(completeNative(item, repo, async () => ({}))).rejects.toThrow(
+      "count changed or is incomplete",
+    );
+  });
+  it("reports a missing issue or pull request as unavailable rather than empty", async () => {
+    const { query } = graphQuery({ edges: [[1, 2]] });
+    await expect(dependencyReport(repo, 99, {}, query, clock)).rejects.toThrow(
+      "pull requests cannot be native blockers",
+    );
+  });
+  it("walks both directions once each and reports only blocked-by cycles", async () => {
+    // 1 <- 2 <- 3 <- 1 is a cycle; 4 is merely downstream of 1.
+    const { query, calls } = graphQuery({
+      edges: [
+        [1, 2],
+        [2, 3],
+        [3, 1],
+        [4, 1],
+      ],
+    });
+    const single = await dependencyReport(repo, 1, {}, query, clock);
+    expect(single.nodes.map((n) => n.number)).toEqual([1]);
+    expect(single.cycles).toEqual([]);
+    calls.length = 0;
+    const tree = await dependencyReport(repo, 4, { tree: true }, query, clock);
+    expect(tree.nodes.map((n) => n.number).sort((a, b) => a - b)).toEqual([1, 2, 3, 4]);
+    expect(calls.map((c) => c.number).sort((a, b) => a - b)).toEqual([1, 2, 3, 4]);
+    expect(tree.cycles).toHaveLength(1);
+    expect(new Set(tree.cycles[0]).size).toBe(3);
+    expect(dependencyText(tree)).toContain("CYCLE:");
+  });
+  it("does not call an ordinary reverse relationship a cycle", async () => {
+    const { query } = graphQuery({ edges: [[2, 1]] });
+    const tree = await dependencyReport(repo, 1, { tree: true }, query, clock);
+    expect(tree.nodes).toHaveLength(2);
+    expect(tree.cycles).toEqual([]);
+  });
+  it("gives verdicts for waiting, not-planned blockers, last-open-blocker dependants and drift", async () => {
+    const { query, url } = graphQuery({
+      states: {
+        1: { body: "Depends on #2 and #9." },
+        3: { state: "CLOSED", stateReason: "NOT_PLANNED" },
+      },
+      edges: [
+        [1, 2],
+        [5, 1],
+        [6, 1],
+        [6, 7],
+        [8, 3],
+      ],
+    });
+    const waiting = (await dependencyReport(repo, 1, {}, query, clock)).nodes[0];
+    expect(waiting.verdict).toBe(`Waiting on ${url(2)}`);
+    expect(waiting.downstream.map((n) => [n.number, n.lastOpenBlocker])).toEqual([
+      [5, true],
+      [6, false],
+    ]);
+    expect(waiting.drift.map((ref) => ref.number)).toEqual([9]);
+    const notPlanned = (await dependencyReport(repo, 8, {}, query, clock)).nodes[0];
+    expect(notPlanned.verdict).toContain("closed as not planned");
+    const free = (await dependencyReport(repo, 7, {}, query, clock)).nodes[0];
+    expect(free.verdict).toContain("No open native blockers");
+  });
+});
+
+describe("native dependencies in the briefing", () => {
+  const blocking = (from: Issue, dependants: number[]) => {
+    from.issueDependenciesSummary!.blocking = dependants.length;
+    from.issueDependenciesSummary!.totalBlocking = dependants.length;
+    from.blocking = page(
+      dependants.map((n) => ({
+        ...issue(n),
+        repository: { nameWithOwner: repo },
+        issueDependenciesSummary: {
+          blockedBy: 1,
+          totalBlockedBy: 1,
+          blocking: 0,
+          totalBlocking: 0,
+        },
+      })),
+    );
+  };
+  it("ranks pickup by the number of dependants left without an open blocker", () => {
+    const low = issue(1);
+    const high = issue(2);
+    const blocked = issue(3);
+    blocking(high, [3, 4]);
+    blocked.issueDependenciesSummary!.blockedBy = 1;
+    blocked.issueDependenciesSummary!.totalBlockedBy = 1;
+    const report = brief(snapshot([low, high, blocked], []));
+    expect(report.ready.items.map((i) => i.number)).toEqual([2, 1]);
+    const pickup = report.actions.items.filter((a) => a.rule === "ready-unclaimed");
+    expect(pickup.map((a) => a.target)).toEqual([high.url, low.url]);
+  });
+  it("marks a cache without native fields incomplete instead of treating tickets as unblocked", async () => {
+    const old = issue() as Partial<Issue>;
+    delete old.blockedBy;
+    delete old.blocking;
+    delete old.issueDependenciesSummary;
+    const report = brief(snapshot([old as Issue], []));
+    expect(report.completeness.complete).toBe(false);
+    expect(report.completeness.warnings[0]).toContain("native dependency evidence missing");
+    expect(report.ready.items).toEqual([]);
+    expect(report.actions.items.map((a) => a.rule)).toContain("native-evidence-unknown");
+    const dir = await mkdtemp(join(tmpdir(), "triage-old-cache-"));
+    try {
+      const cache = join(dir, "cache.json");
+      await atomicJson(cache, snapshot([old as Issue], []));
+      expect(await main(["--offline", "--cache", cache, "--json"], async () => {})).toBe(2);
+      // Many old tickets: compact text bounds the warnings; JSON keeps every one.
+      const many = Array.from({ length: 40 }, (_, i) => ({
+        ...old,
+        number: i + 1,
+        url: issue(i + 1).url,
+      }));
+      await atomicJson(cache, snapshot(many as Issue[], []));
+      let text = "";
+      let json = "";
+      await main(
+        ["--offline", "--cache", cache, "--max-chars", "2000"],
+        async (t) => void (text = t),
+      );
+      await main(["--offline", "--cache", cache, "--json"], async (t) => void (json = t));
+      expect(text.match(/^INCOMPLETE: /gm)).toHaveLength(6);
+      expect(text).toContain("35 more warning(s) omitted");
+      expect(JSON.parse(json).completeness.warnings).toHaveLength(40);
+    } finally {
+      await rm(dir, { recursive: true });
+    }
+  });
+});
+
+describe("deps command line", () => {
+  it("validates arguments and prints its own help", async () => {
+    expect(depsArgumentsFor(["7", "--tree"])).toMatchObject({ number: 7, tree: true });
+    for (const bad of [[], ["0"], ["1", "2"], ["x"], ["1", "--repo", "nope"], ["1", "--bogus"]])
+      expect(() => depsArgumentsFor(bad)).toThrow();
+    let text = "";
+    expect(await main(["deps", "--help"], async (t) => void (text = t))).toBe(0);
+    expect(text).toMatch(/^Usage: .*deps N/);
+  });
+  it("reads through the injected runtime and never collects the full briefing", async () => {
+    const { query } = graphQuery({ edges: [[1, 2]] });
+    let text = "";
+    const runtime = {
+      collect: async () => {
+        throw new Error("briefing collection must not run");
+      },
+      currentRepository: async () => repo,
+      dependencyReport: (r: string, n: number, o?: { tree?: boolean }) =>
+        dependencyReport(r, n, o, query, clock),
+    };
+    expect(await main(["deps", "1", "--json"], async (t) => void (text = t), runtime)).toBe(0);
+    const report = JSON.parse(text);
+    expect(report).toMatchObject({ schemaVersion: 1, repository: repo, startedAt: time });
+    expect(report.nodes[0].upstream[0].number).toBe(2);
+    await expect(
+      main(["deps", "1"], async () => {}, {
+        ...runtime,
+        dependencyReport: async () => {
+          throw new Error("GitHub query failed.");
+        },
+      }),
+    ).rejects.toThrow("GitHub query failed.");
   });
 });

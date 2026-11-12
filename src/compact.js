@@ -1,5 +1,6 @@
 /** Compact presentation of the registered findings; contract #698. */
 import { owners, excerpt } from "./briefing.js";
+import { unblocks } from "./dependencies.js";
 
 export const ruleMetadata = new Map([
   ...["ownership-conflict", "readiness-inconsistent", "claimed-ready"].map((key) => [
@@ -99,12 +100,7 @@ export function compactBriefing(snapshot, options, expanded) {
       (a, b) =>
         Number(linkedMine(byUrl.get(b.target))) - Number(linkedMine(byUrl.get(a.target))) ||
         b.findings[0].priority - a.findings[0].priority ||
-        (byUrl.get(b.target)?.blocking?.nodes ?? []).filter(
-          (n) => n.state === "OPEN" && n.issueDependenciesSummary?.blockedBy === 1,
-        ).length -
-          (byUrl.get(a.target)?.blocking?.nodes ?? []).filter(
-            (n) => n.state === "OPEN" && n.issueDependenciesSummary?.blockedBy === 1,
-          ).length ||
+        unblocks(byUrl.get(b.target)) - unblocks(byUrl.get(a.target)) ||
         a.target.localeCompare(b.target),
     );
   const sections = Object.fromEntries(
@@ -209,7 +205,15 @@ export function compactText(report, maxChars = 10000) {
   };
   add("NEXT STEPS", report.actions);
   for (const [name, section] of Object.entries(report.sections)) add(name.toUpperCase(), section);
-  for (const warning of report.completeness.warnings) lines.push(`INCOMPLETE: ${warning}`);
+  // Warnings are always shown, but bounded so they cannot exhaust the text budget alone;
+  // JSON output keeps the full list.
+  const warnings = report.completeness.warnings;
+  const shownWarnings = 5;
+  for (const warning of warnings.slice(0, shownWarnings)) lines.push(`INCOMPLETE: ${warning}`);
+  if (warnings.length > shownWarnings)
+    lines.push(
+      `INCOMPLETE: ${warnings.length - shownWarnings} more warning(s) omitted; use --json for all.`,
+    );
   const notice =
     "\nMore context omitted by text budget; use --json, --full, --issue N or --max-chars.\n";
   for (const row of rows) {
