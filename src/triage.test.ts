@@ -1313,6 +1313,10 @@ describe("dependency migration", () => {
     ]);
     expect(clauseFor("Depends on #1, optionally #2, #3.", 3)).toMatch(/optionally/);
     expect(clauseFor("Depends on #1, optionally #2, #3.", 1)).not.toMatch(/optionally/);
+    const markdown =
+      "Depends on #2; optionally #3, `#4`, **#5**, [#6](https://github.com/example/project/issues/6).";
+    for (const n of [4, 5, 6]) expect(clauseFor(markdown, n)).toMatch(/optionally/);
+    expect(clauseFor(markdown, 2)).not.toMatch(/optionally/);
   });
   it("judges each reference by its own clause when numbers repeat across repositories", async () => {
     const env = live({

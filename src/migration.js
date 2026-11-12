@@ -38,7 +38,8 @@ export function clauseFor(context, ref) {
     !part
       .replace(/https:\/\/github\.com\/[^\s)\]]+|#\d+\b/g, "")
       .replace(/\b(?:and|or)\b/gi, "")
-      .replace(/[\s.!?:()]/g, "");
+      // Markdown around references (`#4`, **#4**, [#4](...)) is formatting, not words.
+      .replace(/[\s.!?:()`*_[\]]/g, "");
   while (at > 0 && onlyReferences(parts[at])) at--;
   return parts.slice(at, end + 1).join(",");
 }
