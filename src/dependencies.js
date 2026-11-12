@@ -244,7 +244,12 @@ export function commentFor(action, blockers, note) {
 export async function planDependencyChange(repository, request, query = ghQuery) {
   const { action, number, note } = request;
   const target = await readDependencyIssue(repository, number, query);
-  const existing = new Set(target.blockedBy.nodes.map((n) => n.number));
+  // --on numbers name issues in this repository; ignore same-numbered cross-repository blockers.
+  const existing = new Set(
+    target.blockedBy.nodes
+      .filter((n) => n.repository?.nameWithOwner === repository)
+      .map((n) => n.number),
+  );
   const flag = action === "add" ? "--add-blocked-by" : "--remove-blocked-by";
   const changes = [];
   for (const on of new Set(request.on)) {

@@ -833,6 +833,42 @@ describe("deps add and deps remove", () => {
     expect([refused.exitCode, noop.exitCode]).toEqual([1, 0]);
     expect(calls).toEqual([]);
   });
+  it("does not confuse a same-numbered blocker in another repository with a local one", async () => {
+    const { query } = graphQuery({ states: { 1: {}, 5: {} }, edges: [] });
+    const crossRepo: Query = async (source, variables) => {
+      const data = (await query(source, variables)) as {
+        repository: { issue?: Record<string, unknown> };
+      };
+      const issue = data.repository.issue as
+        | { number: number; blockedBy?: unknown; issueDependenciesSummary?: Record<string, number> }
+        | undefined;
+      if (issue?.number === 1 && issue.blockedBy && !variables.cursor) {
+        issue.blockedBy = page([
+          {
+            ...issue,
+            number: 5,
+            url: "https://github.com/other/repo/issues/5",
+            repository: { nameWithOwner: "other/repo" },
+          },
+        ]);
+        issue.issueDependenciesSummary = {
+          blockedBy: 1,
+          totalBlockedBy: 1,
+          blocking: 0,
+          totalBlocking: 0,
+        };
+      }
+      return data;
+    };
+    const remove = await planDependencyChange(
+      repo,
+      { action: "remove", number: 1, on: [5], note: "x" },
+      crossRepo,
+    );
+    expect(remove.changes[0].status).toBe("noop");
+    const addLocal = await planDependencyChange(repo, add([5]), crossRepo);
+    expect(addLocal.changes[0].status).toBe("apply");
+  });
   it("removes only existing edges", async () => {
     const { query } = graphQuery({ states: { 3: {} }, edges: [[1, 2]] });
     const plan = await planDependencyChange(
