@@ -232,7 +232,7 @@ export function migrationComment(blockers, removed, added) {
 async function readTicket(repository, number, query) {
   const [owner, name] = repository.split("/");
   const data = await query(
-    `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){number updatedAt labels(first:100){nodes{name}} blockedBy(first:100){nodes{number repository{nameWithOwner}}}}}}`,
+    `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){number updatedAt labels(first:100){nodes{name}} issueDependenciesSummary{blockedBy} blockedBy(first:100){nodes{number repository{nameWithOwner}}}}}}`,
     { owner, name, number },
   );
   const issue = data.repository?.issue;
@@ -302,13 +302,15 @@ export async function applyMigration(plan, runtime = {}) {
         });
         continue;
       }
+      const checkpoint = async () => {
+        if (runtime.dryRun) return;
+        live = await readTicket(repo, ticket.number, query);
+        entry.updatedAt = live.updatedAt;
+        await save(journal);
+      };
       const recorded = async (step) => {
         entry.steps[step] = true;
-        if (!runtime.dryRun) {
-          live = await readTicket(repo, ticket.number, query);
-          entry.updatedAt = live.updatedAt;
-          await save(journal);
-        }
+        await checkpoint();
       };
       const nativeNow = new Set(
         live.blockedBy.nodes
@@ -364,10 +366,42 @@ export async function applyMigration(plan, runtime = {}) {
         continue;
       }
       if (!entry.steps.edges) {
-        for (let i = 0; i < newEdges.length; i++) await write(commands.shift());
+        for (let i = 0; i < newEdges.length; i++) {
+          await write(commands.shift());
+          // Checkpoint after every write, so a later failure cannot leave our own edit
+          // looking like someone else's change to the guard on the next run.
+          await checkpoint();
+        }
         await recorded("edges");
       }
       if (!entry.steps.labels) {
+        // Making a ticket ready relies on GitHub keeping it Blocked: re-check live, so a
+        // reviewer withholding its supporting edge cannot turn missing evidence into pickup.
+        const makesReady = add.includes(workflow.ready) || remove.includes(workflow.blocked);
+        if (makesReady && !(live.issueDependenciesSummary?.blockedBy > 0)) {
+          Object.assign(result, {
+            status: "skipped",
+            reason: "Label change withheld: no open native blocker remains; review the label row.",
+          });
+          if (edges.length) {
+            // Still explain the edges that were recorded; claim no label change.
+            await write([
+              "issue",
+              "comment",
+              String(ticket.number),
+              "--repo",
+              repo,
+              "--body",
+              migrationComment(
+                edges.map((e) => e.blocker),
+                [],
+                [],
+              ),
+            ]);
+            await recorded("comment");
+          }
+          continue;
+        }
         if (remove.length || add.length) await write(commands.shift());
         await recorded("labels");
       }

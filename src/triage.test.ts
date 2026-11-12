@@ -1277,6 +1277,47 @@ describe("dependency migration", () => {
     const third = await apply(p, env, { journal, saveJournal: async () => {} });
     expect(third.results[0].status).toBe("done-earlier");
   });
+  it("checkpoints each edge, so a failure on the second edge resumes cleanly", async () => {
+    const env = live({ issues: { 1: { body: "Depends on #2 and #3." }, 2: {}, 3: {} } });
+    const p = await plan(env);
+    let journal: Record<string, any> = { schemaVersion: 1, repository: repo, tickets: {} };
+    const save = async (j: Record<string, any>) => void (journal = structuredClone(j));
+    const first = await applyMigration(p, {
+      query: env.query,
+      pace: async () => {},
+      journal,
+      saveJournal: save,
+      run: async (args) => {
+        if (args.includes("3")) throw new Error("gh issue edit failed.");
+        await env.run(args);
+      },
+    });
+    expect(first.results[0].status).toBe("failed");
+    env.writes.length = 0;
+    const second = await apply(p, env, { journal, saveJournal: save });
+    expect(second.results[0].status).toBe("applied");
+    expect(
+      env.writes.map((w) =>
+        w.slice(1, 3).concat(w.includes("--add-blocked-by") ? [w.at(-1)!] : []),
+      ),
+    ).toEqual([
+      ["edit", "1", "3"],
+      ["comment", "1"],
+    ]);
+  });
+  it("withholds a switch to ready when a reviewer withheld the only open blocker", async () => {
+    const env = live({
+      issues: { 1: { labels: ["status:blocked", "blocked:work"], body: "Depends on #2." }, 2: {} },
+    });
+    const p = await plan(env);
+    expect(p.tickets[0].labels!.status).toBe("apply");
+    p.tickets[0].edges[0].status = "review"; // the reviewer's edit
+    const result = await apply(p, env);
+    expect(result.results[0]).toMatchObject({ status: "skipped" });
+    expect(result.results[0].reason).toContain("no open native blocker");
+    expect(env.writes).toEqual([]);
+    expect(result.exitCode).toBe(2);
+  });
   it("skips edges and labels that already match", async () => {
     const env = live({
       issues: { 1: { labels: ["status:blocked", "blocked:work"], body: "Depends on #2." }, 2: {} },
