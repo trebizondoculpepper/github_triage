@@ -1364,3 +1364,16 @@ describe("dependency migration", () => {
       expect(() => depsArgumentsFor(bad)).toThrow();
   });
 });
+
+describe("help names the installed command (#53)", () => {
+  it("leads with github-triage and mentions the checkout form only as an alternative", async () => {
+    let main_ = "";
+    let deps = "";
+    await main(["--help"], async (t) => void (main_ = t));
+    await main(["deps", "--help"], async (t) => void (deps = t));
+    for (const text of [main_, deps]) {
+      expect(text).toMatch(/^Usage: github-triage /);
+      expect(text.split("\n").filter((l) => /^\s*npm run triage/.test(l))).toEqual([]);
+    }
+  });
+});

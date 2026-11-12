@@ -18,12 +18,13 @@ import { compactBriefing, compactText } from "./compact.js";
 import { migrationPlanText, planMigration } from "./migration.js";
 import { briefing, textReport } from "./briefing.js";
 
-export const help = `Usage: npm run triage -- [options]
+export const help = `Usage: github-triage [options]
+       (from a source checkout: npm run triage -- [options])
 Read-only LLM action briefing. Requires authenticated gh and Node 20+.
   deps N [--tree]       Read native upstream/downstream dependencies (deps --help)
   deps add|remove N --on M --note WHY [--dry-run]  Change native dependencies
   --repo owner/name     Repository (default: current gh checkout)
-  --json                Versioned structured output (use npm run --silent triage)
+  --json                Versioned structured output (from a checkout: npm run --silent triage)
   --issue N             Include full issue body/history, even if closed
   --since ISO           Include changed issues/PRs in all states since timestamp
   --checkpoint PATH     Read last successful window; advance only after complete live output
@@ -37,10 +38,11 @@ Read-only LLM action briefing. Requires authenticated gh and Node 20+.
 Exit: 0 complete; 2 incomplete evidence; 1 invalid arguments/API/cache failure.
 The briefing never changes GitHub; only deps add/remove do. Hints require inspection.
 `;
-export const depsHelp = `Usage: npm run triage -- deps N [--tree] [--json] [--repo owner/name]
-       npm run triage -- deps add N --on M [--on K] --note WHY [--dry-run] [--json]
-       npm run triage -- deps remove N --on M [--on K] --note WHY [--dry-run] [--json]
-       npm run triage -- deps migrate --plan FILE [--repo owner/name] [--json]
+export const depsHelp = `Usage: github-triage deps N [--tree] [--json] [--repo owner/name]
+       github-triage deps add N --on M [--on K] --note WHY [--dry-run] [--json]
+       github-triage deps remove N --on M [--on K] --note WHY [--dry-run] [--json]
+       github-triage deps migrate --plan FILE [--repo owner/name] [--json]
+(From a source checkout, use npm run triage -- deps ...)
 deps N reads native GitHub issue dependencies for issue N (read-only).
 deps add/remove make N blocked (or no longer blocked) by each M, after fresh live checks:
 refuses self-dependencies, pull requests, missing issues and cycles; an edge that already
@@ -50,7 +52,7 @@ Changes no labels.
   --on M                Blocker issue number (repeatable; add/remove only)
   --note WHY            Reason recorded in the comment (required for add/remove)
   --dry-run             Show the exact changes and comment; make none
-  --json                Versioned structured output (use npm run --silent triage)
+  --json                Versioned structured output (from a checkout: npm run --silent triage)
   --repo owner/name     Repository (default: current gh checkout)
   --help                Show usage
 deps migrate --plan reads only: it writes a report of how \`Depends on\` text and blocked:work
