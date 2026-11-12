@@ -977,3 +977,38 @@ describe("GraphQL NOT_FOUND answers", () => {
     expect(graphqlAnswer(undefined)).toBeNull();
   });
 });
+
+describe("installed npm bin", () => {
+  it.skipIf(process.platform === "win32")(
+    "runs through the symlinked bin npm installs, for help and invalid arguments",
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), "triage-bin-test-"));
+      const run = promisify(execFile);
+      try {
+        const root = fileURLToPath(new URL("..", import.meta.url));
+        await run("npm", [
+          "install",
+          "--prefix",
+          dir,
+          "--ignore-scripts",
+          "--no-audit",
+          "--no-fund",
+          "--offline",
+          root,
+        ]);
+        const bin = join(dir, "node_modules", ".bin", "github-triage");
+        const help = await run(bin, ["--help"]);
+        expect(help.stdout).toMatch(/^Usage:/);
+        const failure = await run(bin, ["--no-such-option"]).then(
+          () => null,
+          (error: { code: number; stderr: string }) => error,
+        );
+        expect(failure?.code).toBe(1);
+        expect(failure?.stderr).toMatch(/^triage: /);
+      } finally {
+        await rm(dir, { recursive: true });
+      }
+    },
+    60_000,
+  );
+});
