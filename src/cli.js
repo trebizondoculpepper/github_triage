@@ -5,13 +5,21 @@ import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { collect, currentRepository } from "./github.js";
-import { dependencyReport, dependencyText } from "./dependencies.js";
+import {
+  applyDependencyChange,
+  dependencyChangeText,
+  dependencyReport,
+  dependencyText,
+  ghRun,
+  planDependencyChange,
+} from "./dependencies.js";
 import { compactBriefing, compactText } from "./compact.js";
 import { briefing, textReport } from "./briefing.js";
 
 export const help = `Usage: npm run triage -- [options]
 Read-only LLM action briefing. Requires authenticated gh and Node 20+.
   deps N [--tree]       Read native upstream/downstream dependencies (deps --help)
+  deps add|remove N --on M --note WHY [--dry-run]  Change native dependencies
   --repo owner/name     Repository (default: current gh checkout)
   --json                Versioned structured output (use npm run --silent triage)
   --issue N             Include full issue body/history, even if closed
@@ -25,20 +33,29 @@ Read-only LLM action briefing. Requires authenticated gh and Node 20+.
   --limit N             Next steps (default 5 compact, 10 expanded)
   --help                Show usage
 Exit: 0 complete; 2 incomplete evidence; 1 invalid arguments/API/cache failure.
-No GitHub mutations. Question/dependency hints require inspection, not blind action.
+The briefing never changes GitHub; only deps add/remove do. Hints require inspection.
 `;
 export const depsHelp = `Usage: npm run triage -- deps N [--tree] [--json] [--repo owner/name]
-Read-only native GitHub issue dependencies for issue N.
+       npm run triage -- deps add N --on M [--on K] --note WHY [--dry-run] [--json]
+       npm run triage -- deps remove N --on M [--on K] --note WHY [--dry-run] [--json]
+deps N reads native GitHub issue dependencies for issue N (read-only).
+deps add/remove make N blocked (or no longer blocked) by each M, after fresh live checks:
+refuses self-dependencies, pull requests, missing issues and cycles; an edge that already
+exists (add) or is absent (remove) is a no-op. Posts one comment on N with the note.
+Changes no labels.
   --tree                Follow blockers and dependants transitively; report cycles
+  --on M                Blocker issue number (repeatable; add/remove only)
+  --note WHY            Reason recorded in the comment (required for add/remove)
+  --dry-run             Show the exact changes and comment; make none
   --json                Versioned structured output (use npm run --silent triage)
   --repo owner/name     Repository (default: current gh checkout)
   --help                Show usage
-Exit: 0 report printed; 1 invalid arguments/API failure.
-No GitHub mutations. deps add/remove and migrate are not implemented yet.
+Exit: 0 all done; 2 partly done (refused/failed items listed); 1 nothing done or
+invalid arguments/API failure. deps migrate is not implemented yet.
 `;
 /**
  * @param {string[]} args
- * @returns {{ number?: number, repo?: string, json?: boolean, tree?: boolean, help?: boolean }}
+ * @returns {{ action?: "add" | "remove", number?: number, on?: number[], note?: string, dryRun?: boolean, repo?: string, json?: boolean, tree?: boolean, help?: boolean }}
  */
 export function depsArgumentsFor(args) {
   const { values, positionals } = parseArgs({
@@ -49,19 +66,49 @@ export function depsArgumentsFor(args) {
       json: { type: "boolean" },
       tree: { type: "boolean" },
       help: { type: "boolean" },
+      on: { type: "string", multiple: true },
+      note: { type: "string" },
+      "dry-run": { type: "boolean" },
     },
   });
   if (values.help) return { help: true };
+  if (values.repo && !/^[\w.-]+\/[\w.-]+$/.test(values.repo))
+    throw new Error("--repo must be owner/name.");
+  const number = (text) =>
+    /^[1-9]\d*$/.test(text ?? "") && Number.isSafeInteger(Number(text)) ? Number(text) : null;
+  if (positionals[0] === "add" || positionals[0] === "remove") {
+    const usage = `Usage: deps ${positionals[0]} N --on M [--on K] --note WHY [--dry-run] [--json] [--repo owner/name]`;
+    const target = number(positionals[1]);
+    const on = (values.on ?? []).map(number);
+    if (positionals.length !== 2 || !target || !on.length || on.includes(null) || values.tree)
+      throw new Error(usage);
+    if (!values.note?.trim()) throw new Error(`--note WHY is required. ${usage}`);
+    return {
+      action: positionals[0],
+      number: target,
+      on: /** @type {number[]} */ (on),
+      note: values.note.trim(),
+      dryRun: !!values["dry-run"],
+      repo: values.repo,
+      json: values.json,
+    };
+  }
+  if (values.on || values.note || values["dry-run"])
+    throw new Error("--on, --note and --dry-run apply only to deps add/remove.");
   if (
     positionals.length !== 1 ||
     !/^[1-9]\d*$/.test(positionals[0]) ||
     !Number.isSafeInteger(Number(positionals[0]))
   )
     throw new Error("Usage: deps N [--tree] [--json] [--repo owner/name]");
-  if (values.repo && !/^[\w.-]+\/[\w.-]+$/.test(values.repo))
-    throw new Error("--repo must be owner/name.");
   return { ...values, number: Number(positionals[0]) };
 }
+/** Dry runs report the exit code the real run would give if every apply succeeded. */
+const plannedExit = (changes) => {
+  const applying = changes.some((c) => c.status === "apply");
+  const refused = changes.some((c) => c.status === "refused");
+  return !applying ? (refused ? 1 : 0) : refused ? 2 : 0;
+};
 export function argumentsFor(args) {
   const { values } = parseArgs({
     args,
@@ -144,7 +191,7 @@ export async function checkpointSince(path, repository) {
 /**
  * @param {string[]} args
  * @param {(text: string) => Promise<void>} [output]
- * @param {{collect: typeof collect, currentRepository: typeof currentRepository, dependencyReport?: typeof dependencyReport}} [runtime]
+ * @param {{collect: typeof collect, currentRepository: typeof currentRepository, dependencyReport?: typeof dependencyReport, planDependencyChange?: typeof planDependencyChange, ghRun?: import("./dependencies.js").GhRun}} [runtime]
  * @returns {Promise<number>}
  */
 export async function main(
@@ -163,6 +210,26 @@ export async function main(
     }
     const repository = values.repo ?? (await runtime.currentRepository());
     if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error("--repo must be owner/name.");
+    if (values.action) {
+      // Read live immediately before changing; never act on a cached snapshot.
+      const plan = await (runtime.planDependencyChange ?? planDependencyChange)(repository, {
+        action: values.action,
+        number: values.number,
+        on: values.on,
+        note: values.note,
+      });
+      const result = values.dryRun
+        ? {
+            ...plan,
+            dryRun: true,
+            exitCode: plannedExit(plan.changes),
+          }
+        : await applyDependencyChange(plan, runtime.ghRun ?? ghRun);
+      await output(
+        values.json ? JSON.stringify(result, null, 2) + "\n" : dependencyChangeText(result),
+      );
+      return result.exitCode;
+    }
     const report = await (runtime.dependencyReport ?? dependencyReport)(repository, values.number, {
       tree: !!values.tree,
     });

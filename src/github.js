@@ -13,17 +13,40 @@ export const ghQuery = async (query, variables) => {
   let stdout;
   try {
     ({ stdout } = await execute("gh", args, { maxBuffer: 32 * 1024 * 1024, timeout: 60_000 }));
-  } catch {
+  } catch (error) {
+    // gh exits non-zero on any GraphQL error but still prints the response. A response whose
+    // only errors are NOT_FOUND is a valid answer ("no such issue"): callers see null fields.
+    const answer = graphqlAnswer(error?.stdout);
+    if (answer) return answer;
     // Do not echo subprocess arguments, stderr, credentials or private API response bodies.
     throw new Error(
       "GitHub query failed. Check gh auth status, repository access and API rate limits.",
     );
   }
   const parsed = JSON.parse(stdout);
-  if (parsed.errors?.length || !parsed.data)
+  if (parsed.errors?.length && !graphqlAnswer(stdout))
+    throw new Error("GitHub returned incomplete query data; no fresh report saved.");
+  if (!parsed.data)
     throw new Error("GitHub returned incomplete query data; no fresh report saved.");
   return parsed.data;
 };
+/**
+ * Data from a GraphQL response whose errors are all NOT_FOUND, else null.
+ * @param {unknown} text
+ * @returns {Record<string, unknown> | null}
+ */
+export function graphqlAnswer(text) {
+  try {
+    const parsed = JSON.parse(typeof text === "string" ? text : "");
+    const notFoundOnly =
+      Array.isArray(parsed.errors) &&
+      parsed.errors.length > 0 &&
+      parsed.errors.every((e) => e?.type === "NOT_FOUND");
+    return notFoundOnly && parsed.data ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
 export async function currentRepository() {
   try {
     const { stdout } = await execute(

@@ -11,7 +11,7 @@ Read [HANDOFF.md](HANDOFF.md) first. This is the standalone GitHub Triage projec
 - Keep repository identities opaque. Extend registered workflow/rule/role handlers and declarative policy, not issue-number, named-agent or repository special cases.
 - Preserve schema versions, explicit freshness/completeness, full intake, offline/checkpoint safety and useful omission notices. Missing evidence is not approval.
 - Read the applicable contract in `doc/` before behavior changes. Record changed architectural contracts in a separate docs PR before implementation; existing accurate merged contracts can be reused.
-- Native blockedBy/blocking relationships are authoritative; body text is migration/drift context. Current mutation commands and migration are unfinished. Never apply a live migration without a reviewed plan.
+- Native blockedBy/blocking relationships are authoritative; body text is migration/drift context. `deps add`/`deps remove` are the only implemented mutations; claim/flag commands and the migration are unfinished. Never apply a live migration without a reviewed plan.
 - Use injected `gh`/clock/filesystem boundaries in tests. Do not add tokens, live snapshots, agent identity files or private configuration to this public repo.
 
 ## Work and checks
