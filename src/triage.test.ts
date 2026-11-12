@@ -657,6 +657,23 @@ describe("native dependencies in the briefing", () => {
       const cache = join(dir, "cache.json");
       await atomicJson(cache, snapshot([old as Issue], []));
       expect(await main(["--offline", "--cache", cache, "--json"], async () => {})).toBe(2);
+      // Many old tickets: compact text bounds the warnings; JSON keeps every one.
+      const many = Array.from({ length: 40 }, (_, i) => ({
+        ...old,
+        number: i + 1,
+        url: issue(i + 1).url,
+      }));
+      await atomicJson(cache, snapshot(many as Issue[], []));
+      let text = "";
+      let json = "";
+      await main(
+        ["--offline", "--cache", cache, "--max-chars", "2000"],
+        async (t) => void (text = t),
+      );
+      await main(["--offline", "--cache", cache, "--json"], async (t) => void (json = t));
+      expect(text.match(/^INCOMPLETE: /gm)).toHaveLength(6);
+      expect(text).toContain("35 more warning(s) omitted");
+      expect(JSON.parse(json).completeness.warnings).toHaveLength(40);
     } finally {
       await rm(dir, { recursive: true });
     }

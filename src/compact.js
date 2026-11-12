@@ -205,7 +205,15 @@ export function compactText(report, maxChars = 10000) {
   };
   add("NEXT STEPS", report.actions);
   for (const [name, section] of Object.entries(report.sections)) add(name.toUpperCase(), section);
-  for (const warning of report.completeness.warnings) lines.push(`INCOMPLETE: ${warning}`);
+  // Warnings are always shown, but bounded so they cannot exhaust the text budget alone;
+  // JSON output keeps the full list.
+  const warnings = report.completeness.warnings;
+  const shownWarnings = 5;
+  for (const warning of warnings.slice(0, shownWarnings)) lines.push(`INCOMPLETE: ${warning}`);
+  if (warnings.length > shownWarnings)
+    lines.push(
+      `INCOMPLETE: ${warnings.length - shownWarnings} more warning(s) omitted; use --json for all.`,
+    );
   const notice =
     "\nMore context omitted by text budget; use --json, --full, --issue N or --max-chars.\n";
   for (const row of rows) {
