@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /** One read-only intake command. Contract: doc/github-triage-cli.md. */
+import { realpathSync } from "node:fs";
 import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { collect, currentRepository } from "./github.js";
 import {
@@ -294,7 +295,21 @@ export async function main(
     });
   return report.completeness.complete ? 0 : 2;
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+/**
+ * True when this module is the process entry point. npm installs bins as
+ * symlinks (or shims), so compare real paths rather than the raw argv path.
+ * @param {string | undefined} entry
+ * @returns {boolean}
+ */
+function isEntryPoint(entry) {
+  if (!entry) return false;
+  try {
+    return realpathSync(resolve(entry)) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+if (isEntryPoint(process.argv[1])) {
   try {
     process.exitCode = await main(process.argv.slice(2));
   } catch (error) {
