@@ -97,6 +97,18 @@ export async function pages(fetch, stop = () => false) {
 /** Only explicitly declared prerequisites, never every #mention in the body. */
 /** @param {string} body @param {string} repository @returns {import("./types.js").Reference[]} */
 export function declaredDependencies(body, repository) {
+  return declaredDependencyContexts(body, repository).map(({ repository, number, url }) => ({
+    repository,
+    number,
+    url,
+  }));
+}
+/**
+ * As declaredDependencies, with the declaring text kept for migration review.
+ * @param {string} body @param {string} repository
+ * @returns {(import("./types.js").Reference & { context: string })[]}
+ */
+export function declaredDependencyContexts(body, repository) {
   const refs = new Map();
   let section = false;
   for (const original of body.split("\n")) {
@@ -117,7 +129,7 @@ export function declaredDependencies(body, repository) {
       );
       const text = declaration?.[1] ?? (section && /^\s*[-*]\s/.test(sentence) ? sentence : "");
       const add = (repo, number, url) =>
-        refs.set(`${repo}#${number}`, { repository: repo, number, url });
+        refs.set(`${repo}#${number}`, { repository: repo, number, url, context: sentence.trim() });
       for (const match of text.matchAll(
         /https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/(?:issues|pull)\/(\d+)/g,
       ))

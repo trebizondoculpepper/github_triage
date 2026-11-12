@@ -24,6 +24,7 @@ import {
 } from "./dependencies.js";
 import { briefing, dependencyDone, textReport } from "./briefing.js";
 import { collect, declaredDependencies, graphqlAnswer, pages, type Query } from "./github.js";
+import { applyMigration, clauseFor, planMigration } from "./migration.js";
 import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
 
 const repo = "example/project";
@@ -1011,4 +1012,352 @@ describe("installed npm bin", () => {
     },
     60_000,
   );
+});
+
+describe("dependency migration", () => {
+  /** A small live repository: issues with labels, bodies and native edges; PRs by number. */
+  type Fake = {
+    issues: Record<
+      number,
+      { body?: string; labels?: string[]; state?: string; blockedBy?: number[] }
+    >;
+    prs?: Record<number, { merged: boolean; closes: number[] }>;
+  };
+  const live = (fake: Fake) => {
+    let clock = 0;
+    const meta = Object.fromEntries(
+      Object.keys(fake.issues).map((n) => [n, { updatedAt: `2026-11-12T10:00:0${clock}.000Z` }]),
+    );
+    const touch = (n: number) => {
+      clock++;
+      meta[n].updatedAt = `2026-11-12T11:${String(clock).padStart(2, "0")}:00.000Z`;
+    };
+    const state = (n: number) => fake.issues[n]?.state ?? "OPEN";
+    const issueNode = (n: number) => {
+      const i = fake.issues[n];
+      const blockers = i.blockedBy ?? [];
+      return {
+        ...issue(n, i.labels ?? []),
+        body: i.body ?? "",
+        state: state(n),
+        updatedAt: meta[n].updatedAt,
+        issueDependenciesSummary: {
+          blockedBy: blockers.filter((b) => state(b) === "OPEN").length,
+          totalBlockedBy: blockers.length,
+          blocking: 0,
+          totalBlocking: 0,
+        },
+        blockedBy: page(
+          blockers.map((b) => ({
+            ...issue(b),
+            state: state(b),
+            repository: { nameWithOwner: repo },
+            issueDependenciesSummary: {
+              blockedBy: 0,
+              totalBlockedBy: 0,
+              blocking: 0,
+              totalBlocking: 0,
+            },
+          })),
+        ),
+      };
+    };
+    const query: Query = async (source, variables) => {
+      const n = Number(variables.number);
+      if (source.includes("issueOrPullRequest")) {
+        const pr = fake.prs?.[n];
+        if (pr)
+          return {
+            repository: {
+              issueOrPullRequest: {
+                __typename: "PullRequest",
+                number: n,
+                url: `https://github.com/${repo}/pull/${n}`,
+                state: pr.merged ? "MERGED" : "OPEN",
+                merged: pr.merged,
+                closingIssuesReferences: page(
+                  pr.closes.map((c) => ({
+                    number: c,
+                    url: issue(c).url,
+                    state: state(c),
+                    repository: { nameWithOwner: repo },
+                  })),
+                ),
+              },
+            },
+          };
+        return {
+          repository: {
+            issueOrPullRequest: fake.issues[n]
+              ? {
+                  __typename: "Issue",
+                  number: n,
+                  url: issue(n).url,
+                  state: state(n),
+                  stateReason: null,
+                }
+              : null,
+          },
+        };
+      }
+      return { repository: { issue: fake.issues[n] ? issueNode(n) : null } };
+    };
+    const snapshotNow = async () =>
+      snapshot(
+        Object.keys(fake.issues)
+          .map(Number)
+          .filter((n) => state(n) === "OPEN")
+          .map(issueNode) as Issue[],
+        [],
+      );
+    const writes: string[][] = [];
+    const run = async (args: string[]) => {
+      writes.push(args);
+      const n = Number(args[2]);
+      const i = fake.issues[n];
+      if (args[1] === "edit") {
+        for (let k = 3; k < args.length; k++) {
+          if (args[k] === "--add-blocked-by") (i.blockedBy ??= []).push(Number(args[k + 1]));
+          if (args[k] === "--add-label") (i.labels ??= []).push(args[k + 1]);
+          if (args[k] === "--remove-label")
+            i.labels = (i.labels ?? []).filter((l) => l !== args[k + 1]);
+        }
+      }
+      touch(n);
+    };
+    return { query, run, writes, snapshotNow, touch, meta };
+  };
+  const plan = (env: ReturnType<typeof live>) =>
+    planMigration(repo, { query: env.query, collect: env.snapshotNow as never, now: clock });
+  const apply = (
+    p: Awaited<ReturnType<typeof planMigration>>,
+    env: ReturnType<typeof live>,
+    extra = {},
+  ) => applyMigration(p, { query: env.query, run: env.run, pace: async () => {}, ...extra });
+
+  it("plans edges from explicit text and routes doubtful references to review", async () => {
+    const env = live({
+      issues: {
+        1: {
+          body: "Depends on #2 and #3; coordinate #4.",
+          labels: ["status:blocked", "blocked:work"],
+        },
+        2: {},
+        3: { state: "CLOSED" },
+        4: {},
+        5: {
+          body: "Depends on #5, #99 and https://github.com/other/repo/issues/1.",
+          blockedBy: [2],
+        },
+        6: { body: "Requires #2.", blockedBy: [2] },
+        7: { body: "Depends on #20 and #21." },
+        8: { body: "Depends on #22." },
+        20: {},
+      },
+      prs: { 21: { merged: true, closes: [] }, 22: { merged: false, closes: [] } },
+    });
+    const p = await plan(env);
+    const t = (n: number) => p.tickets.find((x) => x.number === n);
+    expect(t(1)!.edges.map((e) => [e.blocker, e.status])).toEqual([
+      [2, "apply"],
+      [3, "apply"],
+      [4, "review"],
+    ]);
+    // Full URLs are parsed before #N references.
+    expect(t(5)!.edges.map((e) => [e.blocker, e.status, e.reason])).toEqual([
+      [1, "review", "Cross-repository reference."],
+      [5, "review", "Self-reference."],
+      [99, "review", "#99 does not exist."],
+    ]);
+    expect(t(6)).toBeUndefined();
+    expect(t(7)!.edges.map((e) => [e.blocker, e.status])).toEqual([
+      [20, "apply"],
+      [21, "satisfied"],
+    ]);
+    expect(t(8)!.edges[0]).toMatchObject({ status: "review", reason: "PR #22 closes no issue." });
+    expect(t(1)!.labels).toMatchObject({
+      status: "apply",
+      remove: ["blocked:work", "status:blocked"],
+      add: ["status:ready"],
+    });
+    expect(p.summary).toMatchObject({ apply: 4, review: 5, satisfied: 1 });
+  });
+  it("maps a pull request reference to the issues it closes", async () => {
+    const env = live({
+      issues: { 1: { body: "Depends on #30." }, 9: {} },
+      prs: { 30: { merged: false, closes: [9] } },
+    });
+    const p = await plan(env);
+    expect(p.tickets[0].edges).toMatchObject([{ blocker: 9, source: "pr #30", status: "apply" }]);
+  });
+  it("applies the label rules for blocked:work", async () => {
+    const env = live({
+      issues: {
+        1: { labels: ["status:blocked", "blocked:work", "blocked:testing"] },
+        2: { labels: ["status:blocked", "blocked:work"], body: "Depends on #9." },
+        3: { labels: ["status:blocked", "blocked:work"], body: "Depends on #9." },
+        9: { state: "CLOSED" },
+      },
+    });
+    // #2 and #3 depend only on a closed blocker.
+    const p = await plan(env);
+    const labels = Object.fromEntries(p.tickets.map((t) => [t.number, t.labels]));
+    expect(labels[1]).toMatchObject({ status: "apply", remove: ["blocked:work"], add: [] });
+    expect(labels[2]).toMatchObject({ status: "review", remove: [], add: [] });
+  });
+  it("scopes hedged wording to the clause naming the reference", () => {
+    const text = "Depends on #541's revised mission merging first, after research #543.";
+    expect(clauseFor(text, 541)).not.toMatch(/after/);
+    expect(clauseFor(text, 543)).toMatch(/after/);
+  });
+  it("applies edges, labels and one comment per ticket, journalling each step", async () => {
+    const env = live({
+      issues: {
+        1: { labels: ["status:blocked", "blocked:work"], body: "Depends on #2." },
+        2: {},
+        3: { body: "Requires #2." },
+      },
+    });
+    const p = await plan(env);
+    let saved: Record<string, any> = {};
+    const result = await apply(p, env, {
+      saveJournal: async (j: Record<string, any>) => void (saved = structuredClone(j)),
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.summary.applied).toBe(2);
+    expect(env.writes.map((w) => `${w[1]} ${w[2]}`)).toEqual([
+      "edit 1",
+      "edit 1",
+      "comment 1",
+      "edit 3",
+      "comment 3",
+    ]);
+    expect(env.writes[1]).toEqual(
+      expect.arrayContaining(["--remove-label", "blocked:work", "--add-label", "status:ready"]),
+    );
+    expect(env.writes[2].at(-1)).toContain("#2");
+    expect(saved.tickets[1].steps).toEqual({ edges: true, labels: true, comment: true });
+    expect(saved.tickets[1].updatedAt).toBe(env.meta[1].updatedAt);
+  });
+  it("skips a ticket edited since planning and exits 2", async () => {
+    const env = live({ issues: { 1: { body: "Depends on #2." }, 2: {} } });
+    const p = await plan(env);
+    env.touch(1);
+    const result = await apply(p, env);
+    expect(result.results[0]).toMatchObject({
+      status: "skipped",
+      reason: "Changed since planning.",
+    });
+    expect(env.writes).toEqual([]);
+    expect(result.exitCode).toBe(2);
+  });
+  it("resumes from the journal, finishing with the comment instead of tripping its own guard", async () => {
+    const env = live({
+      issues: { 1: { labels: ["status:blocked", "blocked:work"], body: "Depends on #2." }, 2: {} },
+    });
+    const p = await plan(env);
+    let journal: Record<string, any> = { schemaVersion: 1, repository: repo, tickets: {} };
+    const failComment = async (args: string[]) => {
+      if (args[1] === "comment") throw new Error("gh issue comment failed.");
+      await env.run(args);
+    };
+    const first = await applyMigration(p, {
+      query: env.query,
+      run: failComment,
+      pace: async () => {},
+      journal,
+      saveJournal: async (j) => void (journal = structuredClone(j)),
+    });
+    expect(first.results[0].status).toBe("failed");
+    expect(first.exitCode).toBe(1);
+    env.writes.length = 0;
+    const second = await apply(p, env, { journal, saveJournal: async () => {} });
+    expect(second.exitCode).toBe(0);
+    expect(env.writes.map((w) => w[1])).toEqual(["comment"]);
+    const third = await apply(p, env, { journal, saveJournal: async () => {} });
+    expect(third.results[0].status).toBe("done-earlier");
+  });
+  it("skips edges and labels that already match", async () => {
+    const env = live({
+      issues: { 1: { labels: ["status:blocked", "blocked:work"], body: "Depends on #2." }, 2: {} },
+    });
+    const p = await plan(env);
+    env.writes.length = 0;
+    // Someone recorded the edge after planning, then the guard is satisfied by re-planning.
+    await env.run(["issue", "edit", "1", "--repo", repo, "--add-blocked-by", "2"]);
+    const fresh = {
+      ...p,
+      tickets: p.tickets.map((t) => ({ ...t, updatedAt: env.meta[1].updatedAt })),
+    };
+    env.writes.length = 0;
+    await apply(fresh, env);
+    expect(env.writes.map((w) => w.slice(1, 3).join(" "))).toEqual(["edit 1", "comment 1"]);
+    expect(env.writes[0]).not.toContain("--add-blocked-by");
+  });
+  it("stops at a rate limit and reports the rest as skipped", async () => {
+    const env = live({
+      issues: { 1: { body: "Depends on #9." }, 2: { body: "Depends on #9." }, 9: {} },
+    });
+    const p = await plan(env);
+    const result = await apply(p, env, {
+      run: async () => {
+        throw new RateLimitError("gh issue edit was rate limited by GitHub.");
+      },
+    });
+    expect(result.results.map((r) => r.status)).toEqual(["failed", "skipped"]);
+    expect(result.exitCode).toBe(1);
+  });
+  it("dry run lists the exact commands and writes nothing", async () => {
+    const env = live({ issues: { 1: { body: "Depends on #2." }, 2: {} } });
+    const p = await plan(env);
+    const result = await apply(p, env, { dryRun: true });
+    expect(result.results[0].status).toBe("would-apply");
+    expect(result.results[0].commands[0]).toEqual([
+      "issue",
+      "edit",
+      "1",
+      "--repo",
+      repo,
+      "--add-blocked-by",
+      "2",
+    ]);
+    expect(env.writes).toEqual([]);
+  });
+  it("validates migrate arguments and refuses a mismatched journal", async () => {
+    expect(depsArgumentsFor(["migrate", "--plan", "p.json"])).toMatchObject({
+      migrate: "plan",
+      file: "p.json",
+    });
+    expect(depsArgumentsFor(["migrate", "--apply", "p.json", "--dry-run"])).toMatchObject({
+      migrate: "apply",
+      dryRun: true,
+    });
+    for (const bad of [
+      ["migrate"],
+      ["migrate", "--plan", "a", "--apply", "b"],
+      ["migrate", "--plan", "a", "--dry-run"],
+      ["7", "--plan", "a"],
+    ])
+      expect(() => depsArgumentsFor(bad)).toThrow();
+    const dir = await mkdtemp(join(tmpdir(), "triage-migrate-"));
+    try {
+      const file = join(dir, "plan.json");
+      await atomicJson(file, {
+        schemaVersion: 1,
+        kind: "dependency-migration-plan",
+        repository: repo,
+        tickets: [],
+      });
+      await atomicJson(`${file}.progress.json`, {
+        schemaVersion: 1,
+        repository: "other/repo",
+        tickets: {},
+      });
+      await expect(main(["deps", "migrate", "--apply", file], async () => {})).rejects.toThrow(
+        "journal",
+      );
+    } finally {
+      await rm(dir, { recursive: true });
+    }
+  });
 });
