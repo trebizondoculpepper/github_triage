@@ -57,7 +57,7 @@ Avoid expanding this into implementing #5/#6 or applying a migration; those are 
 
 The project is public at https://github.com/trebizondoculpepper/github_triage and licensed MIT. Vite+ 1.5.0 supplies formatting, lint/type checks, tests, packaging and pre-commit hooks. The CLI remains runnable without building (`src/cli.js`); `npm run build` creates `dist/cli.mjs`.
 
-The initial CI workflow is intentionally small: Ubuntu / Node 24, npm ci, check, test and build. #8/#9 cover making it a proven portable contributor gate. Package publication, release automation and branch protection have not been configured. No npm publication is authorized by the bootstrap.
+CI now runs checks, tests, build and smoke tests on Ubuntu, macOS and Windows with Node 20, 22 and 24, behind one aggregate `verify` check (#8). Required-check and fork-contribution rules are #9. npm distribution and releases are designed in [doc/npm-releases.md](doc/npm-releases.md) (#17) but not yet implemented: nothing has been published, and branch protection is not configured. No npm publication is authorized by the bootstrap.
 
 `doc/poker-blocks-process.md` is the historical source project's workflow context, not an instruction to work unrelated game tickets. `AGENTS.md` is the standalone project's current agent guide; `CLAUDE.md` links to it.
 
