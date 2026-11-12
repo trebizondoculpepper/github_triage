@@ -1,4 +1,6 @@
-# Agent guide
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository. `CLAUDE.md` is a symlink to `AGENTS.md`, so other agents read the same guide.
 
 Read [HANDOFF.md](HANDOFF.md) first. This is the standalone GitHub Triage project, extracted from poker_blocks at the owner's request. Its source is under `src/`; do not continue development in the game repository.
 
@@ -16,7 +18,23 @@ Read [HANDOFF.md](HANDOFF.md) first. This is the standalone GitHub Triage projec
 
 Use this repository's issues, not the old poker_blocks issue numbers. Recheck current ownership and native blockers before claiming. Keep one issue/PR focused; preserve another agent's work. An unanswered question goes on its ticket with the concrete blocker.
 
-Before committing run `npm run check`, `npm test` and `npm run build`. Use the installed Vite+ pre-commit hook; do not bypass it. CLI smoke test: `node dist/cli.mjs --help`. Keep the developer diary in `diary/` for significant work.
+Before committing run `npm run check`, `npm test` and `npm run build`. Use the installed Vite+ pre-commit hook; do not bypass it. Keep the developer diary in `diary/` for significant work.
+
+## Commands
+
+```sh
+npm install                                   # also installs the Vite+ hooks (prepare)
+npm run triage -- --repo owner/repo [--json] [--issue 42] [--agent name]
+npm run triage -- deps 42 --repo owner/repo --tree
+npm run check                                 # vp check: format, lint, type check
+npm run fmt                                   # apply formatting
+npm test                                      # vp test run (Vitest)
+npx vp test run src/triage.test.ts -t "name"  # one file / one test by name
+npm run build                                 # vp pack -> dist/cli.mjs
+node dist/cli.mjs --help                      # quick CLI smoke test
+```
+
+Without `--repo`, the target repository is resolved by `gh repo view` from the current working directory. The runtime uses only Node built-ins and `gh`; types live in `src/types.d.ts` (JS checked by TypeScript). Tests are in `src/triage.test.ts`; one test fakes `gh` with a POSIX shell script and is skipped on Windows. The CLI supports Node 20+.
 
 ## Inter-agent mail
 
