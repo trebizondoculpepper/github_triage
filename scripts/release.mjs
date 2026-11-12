@@ -7,13 +7,13 @@
 import { execFileSync } from "node:child_process";
 
 const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
-git("fetch", "--no-tags", "origin", "main", "release");
+git("fetch", "--no-tags", "origin", "main");
 const main = git("rev-parse", "origin/main");
+// The first promotion creates the release branch, so it may not exist yet.
 let release = "";
-try {
+if (git("ls-remote", "--heads", "origin", "release")) {
+  git("fetch", "--no-tags", "origin", "release");
   release = git("rev-parse", "origin/release");
-} catch {
-  // No release branch yet: the first promotion creates it.
 }
 if (release === main) {
   console.log(`release already points at origin/main (${main.slice(0, 7)}); nothing to do.`);
