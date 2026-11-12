@@ -16,6 +16,8 @@ import {
 import {
   applyDependencyChange,
   completeNative,
+  isRateLimit,
+  RateLimitError,
   dependencyReport,
   dependencyText,
   planDependencyChange,
@@ -818,6 +820,29 @@ describe("deps add and deps remove", () => {
     expect(result.exitCode).toBe(2);
     expect(result.changes.map((c) => c.status)).toEqual(["done", "failed"]);
     expect(calls.at(-1)?.at(-1)).toContain("dependency: #4.");
+    // The reported comment is the one posted, not the planned one naming #5 too.
+    expect(result.comment).toBe(calls.at(-1)?.at(-1));
+    expect(result.commentCommand).toEqual(calls.at(-1));
+    expect(result.commentStatus).toBe("posted");
+  });
+  it("stops all further writes, including the comment, after a rate limit", async () => {
+    const { query } = graphQuery({ states: { 1: {}, 4: {}, 5: {}, 6: {} }, edges: [] });
+    const calls: string[][] = [];
+    const run = async (args: string[]) => {
+      calls.push(args);
+      if (args.includes("5")) throw new RateLimitError("gh issue edit was rate limited by GitHub.");
+    };
+    const result = await applyDependencyChange(
+      await planDependencyChange(repo, add([4, 5, 6]), query),
+      run,
+    );
+    expect(result.changes.map((c) => c.status)).toEqual(["done", "failed", "skipped"]);
+    expect(calls).toHaveLength(2);
+    expect(result.commentStatus).toContain("rate limit");
+    expect(result.rateLimited).toBe(true);
+    expect(result.exitCode).toBe(2);
+    expect(isRateLimit("gh: You have exceeded a secondary rate limit. (HTTP 403)")).toBe(true);
+    expect(isRateLimit("gh: Could not resolve to an issue")).toBe(false);
   });
   it("exits 1 when nothing could be done and 0 for a pure no-op, with no comment either way", async () => {
     const { query } = graphQuery({ edges: [[1, 2]] });

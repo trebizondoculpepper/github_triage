@@ -190,11 +190,19 @@ export function dependencyText(report) {
 export const ghRun = async (args) => {
   try {
     await execute("gh", args, { timeout: 60_000 });
-  } catch {
-    // Do not echo arguments, stderr or response bodies.
+  } catch (error) {
+    // Keep only a rate-limit discriminator; never echo arguments, stderr or response bodies.
+    if (isRateLimit(`${error?.stderr ?? ""}\n${error?.stdout ?? ""}`))
+      throw new RateLimitError(`gh ${args[0]} ${args[1]} was rate limited by GitHub.`);
     throw new Error(`gh ${args[0]} ${args[1]} failed. Check gh auth status and rate limits.`);
   }
 };
+/** A write refused because of a GitHub (secondary) rate limit: stop all further writes. */
+export class RateLimitError extends Error {
+  rateLimited = true;
+}
+/** @param {string} text */
+export const isRateLimit = (text) => /rate limit|abuse detection|HTTP 429|retry-after/i.test(text);
 
 /** Resolve a proposed blocker: an issue, a pull request (refused), or missing. */
 async function readBlocker(repository, number, query) {
@@ -322,46 +330,63 @@ export async function planDependencyChange(repository, request, query = ghQuery)
 export async function applyDependencyChange(plan, run = ghRun) {
   const results = plan.changes.map((c) => ({ ...c }));
   const applied = [];
+  let rateLimited = false;
   for (const change of results.filter((c) => c.status === "apply")) {
+    if (rateLimited) {
+      // The shared rules stop on a rate limit rather than pressing on.
+      Object.assign(change, {
+        status: "skipped",
+        reason: "Not attempted: stopped after a rate limit.",
+      });
+      continue;
+    }
     try {
       await run(change.command);
       change.status = "done";
       applied.push(change);
     } catch (error) {
+      rateLimited = !!error?.rateLimited;
       Object.assign(change, { status: "failed", reason: error.message });
     }
   }
-  let comment = "skipped";
-  if (applied.length) {
-    const body = commentFor(
-      plan.action,
-      applied.map((c) => c.blocker),
-      plan.note,
-    );
+  // The comment names only what actually changed, and is what the result reports.
+  const comment = applied.length
+    ? commentFor(
+        plan.action,
+        applied.map((c) => c.blocker),
+        plan.note,
+      )
+    : null;
+  const commentCommand = comment
+    ? ["issue", "comment", String(plan.target.number), "--repo", plan.repository, "--body", comment]
+    : null;
+  let commentStatus = "none";
+  if (commentCommand && rateLimited) commentStatus = "skipped: stopped after a rate limit";
+  else if (commentCommand)
     try {
-      await run([
-        "issue",
-        "comment",
-        String(plan.target.number),
-        "--repo",
-        plan.repository,
-        "--body",
-        body,
-      ]);
-      comment = "posted";
-    } catch {
-      comment = "failed";
+      await run(commentCommand);
+      commentStatus = "posted";
+    } catch (error) {
+      commentStatus = error?.rateLimited ? "failed: rate limited" : "failed";
     }
-  }
-  const unfinished = results.some((c) => c.status === "refused" || c.status === "failed");
+  const unfinished = results.some((c) => c.status !== "done" && c.status !== "noop");
   const exitCode = !applied.length
     ? unfinished
       ? 1
       : 0
-    : unfinished || comment === "failed"
+    : unfinished || commentStatus !== "posted"
       ? 2
       : 0;
-  return { ...plan, dryRun: false, changes: results, commentStatus: comment, exitCode };
+  return {
+    ...plan,
+    dryRun: false,
+    changes: results,
+    comment,
+    commentCommand,
+    commentStatus,
+    rateLimited,
+    exitCode,
+  };
 }
 
 /** Text rendering shared by dry runs and applied results. */
