@@ -24,7 +24,7 @@ import {
 } from "./dependencies.js";
 import { briefing, dependencyDone, textReport } from "./briefing.js";
 import { collect, declaredDependencies, graphqlAnswer, pages, type Query } from "./github.js";
-import { clauseFor, planMigration } from "./migration.js";
+import { clauseFor, hedged, listWideHedge, planMigration } from "./migration.js";
 import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
 
 const repo = "example/project";
@@ -1285,6 +1285,21 @@ describe("dependency migration", () => {
     });
     expect(p.tickets[0].labels).toMatchObject({ status: "review" });
     expect(p.tickets[0].labels!.reason).toContain("incomplete");
+  });
+  it("treats a qualifier covering the whole list as hedging every reference", () => {
+    for (const text of [
+      "Depends on #1, #2 and #3 (all optional).",
+      "Depends on #1, #2, #3, ideally.",
+      "Depends on #1 and #2; both are optional.",
+    ])
+      for (const n of [1, 2])
+        expect(listWideHedge(text) || hedged.test(clauseFor(text, n))).toBe(true);
+    for (const text of [
+      "Depends on #518 and #519; coordinate #493 and #510.",
+      "Depends on #541's revised mission merging first, after research #543.",
+      "Depends on #1 and #2.",
+    ])
+      expect(listWideHedge(text)).toBe(false);
   });
   it("validates migrate arguments; apply is not offered", async () => {
     expect(depsArgumentsFor(["migrate", "--plan", "p.json"])).toMatchObject({

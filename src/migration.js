@@ -20,7 +20,24 @@ export function clauseFor(context, number) {
   const mention = new RegExp(`#${number}\\b|/(?:issues|pull)/${number}\\b`);
   return context.split(/[;,]|\s+\u2014\s+/).find((part) => mention.test(part)) ?? context;
 }
-const isHedged = (context, number) => hedged.test(clauseFor(context, number));
+const reference = /#\d+\b|\/(?:issues|pull)\/\d+\b/;
+/**
+ * A hedge that qualifies the whole list ("Depends on #1, #2 and #3 (all optional)",
+ * "Depends on #1, #2, ideally") rather than one reference: a hedged clause or parenthetical
+ * that names no reference itself, or "all/both/each/either ... optional".
+ * @param {string} context
+ */
+export function listWideHedge(context) {
+  const parts = context.split(/[;,]|\s+\u2014\s+/);
+  if (parts.some((part) => !reference.test(part) && hedged.test(part))) return true;
+  for (const m of context.matchAll(/\(([^)]*)\)/g))
+    if (!reference.test(m[1]) && hedged.test(m[1])) return true;
+  return /\b(?:all|both|each|either|any)\b[^.;]*\b(?:optional(?:ly)?|nice[- ]to[- ]have)\b/i.test(
+    context,
+  );
+}
+const isHedged = (context, number) =>
+  listWideHedge(context) || hedged.test(clauseFor(context, number));
 
 /** Resolve a referenced number to an issue, a pull request, or null (missing). */
 async function resolveReference(repository, number, query) {
