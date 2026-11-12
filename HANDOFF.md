@@ -62,3 +62,7 @@ The project is public at https://github.com/trebizondoculpepper/github_triage an
 The initial CI workflow is intentionally small: Ubuntu / Node 24, npm ci, check, test and build. #8/#9 cover making it a proven portable contributor gate. Package publication, release automation and branch protection have not been configured. No npm publication is authorized by the bootstrap.
 
 `doc/poker-blocks-process.md` is the historical source project's workflow context, not an instruction to work unrelated game tickets. `AGENTS.md` is the standalone project's current agent guide; `CLAUDE.md` links to it.
+
+## Existing game consumer
+
+The original poker_blocks checkout retains its last merged stable CLI so existing agents' `npm run triage` commands keep working. The interrupted native-read edits were removed from that worktree only after byte-for-byte verification that every source file was preserved here. All new tooling work and transferred issues belong here. Replacing the game's stable embedded snapshot with an external launcher is a later consumer change, following that repository's documentation-first PR rules; this extraction did not change its live agent setup.
