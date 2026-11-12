@@ -25,13 +25,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      # Vite+ tooling needs Node 22+; the CLI itself supports Node 20+.
+      - name: Set up tooling Node
+        uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node }}
+          node-version: ${{ matrix.node == 20 && 22 || matrix.node }}
           cache: npm
       - run: npm ci
       - run: npm run check
       - run: npm test
       - run: npm run build
+      - name: Set up runtime Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: node --version
       - run: node dist/cli.mjs --help
+      - run: node src/cli.js --help
       - run: npm run smoke
+      - run: node scripts/smoke.mjs src/cli.js
