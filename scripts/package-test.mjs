@@ -3,12 +3,13 @@
  * Installed-archive test (doc/npm-releases.md, "Verification and publication").
  *
  * Packs the real npm archive, checks its contents against the allowlist, installs that exact
- * archive into a clean temporary consumer project, and runs the installed `github-triage`
- * executable through npm's bin link: help, invalid arguments, and the credential-free offline
- * smoke checks. Direct source or dist execution alone is not enough (#11).
+ * archive globally into an isolated temporary npm prefix (the recommended installation, #17),
+ * and runs the installed `github-triage` executable through npm's bin link from separate
+ * working directories: help, invalid arguments, and the credential-free offline smoke checks.
+ * Direct source or dist execution alone is not enough (#11).
  */
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -33,48 +34,58 @@ try {
     );
   console.log(`ok   archive ${packed.filename} contains exactly the allowlisted files`);
 
-  const consumer = join(work, "consumer");
-  await run(process.execPath, ["-e", `require("fs").mkdirSync(${JSON.stringify(consumer)})`]);
-  await writeFile(
-    join(consumer, "package.json"),
-    JSON.stringify({ name: "consumer", private: true }),
-  );
+  // The recommended installation is global (#17): one executable serves many checkouts.
+  // Install into an isolated temporary prefix so the test never touches the real global tree.
+  const prefix = join(work, "prefix");
   await npm(
-    ["install", "--no-audit", "--no-fund", "--save-dev", join(work, packed.filename)],
-    consumer,
+    [
+      "install",
+      "--global",
+      "--prefix",
+      prefix,
+      "--no-audit",
+      "--no-fund",
+      join(work, packed.filename),
+    ],
+    work,
   );
-  const manifest = JSON.parse(
-    await readFile(
-      join(consumer, "node_modules", ...packed.name.split("/"), "package.json"),
-      "utf8",
-    ),
-  );
+  const packageDir = windows
+    ? join(prefix, "node_modules", ...packed.name.split("/"))
+    : join(prefix, "lib", "node_modules", ...packed.name.split("/"));
+  const manifest = JSON.parse(await readFile(join(packageDir, "package.json"), "utf8"));
   if (manifest.scripts?.postinstall || manifest.scripts?.install || manifest.scripts?.preinstall)
-    throw new Error("The package must not run install scripts in consumers.");
-  console.log("ok   installed into a clean consumer without install scripts");
+    throw new Error("The package must not run install scripts on installation.");
+  console.log("ok   installed globally into an isolated prefix without install scripts");
 
-  const bin = join(
-    consumer,
-    "node_modules",
-    ".bin",
-    windows ? "github-triage.cmd" : "github-triage",
+  const bin = windows ? join(prefix, "github-triage.cmd") : join(prefix, "bin", "github-triage");
+  // Separate working directories stand in for different project checkouts.
+  const checkouts = [join(work, "checkout-a"), join(work, "checkout-b")];
+  for (const dir of checkouts) await mkdir(dir);
+  for (const cwd of checkouts) {
+    // With shell: true, Windows needs the .cmd path quoted (temporary paths may contain spaces).
+    const cli = (args) => run(windows ? `"${bin}"` : bin, args, { cwd, shell: windows });
+    const help = await cli(["--help"]);
+    if (!help.stdout.startsWith("Usage:"))
+      throw new Error(`Installed bin printed no help in ${cwd}.`);
+    const invalid = await cli(["--no-such-option"]).then(
+      () => null,
+      (error) => error,
+    );
+    if (invalid?.code !== 1)
+      throw new Error(`Invalid arguments exited ${invalid?.code ?? 0}, not 1, in ${cwd}.`);
+    // Reuse the credential-free smoke checks (offline fixtures, unreachable gh) on the
+    // globally installed copy, run from this working directory.
+    await run(
+      process.execPath,
+      [join(root, "scripts", "smoke.mjs"), join(packageDir, "dist", "cli.mjs")],
+      {
+        cwd,
+      },
+    );
+  }
+  console.log(
+    "ok   global bin works from separate working directories (help, invalid args, smoke)",
   );
-  const cli = (args) => run(bin, args, { cwd: consumer, shell: windows });
-  const help = await cli(["--help"]);
-  if (!help.stdout.startsWith("Usage:")) throw new Error("Installed bin printed no help.");
-  console.log("ok   installed bin prints help");
-  const invalid = await cli(["--no-such-option"]).then(
-    () => null,
-    (error) => error,
-  );
-  if (invalid?.code !== 1)
-    throw new Error(`Invalid arguments exited ${invalid?.code ?? 0}, not 1.`);
-  console.log("ok   installed bin exits 1 on invalid arguments");
-
-  // Reuse the credential-free smoke checks (offline fixtures, unreachable gh) on the installed copy.
-  const installed = join(consumer, "node_modules", ...packed.name.split("/"), "dist", "cli.mjs");
-  await run(process.execPath, [join(root, "scripts", "smoke.mjs"), installed], { cwd: consumer });
-  console.log("ok   smoke checks pass on the installed package");
   console.log("Package test passed.");
 } finally {
   await rm(work, { recursive: true, force: true });
