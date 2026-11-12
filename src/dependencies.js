@@ -255,7 +255,8 @@ export async function planDependencyChange(repository, request, query = ghQuery)
   // --on numbers name issues in this repository; ignore same-numbered cross-repository blockers.
   const existing = new Set(
     target.blockedBy.nodes
-      .filter((n) => n.repository?.nameWithOwner === repository)
+      // GitHub repository names are case-insensitive; --repo may differ from nameWithOwner.
+      .filter((n) => n.repository?.nameWithOwner?.toLowerCase() === repository.toLowerCase())
       .map((n) => n.number),
   );
   const flag = action === "add" ? "--add-blocked-by" : "--remove-blocked-by";

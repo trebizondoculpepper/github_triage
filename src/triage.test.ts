@@ -894,6 +894,15 @@ describe("deps add and deps remove", () => {
     const addLocal = await planDependencyChange(repo, add([5]), crossRepo);
     expect(addLocal.changes[0].status).toBe("apply");
   });
+  it("matches local blockers when --repo casing differs from GitHub's canonical name", async () => {
+    const { query } = graphQuery({ edges: [[1, 2]] });
+    const plan = await planDependencyChange(
+      repo.toUpperCase(),
+      { action: "remove", number: 1, on: [2], note: "x" },
+      query,
+    );
+    expect(plan.changes[0].status).toBe("apply");
+  });
   it("removes only existing edges", async () => {
     const { query } = graphQuery({ states: { 3: {} }, edges: [[1, 2]] });
     const plan = await planDependencyChange(
