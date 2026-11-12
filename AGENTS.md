@@ -32,9 +32,10 @@ npm test                                      # vp test run (Vitest)
 npx vp test run src/triage.test.ts -t "name"  # one file / one test by name
 npm run build                                 # vp pack -> dist/cli.mjs
 node dist/cli.mjs --help                      # quick CLI smoke test
+npm run smoke                                 # credential-free exit-code smoke of dist/cli.mjs
 ```
 
-Without `--repo`, the target repository is resolved by `gh repo view` from the current working directory. The runtime uses only Node built-ins and `gh`; types live in `src/types.d.ts` (JS checked by TypeScript). Tests are in `src/triage.test.ts`; one test fakes `gh` with a POSIX shell script and is skipped on Windows. The CLI supports Node 20+.
+Without `--repo`, the target repository is resolved by `gh repo view` from the current working directory. The runtime uses only Node built-ins and `gh`; types live in `src/types.d.ts` (JS checked by TypeScript). Tests are in `src/triage.test.ts`; one test fakes `gh` with a POSIX shell script and is skipped on Windows. The CLI supports Node 20+, but the Vite+ tooling needs Node 22+. CI runs the checks, tests, build and smoke tests on Ubuntu, macOS and Windows with Node 20, 22 and 24; the single `verify` job passes only when every matrix job passes, and is the check to require. Line endings are LF everywhere.
 
 ## Choosing work
 
