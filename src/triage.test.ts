@@ -1376,6 +1376,51 @@ describe("dependency migration", () => {
     expect(q.tickets[0].edges[0]).toMatchObject({ status: "review" });
     expect(q.tickets[0].edges[0].reason).toContain("incomplete");
   });
+  it("reviews issues a referenced PR closes in other repositories", async () => {
+    const env = live({
+      issues: { 1: { body: "Depends on #30." }, 9: {} },
+      prs: { 30: { merged: true, closes: [9] } },
+    });
+    const base = env.query;
+    const external: Query = async (source, variables) => {
+      const data = (await base(source, variables)) as any;
+      const node = data.repository?.issueOrPullRequest;
+      if (node?.__typename === "PullRequest")
+        node.closingIssuesReferences.nodes.push({
+          number: 4,
+          url: "https://github.com/other/repo/issues/4",
+          state: "OPEN",
+          repository: { nameWithOwner: "other/repo" },
+        });
+      return data;
+    };
+    const p = await planMigration(repo, {
+      query: external,
+      collect: env.snapshotNow as never,
+      now: clock,
+    });
+    expect(p.tickets[0].edges.map((e) => [e.blocker, e.status])).toEqual([
+      [9, "apply"],
+      [4, "review"],
+    ]);
+  });
+  it("sends the blocked:work label row to review when labels are incomplete", async () => {
+    const env = live({
+      issues: { 1: { labels: ["status:blocked", "blocked:work"], body: "Depends on #2." }, 2: {} },
+    });
+    const partial = async () => {
+      const snap = await env.snapshotNow();
+      snap.issues[0].labels.pageInfo.hasNextPage = true;
+      return snap;
+    };
+    const p = await planMigration(repo, {
+      query: env.query,
+      collect: partial as never,
+      now: clock,
+    });
+    expect(p.tickets[0].labels).toMatchObject({ status: "review" });
+    expect(p.tickets[0].labels!.reason).toContain("incomplete");
+  });
   it("skips edges and labels that already match", async () => {
     const env = live({
       issues: { 1: { labels: ["status:blocked", "blocked:work"], body: "Depends on #2." }, 2: {} },

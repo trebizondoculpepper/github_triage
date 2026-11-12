@@ -129,13 +129,24 @@ export async function planMigration(repository, runtime = {}) {
         });
         continue;
       }
-      const closes = (target.closingIssuesReferences?.nodes ?? []).filter((n) =>
-        sameRepo(n.repository.nameWithOwner, repository),
-      );
-      if (closes.length)
-        for (const n of closes)
-          propose(n.number, n.url, n.state, `pr #${target.number}`, ref.context, ref.number);
-      else if (target.merged)
+      const allClosing = target.closingIssuesReferences?.nodes ?? [];
+      const closes = allClosing.filter((n) => sameRepo(n.repository.nameWithOwner, repository));
+      for (const n of closes)
+        propose(n.number, n.url, n.state, `pr #${target.number}`, ref.context, ref.number);
+      // Issues the PR closes elsewhere are kept for review, like declared cross-repo references.
+      for (const n of allClosing.filter((n) => !sameRepo(n.repository.nameWithOwner, repository)))
+        edges.push({
+          blocker: n.number,
+          url: n.url,
+          state: n.state,
+          source: `pr #${target.number}`,
+          context: ref.context,
+          crossRepository: true,
+          status: "review",
+          reason: "Cross-repository issue closed by a referenced PR.",
+        });
+      if (allClosing.length) continue;
+      if (target.merged)
         edges.push({
           ...base,
           url: target.url,
@@ -151,7 +162,15 @@ export async function planMigration(repository, runtime = {}) {
         });
     }
     let labels = null;
-    if (tags.includes(workflow.retiredReason)) {
+    if (tags.includes(workflow.retiredReason) && issue.labels.pageInfo?.hasNextPage) {
+      // Another blocked:* reason may be on a later page: never infer readiness from a partial list.
+      labels = {
+        remove: [],
+        add: [],
+        status: "review",
+        reason: "More than 100 labels; the label list is incomplete.",
+      };
+    } else if (tags.includes(workflow.retiredReason)) {
       const otherReasons = tags.filter(
         (t) => t.startsWith(workflow.reasonPrefix) && t !== workflow.retiredReason,
       );
@@ -254,7 +273,7 @@ export function migrationComment(blockers, removed, added) {
 async function readTicket(repository, number, query) {
   const [owner, name] = repository.split("/");
   const data = await query(
-    `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){number updatedAt labels(first:100){nodes{name}} issueDependenciesSummary{blockedBy} blockedBy(first:100){nodes{number repository{nameWithOwner}}}}}}`,
+    `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){number updatedAt labels(first:100){nodes{name} pageInfo{hasNextPage}} issueDependenciesSummary{blockedBy} blockedBy(first:100){nodes{number repository{nameWithOwner}}}}}}`,
     { owner, name, number },
   );
   const issue = data.repository?.issue;
@@ -409,10 +428,13 @@ export async function applyMigration(plan, runtime = {}) {
         // Making a ticket ready relies on GitHub keeping it Blocked: re-check live, so a
         // reviewer withholding its supporting edge cannot turn missing evidence into pickup.
         const makesReady = add.includes(workflow.ready) || remove.includes(workflow.blocked);
-        if (makesReady && !(live.issueDependenciesSummary?.blockedBy > 0)) {
+        const incompleteLabels = !!live.labels.pageInfo?.hasNextPage;
+        if (makesReady && (incompleteLabels || !(live.issueDependenciesSummary?.blockedBy > 0))) {
           Object.assign(result, {
             status: "skipped",
-            reason: "Label change withheld: no open native blocker remains; review the label row.",
+            reason: incompleteLabels
+              ? "Label change withheld: more than 100 labels; review the label row."
+              : "Label change withheld: no open native blocker remains; review the label row.",
           });
           if (edges.length) {
             // Still explain the edges that were recorded; claim no label change.
