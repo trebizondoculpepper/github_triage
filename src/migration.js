@@ -11,16 +11,37 @@ import { collect, declaredDependencyContexts, ghQuery } from "./github.js";
 /** Wording that must never become a blocker without review. */
 export const hedged = /\b(?:optional(?:ly)?|coordinat\w*|nice[- ]to[- ]have|ideally|after)\b/i;
 const sameRepo = (a, b) => a.toLowerCase() === b.toLowerCase();
+const reference = /#\d+\b|\/(?:issues|pull)\/\d+\b/;
+const clauses = (context) => context.split(/[;,]|\s+\u2014\s+/);
+const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /**
  * The clause of a declaring sentence that names a reference, so hedging elsewhere in the
- * sentence ("Depends on #1; coordinate #2") does not taint a firm blocker.
- * @param {string} context @param {number} number
+ * sentence ("Depends on #1; coordinate #2") does not taint a firm blocker. A reference is
+ * matched in its own form: a local one as a bare `#N` (or its URL), an external one only by
+ * its URL. A clause holding nothing but references ("optionally #2, #3") continues the
+ * clause before it, so it keeps that clause's qualifier.
+ * @param {string} context
+ * @param {number | { number: number, url?: string, local?: boolean }} ref
  */
-export function clauseFor(context, number) {
-  const mention = new RegExp(`#${number}\\b|/(?:issues|pull)/${number}\\b`);
-  return context.split(/[;,]|\s+\u2014\s+/).find((part) => mention.test(part)) ?? context;
+export function clauseFor(context, ref) {
+  const { number, url, local = true } = typeof ref === "number" ? { number: ref } : ref;
+  const forms = [
+    ...(local ? [`(?<![\\w/])#${number}\\b`] : []),
+    ...(url ? [`${escape(url)}\\b`] : []),
+  ];
+  const mention = new RegExp(forms.join("|") || `#${number}\\b`);
+  const parts = clauses(context);
+  let at = parts.findIndex((part) => mention.test(part));
+  if (at < 0) return context;
+  const end = at;
+  const onlyReferences = (part) =>
+    !part
+      .replace(/https:\/\/github\.com\/[^\s)\]]+|#\d+\b/g, "")
+      .replace(/\b(?:and|or)\b/gi, "")
+      .replace(/[\s.!?:()]/g, "");
+  while (at > 0 && onlyReferences(parts[at])) at--;
+  return parts.slice(at, end + 1).join(",");
 }
-const reference = /#\d+\b|\/(?:issues|pull)\/\d+\b/;
 /**
  * A hedge that qualifies the whole list ("Depends on #1, #2 and #3 (all optional)",
  * "Depends on #1, #2, ideally") rather than one reference: a hedged clause or parenthetical
@@ -28,7 +49,10 @@ const reference = /#\d+\b|\/(?:issues|pull)\/\d+\b/;
  * @param {string} context
  */
 export function listWideHedge(context) {
-  const parts = context.split(/[;,]|\s+\u2014\s+/);
+  // A qualifier before the first reference governs the list it introduces ("Optional: #2, #3").
+  const first = context.search(reference);
+  if (first > 0 && hedged.test(context.slice(0, first))) return true;
+  const parts = clauses(context);
   if (parts.some((part) => !reference.test(part) && hedged.test(part))) return true;
   for (const m of context.matchAll(/\(([^)]*)\)/g))
     if (!reference.test(m[1]) && hedged.test(m[1])) return true;
@@ -36,8 +60,7 @@ export function listWideHedge(context) {
     context,
   );
 }
-const isHedged = (context, number) =>
-  listWideHedge(context) || hedged.test(clauseFor(context, number));
+const isHedged = (context, ref) => listWideHedge(context) || hedged.test(clauseFor(context, ref));
 
 /** Resolve a referenced number to an issue, a pull request, or null (missing). */
 async function resolveReference(repository, number, query) {
@@ -73,7 +96,7 @@ export async function planMigration(repository, runtime = {}) {
         .map((n) => n.number),
     );
     const edges = [];
-    const propose = (blocker, url, state, source, context, refNumber = blocker) => {
+    const propose = (blocker, url, state, source, context, mention = blocker) => {
       if (blocker === issue.number)
         edges.push({
           blocker,
@@ -97,10 +120,8 @@ export async function planMigration(repository, runtime = {}) {
           state,
           source,
           context,
-          status: isHedged(context, refNumber) ? "review" : "apply",
-          reason: isHedged(context, refNumber)
-            ? "Hedged wording; confirm it is a real blocker."
-            : "",
+          status: isHedged(context, mention) ? "review" : "apply",
+          reason: isHedged(context, mention) ? "Hedged wording; confirm it is a real blocker." : "",
         });
     };
     for (const ref of declaredDependencyContexts(issue.body ?? "", repository)) {
@@ -130,7 +151,11 @@ export async function planMigration(repository, runtime = {}) {
         continue;
       }
       if (target.__typename === "Issue") {
-        propose(target.number, target.url, target.state, "text", ref.context);
+        propose(target.number, target.url, target.state, "text", ref.context, {
+          number: ref.number,
+          url: ref.url,
+          local: true,
+        });
         continue;
       }
       // A pull request cannot be a blocker: map it to the issues it closes.
@@ -146,7 +171,11 @@ export async function planMigration(repository, runtime = {}) {
       const allClosing = target.closingIssuesReferences?.nodes ?? [];
       const closes = allClosing.filter((n) => sameRepo(n.repository.nameWithOwner, repository));
       for (const n of closes)
-        propose(n.number, n.url, n.state, `pr #${target.number}`, ref.context, ref.number);
+        propose(n.number, n.url, n.state, `pr #${target.number}`, ref.context, {
+          number: ref.number,
+          url: ref.url,
+          local: true,
+        });
       // Issues the PR closes elsewhere are kept for review, like declared cross-repo references.
       for (const n of allClosing.filter((n) => !sameRepo(n.repository.nameWithOwner, repository)))
         edges.push({
@@ -176,8 +205,9 @@ export async function planMigration(repository, runtime = {}) {
         });
     }
     let labels = null;
-    if (tags.includes(workflow.retiredReason) && issue.labels.pageInfo?.hasNextPage) {
-      // Another blocked:* reason may be on a later page: never infer readiness from a partial list.
+    if (issue.labels.pageInfo?.hasNextPage) {
+      // blocked:work or another blocked:* reason may be on a later page: report the ticket
+      // for review rather than infer anything from a partial list, or silently omit it.
       labels = {
         remove: [],
         add: [],
@@ -234,6 +264,8 @@ export async function planMigration(repository, runtime = {}) {
     createdAt,
     guidance:
       'Read-only report. "apply" rows resolved cleanly from explicit declarations; "review" rows need a person. Record edges with `deps add N --on M --note WHY`; change labels deliberately. Automatic apply is deferred (#48).',
+    // Collection warnings (e.g. incomplete labels) travel with the report.
+    warnings: snapshot.warnings ?? [],
     summary: {
       tickets: tickets.length,
       apply: rows.filter((r) => r.status === "apply").length,
@@ -250,6 +282,7 @@ export function migrationPlanText(plan) {
     `Dependency migration plan: ${plan.repository} (${plan.createdAt})`,
     `${plan.summary.tickets} tickets; ${plan.summary.apply} rows to apply, ${plan.summary.review} to review, ${plan.summary.satisfied} already satisfied.`,
     plan.guidance,
+    ...(plan.warnings ?? []).map((w) => `INCOMPLETE: ${w}`),
   ];
   for (const group of ["apply", "review"]) {
     lines.push(`\n${group.toUpperCase()}`);

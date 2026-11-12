@@ -1301,6 +1301,48 @@ describe("dependency migration", () => {
     ])
       expect(listWideHedge(text)).toBe(false);
   });
+  it("keeps a leading qualifier across a comma-separated list", async () => {
+    const env = live({
+      issues: { 1: { body: "## Dependencies\n- Optional: #2, #3\n- #4" }, 2: {}, 3: {}, 4: {} },
+    });
+    const p = await plan(env);
+    expect(p.tickets[0].edges.map((e) => [e.blocker, e.status])).toEqual([
+      [2, "review"],
+      [3, "review"],
+      [4, "apply"],
+    ]);
+    expect(clauseFor("Depends on #1, optionally #2, #3.", 3)).toMatch(/optionally/);
+    expect(clauseFor("Depends on #1, optionally #2, #3.", 1)).not.toMatch(/optionally/);
+  });
+  it("judges each reference by its own clause when numbers repeat across repositories", async () => {
+    const env = live({
+      issues: {
+        1: { body: "Depends on https://github.com/other/repo/issues/2; optionally #2." },
+        2: {},
+      },
+    });
+    const p = await plan(env);
+    expect(p.tickets[0].edges.map((e) => [e.blocker, e.status, !!e.crossRepository])).toEqual([
+      [2, "review", true],
+      [2, "review", false],
+    ]);
+  });
+  it("reports a ticket with an incomplete label list even without visible blocked:work, with warnings", async () => {
+    const env = live({ issues: { 1: { labels: ["status:blocked"] } } });
+    const partial = async () => {
+      const snap = await env.snapshotNow();
+      snap.issues[0].labels.pageInfo.hasNextPage = true;
+      snap.warnings = [`${snap.issues[0].url}: labels exceed 100; label analysis incomplete.`];
+      return snap;
+    };
+    const p = await planMigration(repo, {
+      query: env.query,
+      collect: partial as never,
+      now: clock,
+    });
+    expect(p.tickets[0].labels).toMatchObject({ status: "review" });
+    expect(p.warnings).toHaveLength(1);
+  });
   it("validates migrate arguments; apply is not offered", async () => {
     expect(depsArgumentsFor(["migrate", "--plan", "p.json"])).toMatchObject({
       migrate: "plan",
