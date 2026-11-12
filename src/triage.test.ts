@@ -24,7 +24,7 @@ import {
 } from "./dependencies.js";
 import { briefing, dependencyDone, textReport } from "./briefing.js";
 import { collect, declaredDependencies, graphqlAnswer, pages, type Query } from "./github.js";
-import { applyMigration, clauseFor, planMigration } from "./migration.js";
+import { clauseFor, planMigration } from "./migration.js";
 import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
 
 const repo = "example/project";
@@ -1129,11 +1129,6 @@ describe("dependency migration", () => {
   };
   const plan = (env: ReturnType<typeof live>) =>
     planMigration(repo, { query: env.query, collect: env.snapshotNow as never, now: clock });
-  const apply = (
-    p: Awaited<ReturnType<typeof planMigration>>,
-    env: ReturnType<typeof live>,
-    extra = {},
-  ) => applyMigration(p, { query: env.query, run: env.run, pace: async () => {}, ...extra });
 
   it("plans edges from explicit text and routes doubtful references to review", async () => {
     const env = live({
@@ -1209,142 +1204,6 @@ describe("dependency migration", () => {
     const text = "Depends on #541's revised mission merging first, after research #543.";
     expect(clauseFor(text, 541)).not.toMatch(/after/);
     expect(clauseFor(text, 543)).toMatch(/after/);
-  });
-  it("applies edges, labels and one comment per ticket, journalling each step", async () => {
-    const env = live({
-      issues: {
-        1: { labels: ["status:blocked", "blocked:work"], body: "Depends on #2." },
-        2: {},
-        3: { body: "Requires #2." },
-      },
-    });
-    const p = await plan(env);
-    let saved: Record<string, any> = {};
-    const result = await apply(p, env, {
-      saveJournal: async (j: Record<string, any>) => void (saved = structuredClone(j)),
-    });
-    expect(result.exitCode).toBe(0);
-    expect(result.summary.applied).toBe(2);
-    expect(env.writes.map((w) => `${w[1]} ${w[2]}`)).toEqual([
-      "edit 1",
-      "edit 1",
-      "comment 1",
-      "edit 3",
-      "comment 3",
-    ]);
-    expect(env.writes[1]).toEqual(
-      expect.arrayContaining(["--remove-label", "blocked:work", "--add-label", "status:ready"]),
-    );
-    expect(env.writes[2].at(-1)).toContain("#2");
-    expect(saved.tickets[1].steps).toEqual({
-      edges: true,
-      labels: true,
-      comment: true,
-      labelComment: true,
-    });
-    expect(saved.tickets[1].complete).toBe(true);
-    expect(saved.tickets[1].updatedAt).toBe(env.meta[1].updatedAt);
-  });
-  it("skips a ticket edited since planning and exits 2", async () => {
-    const env = live({ issues: { 1: { body: "Depends on #2." }, 2: {} } });
-    const p = await plan(env);
-    env.touch(1);
-    const result = await apply(p, env);
-    expect(result.results[0]).toMatchObject({
-      status: "skipped",
-      reason: "Changed since planning.",
-    });
-    expect(env.writes).toEqual([]);
-    expect(result.exitCode).toBe(2);
-  });
-  it("resumes from the journal, finishing with the comment instead of tripping its own guard", async () => {
-    const env = live({
-      issues: { 1: { labels: ["status:blocked", "blocked:work"], body: "Depends on #2." }, 2: {} },
-    });
-    const p = await plan(env);
-    let journal: Record<string, any> = {
-      schemaVersion: 1,
-      repository: repo,
-      planId: p.planId,
-      tickets: {},
-    };
-    const failComment = async (args: string[]) => {
-      if (args[1] === "comment") throw new Error("gh issue comment failed.");
-      await env.run(args);
-    };
-    const first = await applyMigration(p, {
-      query: env.query,
-      run: failComment,
-      pace: async () => {},
-      journal,
-      saveJournal: async (j) => void (journal = structuredClone(j)),
-    });
-    expect(first.results[0].status).toBe("failed");
-    expect(first.exitCode).toBe(1);
-    env.writes.length = 0;
-    const second = await apply(p, env, { journal, saveJournal: async () => {} });
-    expect(second.exitCode).toBe(0);
-    expect(env.writes.map((w) => w[1])).toEqual(["comment"]);
-    const third = await apply(p, env, { journal, saveJournal: async () => {} });
-    expect(third.results[0].status).toBe("done-earlier");
-  });
-  it("checkpoints each edge, so a failure on the second edge resumes cleanly", async () => {
-    const env = live({ issues: { 1: { body: "Depends on #2 and #3." }, 2: {}, 3: {} } });
-    const p = await plan(env);
-    let journal: Record<string, any> = {
-      schemaVersion: 1,
-      repository: repo,
-      planId: p.planId,
-      tickets: {},
-    };
-    const save = async (j: Record<string, any>) => void (journal = structuredClone(j));
-    const first = await applyMigration(p, {
-      query: env.query,
-      pace: async () => {},
-      journal,
-      saveJournal: save,
-      run: async (args) => {
-        if (args.includes("3")) throw new Error("gh issue edit failed.");
-        await env.run(args);
-      },
-    });
-    expect(first.results[0].status).toBe("failed");
-    env.writes.length = 0;
-    const second = await apply(p, env, { journal, saveJournal: save });
-    expect(second.results[0].status).toBe("applied");
-    expect(
-      env.writes.map((w) =>
-        w.slice(1, 3).concat(w.includes("--add-blocked-by") ? [w.at(-1)!] : []),
-      ),
-    ).toEqual([
-      ["edit", "1", "3"],
-      ["comment", "1"],
-    ]);
-  });
-  it("withholds a switch to ready when a reviewer withheld the only open blocker", async () => {
-    const env = live({
-      issues: { 1: { labels: ["status:blocked", "blocked:work"], body: "Depends on #2." }, 2: {} },
-    });
-    const p = await plan(env);
-    expect(p.tickets[0].labels!.status).toBe("apply");
-    p.tickets[0].edges[0].status = "review"; // the reviewer's edit
-    const result = await apply(p, env);
-    expect(result.results[0]).toMatchObject({ status: "skipped" });
-    expect(result.results[0].reason).toContain("no open native blocker");
-    expect(env.writes).toEqual([]);
-    expect(result.exitCode).toBe(2);
-  });
-  it("refuses a progress journal left by a different plan", async () => {
-    const env = live({ issues: { 1: { body: "Depends on #2." }, 2: {}, 3: {} } });
-    const first = await plan(env);
-    const journal = {
-      schemaVersion: 1,
-      repository: repo,
-      planId: first.planId,
-      tickets: { 1: { steps: { comment: true } } },
-    };
-    const second = { ...first, planId: `${repo}@later` };
-    await expect(apply(second, env, { journal })).rejects.toThrow("different plan");
   });
   it("keeps a local edge when another repository's issue has the same number", async () => {
     const env = live({
@@ -1427,199 +1286,17 @@ describe("dependency migration", () => {
     expect(p.tickets[0].labels).toMatchObject({ status: "review" });
     expect(p.tickets[0].labels!.reason).toContain("incomplete");
   });
-  it("applies an approved cross-repository row by URL, never as the same-numbered local issue", async () => {
-    const env = live({
-      issues: { 1: { body: "Depends on https://github.com/other/repo/issues/2." }, 2: {} },
-    });
-    const p = await plan(env);
-    expect(p.tickets[0].edges[0]).toMatchObject({
-      blocker: 2,
-      status: "review",
-      crossRepository: true,
-    });
-    p.tickets[0].edges[0].status = "apply"; // the reviewer approves it
-    const result = await apply(p, env);
-    expect(result.exitCode).toBe(0);
-    expect(env.writes[0]).toEqual([
-      "issue",
-      "edit",
-      "1",
-      "--repo",
-      repo,
-      "--add-blocked-by",
-      "https://github.com/other/repo/issues/2",
-    ]);
-    expect(env.writes[1].at(-1)).toContain("other/repo#2");
-    expect(env.writes[1].at(-1)).not.toContain("##");
-  });
-  it("dry run applies the readiness guard exactly as a real run would", async () => {
-    const env = live({
-      issues: { 1: { labels: ["status:blocked", "blocked:work"], body: "Depends on #2." }, 2: {} },
-    });
-    const p = await plan(env);
-    p.tickets[0].edges[0].status = "review"; // the reviewer withholds the only open edge
-    const dry = await apply(p, env, { dryRun: true });
-    expect(dry.results[0].status).toBe("skipped");
-    expect(dry.results[0].commands).toEqual([]);
-    expect(dry.exitCode).toBe(2);
-    const real = await apply(p, env);
-    expect(real.results[0].status).toBe(dry.results[0].status);
-    expect(env.writes).toEqual([]);
-  });
-  it("re-checks live after writing an approved external edge instead of trusting the prediction", async () => {
-    const env = live({
-      issues: {
-        1: {
-          labels: ["status:blocked", "blocked:work"],
-          body: "Depends on #2 and https://github.com/other/repo/issues/5.",
-        },
-        2: {},
-      },
-    });
-    const p = await plan(env);
-    const [external, local] = p.tickets[0].edges;
-    local.status = "review"; // withhold the local edge
-    external.status = "apply"; // approve the external one (state unknown in the plan)
-    const result = await apply(p, env);
-    expect(result.results[0].status).toBe("applied");
-    expect(env.writes.some((w) => w.includes("--add-label") && w.includes("status:ready"))).toBe(
-      true,
-    );
-  });
-  it("keeps a withheld label step resumable until it is done", async () => {
-    const env = live({
-      issues: { 1: { labels: ["status:blocked", "blocked:work"], body: "Depends on #2." }, 2: {} },
-    });
-    const p = await plan(env);
-    let journal: Record<string, any> = {
-      schemaVersion: 1,
-      repository: repo,
-      planId: p.planId,
-      tickets: {},
-    };
-    const save = async (j: Record<string, any>) => void (journal = structuredClone(j));
-    // After planning, GitHub reports no open blocker, so the switch to ready is withheld.
-    const original = env.query;
-    let blockerOpen = false;
-    const query: Query = async (source, variables) => {
-      const data = (await original(source, variables)) as any;
-      const s = data.repository?.issue?.issueDependenciesSummary;
-      if (s && Number(variables.number) === 1 && !blockerOpen) s.blockedBy = 0;
-      return data;
-    };
-    const first = await applyMigration(p, {
-      query,
-      run: env.run,
-      pace: async () => {},
-      journal,
-      saveJournal: save,
-    });
-    expect(first.results[0].status).toBe("skipped");
-    expect(journal.tickets[1].complete).toBeUndefined();
-    expect(journal.tickets[1].steps.labels).toBeUndefined();
-    blockerOpen = true;
-    env.writes.length = 0;
-    const second = await applyMigration(p, {
-      query,
-      run: env.run,
-      pace: async () => {},
-      journal,
-      saveJournal: save,
-    });
-    expect(second.results[0].status).toBe("applied");
-    expect(env.writes.map((w) => w[1])).toEqual(["edit", "comment"]);
-    expect(env.writes[1].at(-1)).toContain("added `status:ready`");
-    expect(env.writes[1].at(-1)).not.toContain("blocked-by");
-    const third = await applyMigration(p, {
-      query,
-      run: env.run,
-      pace: async () => {},
-      journal,
-      saveJournal: save,
-    });
-    expect(third.results[0].status).toBe("done-earlier");
-  });
-  it("skips edges and labels that already match", async () => {
-    const env = live({
-      issues: { 1: { labels: ["status:blocked", "blocked:work"], body: "Depends on #2." }, 2: {} },
-    });
-    const p = await plan(env);
-    env.writes.length = 0;
-    // Someone recorded the edge after planning, then the guard is satisfied by re-planning.
-    await env.run(["issue", "edit", "1", "--repo", repo, "--add-blocked-by", "2"]);
-    const fresh = {
-      ...p,
-      tickets: p.tickets.map((t) => ({ ...t, updatedAt: env.meta[1].updatedAt })),
-    };
-    env.writes.length = 0;
-    await apply(fresh, env);
-    expect(env.writes.map((w) => w.slice(1, 3).join(" "))).toEqual(["edit 1", "comment 1"]);
-    expect(env.writes[0]).not.toContain("--add-blocked-by");
-  });
-  it("stops at a rate limit and reports the rest as skipped", async () => {
-    const env = live({
-      issues: { 1: { body: "Depends on #9." }, 2: { body: "Depends on #9." }, 9: {} },
-    });
-    const p = await plan(env);
-    const result = await apply(p, env, {
-      run: async () => {
-        throw new RateLimitError("gh issue edit was rate limited by GitHub.");
-      },
-    });
-    expect(result.results.map((r) => r.status)).toEqual(["failed", "skipped"]);
-    expect(result.exitCode).toBe(1);
-  });
-  it("dry run lists the exact commands and writes nothing", async () => {
-    const env = live({ issues: { 1: { body: "Depends on #2." }, 2: {} } });
-    const p = await plan(env);
-    const result = await apply(p, env, { dryRun: true });
-    expect(result.results[0].status).toBe("would-apply");
-    expect(result.results[0].commands[0]).toEqual([
-      "issue",
-      "edit",
-      "1",
-      "--repo",
-      repo,
-      "--add-blocked-by",
-      "2",
-    ]);
-    expect(env.writes).toEqual([]);
-  });
-  it("validates migrate arguments and refuses a mismatched journal", async () => {
+  it("validates migrate arguments; apply is not offered", async () => {
     expect(depsArgumentsFor(["migrate", "--plan", "p.json"])).toMatchObject({
       migrate: "plan",
       file: "p.json",
     });
-    expect(depsArgumentsFor(["migrate", "--apply", "p.json", "--dry-run"])).toMatchObject({
-      migrate: "apply",
-      dryRun: true,
-    });
     for (const bad of [
       ["migrate"],
-      ["migrate", "--plan", "a", "--apply", "b"],
+      ["migrate", "--apply", "p.json"],
       ["migrate", "--plan", "a", "--dry-run"],
       ["7", "--plan", "a"],
     ])
       expect(() => depsArgumentsFor(bad)).toThrow();
-    const dir = await mkdtemp(join(tmpdir(), "triage-migrate-"));
-    try {
-      const file = join(dir, "plan.json");
-      await atomicJson(file, {
-        schemaVersion: 1,
-        kind: "dependency-migration-plan",
-        repository: repo,
-        tickets: [],
-      });
-      await atomicJson(`${file}.progress.json`, {
-        schemaVersion: 1,
-        repository: "other/repo",
-        tickets: {},
-      });
-      await expect(main(["deps", "migrate", "--apply", file], async () => {})).rejects.toThrow(
-        "journal",
-      );
-    } finally {
-      await rm(dir, { recursive: true });
-    }
   });
 });

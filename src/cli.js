@@ -15,12 +15,7 @@ import {
   planDependencyChange,
 } from "./dependencies.js";
 import { compactBriefing, compactText } from "./compact.js";
-import {
-  applyMigration,
-  migrationPlanText,
-  migrationResultText,
-  planMigration,
-} from "./migration.js";
+import { migrationPlanText, planMigration } from "./migration.js";
 import { briefing, textReport } from "./briefing.js";
 
 export const help = `Usage: npm run triage -- [options]
@@ -46,7 +41,6 @@ export const depsHelp = `Usage: npm run triage -- deps N [--tree] [--json] [--re
        npm run triage -- deps add N --on M [--on K] --note WHY [--dry-run] [--json]
        npm run triage -- deps remove N --on M [--on K] --note WHY [--dry-run] [--json]
        npm run triage -- deps migrate --plan FILE [--repo owner/name] [--json]
-       npm run triage -- deps migrate --apply FILE [--dry-run] [--json]
 deps N reads native GitHub issue dependencies for issue N (read-only).
 deps add/remove make N blocked (or no longer blocked) by each M, after fresh live checks:
 refuses self-dependencies, pull requests, missing issues and cycles; an edge that already
@@ -59,9 +53,8 @@ Changes no labels.
   --json                Versioned structured output (use npm run --silent triage)
   --repo owner/name     Repository (default: current gh checkout)
   --help                Show usage
-deps migrate --plan reads only: it writes a reviewable plan converting \`Depends on\` text and
-blocked:work labels to native dependencies. --apply applies only the plan's "apply" rows, one
-ticket at a time, resuming from FILE.progress.json and skipping tickets changed since planning.
+deps migrate --plan reads only: it writes a report of how \`Depends on\` text and blocked:work
+labels map to native dependencies. Record edges with deps add; automatic apply is deferred (#48).
 Exit: 0 all done; 2 partly done (refused/skipped/failed items listed); 1 nothing done or
 invalid arguments/API failure.
 `;
@@ -82,7 +75,6 @@ export function depsArgumentsFor(args) {
       note: { type: "string" },
       "dry-run": { type: "boolean" },
       plan: { type: "string" },
-      apply: { type: "string" },
     },
   });
   if (values.help) return { help: true };
@@ -92,26 +84,13 @@ export function depsArgumentsFor(args) {
     /^[1-9]\d*$/.test(text ?? "") && Number.isSafeInteger(Number(text)) ? Number(text) : null;
   if (positionals[0] === "migrate") {
     const usage =
-      "Usage: deps migrate --plan FILE [--repo owner/name] | deps migrate --apply FILE [--dry-run] [--json]";
-    if (
-      positionals.length !== 1 ||
-      !!values.plan === !!values.apply ||
-      values.on ||
-      values.note ||
-      values.tree
-    )
+      "Usage: deps migrate --plan FILE [--repo owner/name] [--json] (read-only; automatic apply is deferred, #48)";
+    if (positionals.length !== 1 || !values.plan || values.on || values.note || values.tree)
       throw new Error(usage);
-    if (values.plan && values["dry-run"]) throw new Error(`--plan never changes GitHub. ${usage}`);
-    return {
-      migrate: values.plan ? "plan" : "apply",
-      file: values.plan ?? values.apply,
-      dryRun: !!values["dry-run"],
-      repo: values.repo,
-      json: values.json,
-    };
+    if (values["dry-run"]) throw new Error(`--plan never changes GitHub. ${usage}`);
+    return { migrate: "plan", file: values.plan, repo: values.repo, json: values.json };
   }
-  if (values.plan || values.apply)
-    throw new Error("--plan and --apply apply only to deps migrate.");
+  if (values.plan) throw new Error("--plan applies only to deps migrate.");
   if (positionals[0] === "add" || positionals[0] === "remove") {
     const usage = `Usage: deps ${positionals[0]} N --on M [--on K] --note WHY [--dry-run] [--json] [--repo owner/name]`;
     const target = number(positionals[1]);
@@ -227,7 +206,7 @@ export async function checkpointSince(path, repository) {
 /**
  * @param {string[]} args
  * @param {(text: string) => Promise<void>} [output]
- * @param {{collect: typeof collect, currentRepository: typeof currentRepository, dependencyReport?: typeof dependencyReport, planDependencyChange?: typeof planDependencyChange, ghRun?: import("./dependencies.js").GhRun, planMigration?: typeof planMigration, applyMigration?: typeof applyMigration, migrationRuntime?: Record<string, any>}} [runtime]
+ * @param {{collect: typeof collect, currentRepository: typeof currentRepository, dependencyReport?: typeof dependencyReport, planDependencyChange?: typeof planDependencyChange, ghRun?: import("./dependencies.js").GhRun, planMigration?: typeof planMigration, migrationRuntime?: Record<string, any>}} [runtime]
  * @returns {Promise<number>}
  */
 export async function main(
@@ -243,31 +222,6 @@ export async function main(
     if (values.help) {
       await output(depsHelp);
       return 0;
-    }
-    if (values.migrate === "apply") {
-      // Apply only a reviewed plan file; the repository comes from the plan itself.
-      const plan = JSON.parse(await readFile(values.file, "utf8"));
-      if (values.repo && values.repo.toLowerCase() !== String(plan.repository).toLowerCase())
-        throw new Error("--repo does not match the plan's repository.");
-      const journalPath = `${values.file}.progress.json`;
-      let journal;
-      try {
-        journal = JSON.parse(await readFile(journalPath, "utf8"));
-      } catch (error) {
-        if (error.code !== "ENOENT") throw error;
-      }
-      if (journal && (journal.schemaVersion !== 1 || journal.repository !== plan.repository))
-        throw new Error("Progress journal does not match this plan.");
-      const result = await (runtime.applyMigration ?? applyMigration)(plan, {
-        dryRun: values.dryRun,
-        journal,
-        saveJournal: (data) => atomicJson(journalPath, data),
-        ...runtime.migrationRuntime,
-      });
-      await output(
-        values.json ? JSON.stringify(result, null, 2) + "\n" : migrationResultText(result),
-      );
-      return result.exitCode;
     }
     const repository = values.repo ?? (await runtime.currentRepository());
     if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error("--repo must be owner/name.");
