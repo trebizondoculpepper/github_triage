@@ -42,18 +42,16 @@ npm run triage -- deps 6 --repo trebizondoculpepper/github_triage --tree
 
 Use explicit `--repo trebizondoculpepper/poker_blocks` for the original project's live evidence. The CLI defaults to the checkout it is run from, which is now this repository. No new login or API token is needed beyond existing authenticated `gh`.
 
-## Native read work remaining (#4)
+## Native read work (#4)
 
-Review the draft against [doc/issue-dependencies.md](doc/issue-dependencies.md), originally merged in poker_blocks PR #704 before implementation. In particular:
+Finished in the #4 pull request against [doc/issue-dependencies.md](doc/issue-dependencies.md): `deps N [--tree] [--json]` (with `deps --help`), injected through `main`'s runtime; pickup ranked by last-open-blocker count in both the action list and the ready list; caches without native fields reported as incomplete with unknown readiness; and injected-query tests for nested pagination, summary mismatches, missing evidence, two-direction walks and cycles, not-planned blockers, drift, ranking, old caches and the command line.
 
-- Add dedicated injected-query tests for native nested pagination, summary-count mismatches/missing evidence, two-direction transitive traversal/cycle reporting, not-planned blockers, last-open-blocker ranking, old-cache missing native fields, and command argument/error/exit behavior. Existing tests were adjusted for native fixtures but are not the full acceptance suite.
-- Review compact/full readiness and dependency presentation, parked/hygiene behavior, ranking, data-size limits and text-budget edge cases; preserve source chronology and omission notices.
-- Review the new `github.js` / `dependencies.js` circular import and simplify module ownership if warranted by a documented refactor; source execution and packaging smoke tests currently pass.
-- Inject the dependency command entry point through `main`'s runtime boundary so CLI tests do not accidentally query live GitHub.
-- Check how labels and native evidence interact before declaring a ticket “pickable”; dependencies alone are not the full workflow verdict. Keep closed-as-not-planned warnings explicit.
-- Reconcile older inherited paragraphs describing text dependencies/read-only-only behavior with the later already merged dependency design. The newer dependency document is the agreed contract. Keep docs accurate about implemented versus planned commands.
+Still open by choice:
 
-Avoid expanding this handoff into implementing #5/#6 or applying a migration until #4 is properly reviewed. The owner wants a fresh LLM to continue the project.
+- `github.js` and `dependencies.js` import each other. This is safe because neither uses the other's exports at module load time; splitting them would change the module ownership recorded in `AGENTS.md`, so it needs its own documented refactor.
+- `deps --tree` reads tickets one at a time with no size limit. That is fine for current graphs; add a bound if large graphs appear.
+
+Avoid expanding this into implementing #5/#6 or applying a migration; those are separate tickets.
 
 ## Bootstrap and open source
 

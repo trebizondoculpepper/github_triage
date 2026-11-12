@@ -407,6 +407,13 @@ export function briefing(snapshot, options, now = new Date()) {
   const detail = options.issue
     ? snapshot.issues.find((issue) => issue.number === options.issue)
     : undefined;
+  // Old caches predate native dependency fields: readiness is then unknown, not complete.
+  const warnings = [
+    ...snapshot.warnings,
+    ...issues
+      .filter((issue) => !nativeKnown(issue))
+      .map((issue) => `${issue.url}: native dependency evidence missing; readiness unknown.`),
+  ];
   return {
     schemaVersion: 1,
     repository: snapshot.repository,
@@ -418,8 +425,8 @@ export function briefing(snapshot, options, now = new Date()) {
       atomicSnapshot: false,
     },
     completeness: {
-      complete: !snapshot.warnings.length,
-      warnings: snapshot.warnings,
+      complete: !warnings.length,
+      warnings,
       commentHistory: "fully fetched; excerpts are not semantic summaries",
     },
     rateLimit: snapshot.rateLimit,
@@ -433,6 +440,8 @@ export function briefing(snapshot, options, now = new Date()) {
             !labels(issue).includes(workflow.parked) &&
             pickable(issue),
         )
+        // Pickup order: most dependants unblocked first (doc/issue-dependencies.md).
+        .sort((a, b) => unblocks(b) - unblocks(a))
         .map(context),
     ),
     claimed: limit(issues.filter((issue) => owners(issue).length).map(context)),

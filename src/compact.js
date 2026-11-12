@@ -1,5 +1,6 @@
 /** Compact presentation of the registered findings; contract #698. */
 import { owners, excerpt } from "./briefing.js";
+import { unblocks } from "./dependencies.js";
 
 export const ruleMetadata = new Map([
   ...["ownership-conflict", "readiness-inconsistent", "claimed-ready"].map((key) => [
@@ -99,12 +100,7 @@ export function compactBriefing(snapshot, options, expanded) {
       (a, b) =>
         Number(linkedMine(byUrl.get(b.target))) - Number(linkedMine(byUrl.get(a.target))) ||
         b.findings[0].priority - a.findings[0].priority ||
-        (byUrl.get(b.target)?.blocking?.nodes ?? []).filter(
-          (n) => n.state === "OPEN" && n.issueDependenciesSummary?.blockedBy === 1,
-        ).length -
-          (byUrl.get(a.target)?.blocking?.nodes ?? []).filter(
-            (n) => n.state === "OPEN" && n.issueDependenciesSummary?.blockedBy === 1,
-          ).length ||
+        unblocks(byUrl.get(b.target)) - unblocks(byUrl.get(a.target)) ||
         a.target.localeCompare(b.target),
     );
   const sections = Object.fromEntries(
