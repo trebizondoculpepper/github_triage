@@ -23,7 +23,7 @@ Without `--repo`, `gh repo view` resolves the repository from the **current work
 node /path/to/github_triage/src/cli.js --json
 ```
 
-The briefing and `deps N` are read-only. They do not claim, label, merge or close tickets. Suggestions, closed dependencies and question candidates require human/agent inspection; they are not approval. `deps add` and `deps remove` are the only commands that change GitHub: they edit native blocked-by relationships after live validation and post one explanatory comment, with `--dry-run` to preview ([dependency design](doc/issue-dependencies.md)). Claiming, flagging and the dependency migration are specified separately and not implemented yet.
+The briefing and `deps N` are read-only. They do not claim, label, merge or close tickets. Suggestions, closed dependencies and question candidates require human/agent inspection; they are not approval. `deps add` and `deps remove` are the only commands that change GitHub: they edit native blocked-by relationships after live validation, post one explanatory comment, and support `--dry-run` ([dependency design](doc/issue-dependencies.md)). `deps migrate --plan` writes a read-only report of how `Depends on` text and `blocked:work` labels map to native dependencies; automatic apply is deferred (#48). Claiming and flagging are specified separately and not implemented yet.
 
 ## Supported runtimes
 
