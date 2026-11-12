@@ -15,6 +15,7 @@ import {
   planDependencyChange,
 } from "./dependencies.js";
 import { compactBriefing, compactText } from "./compact.js";
+import { migrationPlanText, planMigration } from "./migration.js";
 import { briefing, textReport } from "./briefing.js";
 
 export const help = `Usage: npm run triage -- [options]
@@ -39,6 +40,7 @@ The briefing never changes GitHub; only deps add/remove do. Hints require inspec
 export const depsHelp = `Usage: npm run triage -- deps N [--tree] [--json] [--repo owner/name]
        npm run triage -- deps add N --on M [--on K] --note WHY [--dry-run] [--json]
        npm run triage -- deps remove N --on M [--on K] --note WHY [--dry-run] [--json]
+       npm run triage -- deps migrate --plan FILE [--repo owner/name] [--json]
 deps N reads native GitHub issue dependencies for issue N (read-only).
 deps add/remove make N blocked (or no longer blocked) by each M, after fresh live checks:
 refuses self-dependencies, pull requests, missing issues and cycles; an edge that already
@@ -51,8 +53,10 @@ Changes no labels.
   --json                Versioned structured output (use npm run --silent triage)
   --repo owner/name     Repository (default: current gh checkout)
   --help                Show usage
-Exit: 0 all done; 2 partly done (refused/failed items listed); 1 nothing done or
-invalid arguments/API failure. deps migrate is not implemented yet.
+deps migrate --plan reads only: it writes a report of how \`Depends on\` text and blocked:work
+labels map to native dependencies. Record edges with deps add; automatic apply is deferred (#48).
+Exit: 0 all done; 2 partly done (refused/skipped/failed items listed); 1 nothing done or
+invalid arguments/API failure.
 `;
 /**
  * @param {string[]} args
@@ -70,6 +74,7 @@ export function depsArgumentsFor(args) {
       on: { type: "string", multiple: true },
       note: { type: "string" },
       "dry-run": { type: "boolean" },
+      plan: { type: "string" },
     },
   });
   if (values.help) return { help: true };
@@ -77,6 +82,15 @@ export function depsArgumentsFor(args) {
     throw new Error("--repo must be owner/name.");
   const number = (text) =>
     /^[1-9]\d*$/.test(text ?? "") && Number.isSafeInteger(Number(text)) ? Number(text) : null;
+  if (positionals[0] === "migrate") {
+    const usage =
+      "Usage: deps migrate --plan FILE [--repo owner/name] [--json] (read-only; automatic apply is deferred, #48)";
+    if (positionals.length !== 1 || !values.plan || values.on || values.note || values.tree)
+      throw new Error(usage);
+    if (values["dry-run"]) throw new Error(`--plan never changes GitHub. ${usage}`);
+    return { migrate: "plan", file: values.plan, repo: values.repo, json: values.json };
+  }
+  if (values.plan) throw new Error("--plan applies only to deps migrate.");
   if (positionals[0] === "add" || positionals[0] === "remove") {
     const usage = `Usage: deps ${positionals[0]} N --on M [--on K] --note WHY [--dry-run] [--json] [--repo owner/name]`;
     const target = number(positionals[1]);
@@ -192,7 +206,7 @@ export async function checkpointSince(path, repository) {
 /**
  * @param {string[]} args
  * @param {(text: string) => Promise<void>} [output]
- * @param {{collect: typeof collect, currentRepository: typeof currentRepository, dependencyReport?: typeof dependencyReport, planDependencyChange?: typeof planDependencyChange, ghRun?: import("./dependencies.js").GhRun}} [runtime]
+ * @param {{collect: typeof collect, currentRepository: typeof currentRepository, dependencyReport?: typeof dependencyReport, planDependencyChange?: typeof planDependencyChange, ghRun?: import("./dependencies.js").GhRun, planMigration?: typeof planMigration, migrationRuntime?: Record<string, any>}} [runtime]
  * @returns {Promise<number>}
  */
 export async function main(
@@ -211,6 +225,15 @@ export async function main(
     }
     const repository = values.repo ?? (await runtime.currentRepository());
     if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error("--repo must be owner/name.");
+    if (values.migrate === "plan") {
+      const plan = await (runtime.planMigration ?? planMigration)(
+        repository,
+        runtime.migrationRuntime,
+      );
+      await atomicJson(values.file, plan);
+      await output(values.json ? JSON.stringify(plan, null, 2) + "\n" : migrationPlanText(plan));
+      return 0;
+    }
     if (values.action) {
       // Read live immediately before changing; never act on a cached snapshot.
       const plan = await (runtime.planDependencyChange ?? planDependencyChange)(repository, {

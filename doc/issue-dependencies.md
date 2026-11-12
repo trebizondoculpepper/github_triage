@@ -102,9 +102,11 @@ npm run triage -- deps remove 675 --on 674 --note "why" [--dry-run]
 
 A one-time migration converts existing `Depends on` text and `blocked:work` labels, in two steps. The plan step reads only. The apply step changes GitHub, and applies only a plan a person has reviewed.
 
+> **Scope reduced on 2026-11-12 (owner direction, #6 / #48).** Only the read-only plan is implemented. Automatic apply, dry-run apply simulation, progress journals and recovery are **deferred to #48**, because their one-time value did not justify further review churn. Until #48 is revived under a new reviewed contract, use the plan as a report and record edges with the validated `deps add` / `deps remove` commands or deliberate manual GitHub edits; change labels deliberately. No live migration or retired-label deletion is authorized. The "Apply" section below is kept as the starting point for #48, not as current behaviour.
+
 ```sh
 npm run triage -- deps migrate --plan migration.json        # read-only: writes the plan and prints a summary
-npm run triage -- deps migrate --apply migration.json [--dry-run]
+npm run triage -- deps migrate --apply migration.json [--dry-run]   # deferred (#48); not implemented
 ```
 
 ### Plan (read-only)
@@ -125,9 +127,9 @@ For every open issue, the plan records:
 
   Each row records the ticket's `updatedAt` at planning time.
 
-The plan is a JSON file (versioned schema) plus a printed summary grouped into `apply` and `review`. The reviewer, who may be the owner, a designer agent or an implementer, edits the JSON: changing a row's status, removing an edge, or adding a missed one. Body text such as "optional", "coordinate with" or "after #N" is never treated as a blocker without review.
+The plan is a JSON file (versioned schema) plus a printed summary grouped into `apply` and `review`. The reviewer, who may be the owner, a designer agent or an implementer, edits the JSON: changing a row's status, removing an edge, or adding a missed one. Body text such as "optional", "coordinate with" or "after #N" is never treated as a blocker without review. Hedging is judged for the clause naming each reference, so "Depends on #1; coordinate #2" keeps #1; a qualifier covering the whole list ("Depends on #1 and #2 (both optional)") sends every reference in it to review.
 
-### Apply
+### Apply (deferred, #48)
 
 - Rows with status `apply` only, in issue-number order, one at a time. It paces requests and stops on a secondary rate-limit response rather than retrying in a hurry.
 - **Progress journal.** Apply keeps a journal file beside the plan (`<plan>.progress.json`). For each ticket it records each step as it completes (edges, then labels, then comment) and the ticket's `updatedAt` as GitHub reports it after the tool's own last write.
@@ -163,6 +165,6 @@ Codex implements this. Each step is one PR against this merged document:
 
 1. `deps <N>` and the briefing changes (read-only).
 2. `deps add` / `deps remove`.
-3. `deps migrate --plan` and `--apply`. Then a reviewed live run of the migration, recorded on #703.
+3. `deps migrate --plan` (read-only). `--apply` and a reviewed live run are deferred to #48.
 
 Until the migration has run, the briefing reads both stores: native dependencies decide readiness, and text-only references are reported as drift ("not yet migrated").
