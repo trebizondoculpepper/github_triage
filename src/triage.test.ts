@@ -1364,3 +1364,9 @@ describe("dependency migration", () => {
       expect(() => depsArgumentsFor(bad)).toThrow();
   });
 });
+
+describe("verify gate demonstration (#9) — DO NOT MERGE", () => {
+  it("fails deliberately to show that a failing verify blocks merging", () => {
+    expect("deliberate failure").toBe("passing");
+  });
+});
