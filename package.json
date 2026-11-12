@@ -1,0 +1,38 @@
+{
+  "name": "github-triage",
+  "version": "0.1.0",
+  "description": "Evidence-linked GitHub issue and pull request briefings for coding agents",
+  "bugs": {
+    "url": "https://github.com/trebizondoculpepper/github_triage/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/trebizondoculpepper/github_triage.git"
+  },
+  "bin": {
+    "github-triage": "src/cli.js"
+  },
+  "type": "module",
+  "scripts": {
+    "triage": "node src/cli.js",
+    "build": "vp pack src/cli.js --format esm --out-dir dist",
+    "check": "vp check",
+    "lint": "vp lint",
+    "fmt": "vp fmt",
+    "test": "vp test run",
+    "prepare": "vp config --hooks --no-agent"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "~7.0.2",
+    "vite": "npm:@voidzero-dev/vite-plus-core@1.5.0",
+    "vite-plus": "1.5.0"
+  },
+  "overrides": {
+    "vite": "npm:@voidzero-dev/vite-plus-core@1.5.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

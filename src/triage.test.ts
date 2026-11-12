@@ -1,0 +1,460 @@
+import { describe, expect, it } from "vite-plus/test";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { argumentsFor, atomicJson, cachedSnapshot, checkpointSince, main } from "./cli.js";
+import { briefing, dependencyDone, textReport } from "./briefing.js";
+import { collect, declaredDependencies, pages, type Query } from "./github.js";
+import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
+
+const repo = "example/project";
+const time = "2026-11-12T10:00:00.000Z";
+const page = <T>(nodes: T[], more = false, cursor: string | null = null): Page<T> => ({
+  nodes,
+  pageInfo: { hasNextPage: more, endCursor: cursor },
+});
+const issue = (number = 1, labels = ["status:ready"]): Issue => ({
+  number,
+  title: `Ticket ${number}`,
+  body: "Use [design](doc/game-architecture.md).",
+  url: `https://github.com/${repo}/issues/${number}`,
+  state: "OPEN",
+  stateReason: null,
+  createdAt: time,
+  updatedAt: time,
+  issueDependenciesSummary: { blockedBy: 0, totalBlockedBy: 0, blocking: 0, totalBlocking: 0 },
+  blockedBy: page([]),
+  blocking: page([]),
+  labels: page(labels.map((name) => ({ name }))),
+  comments: page([]),
+});
+const pr = (): PullRequest => ({
+  ...issue(4, []),
+  url: `https://github.com/${repo}/pull/4`,
+  headRefOid: "abc123",
+  headRefName: "feature",
+  baseRefName: "main",
+  isDraft: false,
+  mergeable: "MERGEABLE",
+  mergeStateStatus: "CLEAN",
+  reviewDecision: null,
+  closingIssuesReferences: page([{ number: 1, url: issue().url }]),
+  reviewThreads: page([]),
+  reviews: page([]),
+  commits: {
+    nodes: [
+      {
+        commit: {
+          statusCheckRollup: {
+            state: "SUCCESS",
+            contexts: page([{ name: "verify", status: "COMPLETED", conclusion: "SUCCESS" }]),
+          },
+        },
+      },
+    ],
+  },
+});
+const snapshot = (issues = [issue()], prs: PullRequest[] = [pr()]): Snapshot => ({
+  schemaVersion: 1,
+  repository: repo,
+  startedAt: time,
+  fetchedAt: time,
+  issues,
+  pullRequests: prs,
+  dependencies: [],
+  changed: [],
+  since: null,
+  warnings: [],
+  rateLimit: null,
+});
+const brief = (data: Snapshot) => briefing(data, { limit: 100 }, new Date(time));
+
+describe("paginated facts and explicit dependency scope", () => {
+  it("walks all cursors and rejects repeating cursors", async () => {
+    const cursors: (string | undefined)[] = [];
+    expect(
+      await pages(async (cursor) => {
+        cursors.push(cursor);
+        return cursor ? page([2]) : page([1], true, "next");
+      }),
+    ).toEqual([1, 2]);
+    expect(cursors).toEqual([undefined, "next"]);
+    await expect(pages(async () => page([1], true, "same"))).rejects.toThrow("did not advance");
+  });
+  it("distinguishes declared, incidental and cross-repository references", () => {
+    const refs = declaredDependencies(
+      "Epic #99 and evidence #77.\nDepends on #2 and https://github.com/other/repo/pull/3.\n## Dependencies\n- #5\n## Notes\n- #6",
+      repo,
+    );
+    expect(refs.map((ref) => `${ref.repository}#${ref.number}`)).toEqual([
+      "other/repo#3",
+      `${repo}#2`,
+      `${repo}#5`,
+    ]);
+  });
+  it("accepts an explicit declaration after a sentence and ignores subsequent prose links", () => {
+    expect(
+      declaredDependencies(
+        "Owner asks for work. **Depends on:** #2. See #99 for an unrelated example.",
+        repo,
+      ).map((ref) => ref.number),
+    ).toEqual([2]);
+  });
+  it("never equates a closed unplanned issue or unknown reference with completed work", () => {
+    const ref = { repository: repo, number: 2, url: "url", available: true, state: "CLOSED" };
+    expect(dependencyDone({ ...ref, stateReason: "NOT_PLANNED" })).toBe(false);
+    expect(dependencyDone(ref)).toBe(false);
+    expect(dependencyDone({ ...ref, stateReason: "COMPLETED" })).toBe(true);
+    expect(dependencyDone({ ...ref, state: "MERGED" })).toBe(true);
+  });
+  it("collects primary pages, all comment pages, a closed prerequisite and since changes", async () => {
+    const first = issue();
+    first.body = "Depends on #8.";
+    first.issueDependenciesSummary!.totalBlockedBy = 1;
+    first.blockedBy = page([
+      {
+        ...issue(8),
+        state: "CLOSED",
+        stateReason: "COMPLETED",
+        repository: { nameWithOwner: repo },
+        issueDependenciesSummary: {
+          blockedBy: 0,
+          totalBlockedBy: 0,
+          blocking: 0,
+          totalBlocking: 0,
+        },
+      },
+    ]);
+    first.comments = page(
+      [{ body: "A question?", url: "comment1", author: null }],
+      true,
+      "comments2",
+    );
+    const calls: string[] = [];
+    const query: Query = async (source, vars) => {
+      calls.push(source);
+      if (source.includes("issueOrPullRequest(number") && source.includes("comments(first"))
+        return {
+          repository: {
+            issueOrPullRequest: {
+              comments: page([{ body: "Answered", url: "comment2", author: { login: "owner" } }]),
+            },
+          },
+        };
+      if (source.includes("issueOrPullRequest(number"))
+        return {
+          repository: {
+            issueOrPullRequest: {
+              title: "Completed",
+              state: "CLOSED",
+              stateReason: "COMPLETED",
+              url: "dependency",
+            },
+          },
+        };
+      if (source.includes("pullRequests(first")) return { repository: { pullRequests: page([]) } };
+      if (source.includes("states:OPEN"))
+        return {
+          repository: { issues: vars.cursor ? page([issue(2)]) : page([first], true, "issues2") },
+        };
+      return { repository: { issues: page([{ ...issue(9), state: "CLOSED" }]) } };
+    };
+    const data = await collect(repo, { since: time }, query, () => new Date(time));
+    expect(data.issues).toHaveLength(2);
+    expect(data.issues[0]!.comments.nodes.map((comment) => comment.body)).toEqual([
+      "A question?",
+      "Answered",
+    ]);
+    expect(data.dependencies[0]?.stateReason).toBe("COMPLETED");
+    expect(data.changed[0]?.state).toBe("CLOSED");
+    expect(calls.some((source) => source.includes("after:$cursor"))).toBe(true);
+  });
+  it("reports incomplete nested PR evidence rather than claiming merge readiness", async () => {
+    const pull = pr();
+    pull.reviewThreads.pageInfo = { hasNextPage: true, endCursor: "next" };
+    const data = await collect(
+      repo,
+      {},
+      async (source) => ({
+        repository: {
+          issues: page([]),
+          pullRequests: page(source.includes("pullRequests(first") ? [pull] : []),
+        },
+      }),
+      () => new Date(time),
+    );
+    expect(data.warnings[0]).toContain("review threads");
+    expect(brief(data).actions.items.some((item) => item.rule === "pr-inspect-merge")).toBe(false);
+  });
+});
+
+describe("registered action analysis", () => {
+  it("shows ownership conflicts, stale ready labels and absent readiness", () => {
+    const data = brief(snapshot([issue(1, ["agent:a", "agent:b", "status:ready"]), issue(2, [])]));
+    expect(data.actions.items.map((item) => item.rule)).toEqual(
+      expect.arrayContaining(["ownership-conflict", "claimed-ready", "readiness-inconsistent"]),
+    );
+    expect(data.ready.total).toBe(0);
+  });
+  it("gives parked work no pickup action, and closed full-detail issues no active actions", () => {
+    const closed = { ...issue(2), state: "CLOSED" };
+    const data = brief(snapshot([issue(1, ["status:parked"]), closed], []));
+    expect(data.actions.total).toBe(0);
+    expect(data.parked.total).toBe(1);
+  });
+  it("flags questions as candidates while retaining later answers in full detail", () => {
+    const one = issue();
+    one.comments.nodes = [
+      { body: "Should this be blue?", url: "question", author: null },
+      { body: "Use blue. Resolved.", url: "answer", author: null },
+    ];
+    const data = briefing(snapshot([one], []), { limit: 100, issue: 1 }, new Date(time));
+    const candidate = data.actions.items.find((item) => item.rule === "question-candidate")!;
+    expect(candidate.uncertainty).toBe("candidate");
+    expect(candidate.next).toContain("already be answered");
+    expect(data.detail!.comments.nodes.at(-1)!.body).toContain("Resolved");
+  });
+  it("requires the actual verify check and does not infer success from another green job", () => {
+    const pull = pr();
+    pull.commits.nodes[0]!.commit.statusCheckRollup!.contexts.nodes[0]!.name = "unrelated";
+    const findings = brief(snapshot([], [pull])).actions.items;
+    expect(findings.some((item) => item.rule === "pr-inspect-merge")).toBe(false);
+    expect(findings.some((item) => item.rule === "pr-verification-needed")).toBe(true);
+  });
+  it("failed CI, unresolved/outdated reviews and pending checks prevent merge candidates", () => {
+    const pull = pr();
+    pull.commits.nodes[0]!.commit.statusCheckRollup!.contexts.nodes.push(
+      { name: "lint", conclusion: "FAILURE" },
+      { name: "slow", status: "IN_PROGRESS" },
+    );
+    pull.reviewThreads.nodes.push({
+      isResolved: false,
+      isOutdated: true,
+      comments: page([{ body: "Fix this", url: "finding", author: null }]),
+    });
+    const findings = brief(snapshot([], [pull])).actions.items.map((item) => item.rule);
+    expect(findings).toEqual(
+      expect.arrayContaining(["pr-failed-checks", "pr-review-findings", "pr-pending"]),
+    );
+    expect(findings).not.toContain("pr-inspect-merge");
+  });
+  it("clean checks are only a source-linked inspection candidate with head identity", () => {
+    const data = brief(snapshot([], [pr()]));
+    expect(data.actions.items.find((item) => item.rule === "pr-inspect-merge")?.uncertainty).toBe(
+      "candidate",
+    );
+    expect(data.pullRequests[0]?.headRefOid).toBe("abc123");
+    expect(data.actions.items[0]?.next).toContain("not approval");
+  });
+  it("keeps stable ordering and reports omitted actions instead of silently hiding them", () => {
+    const source = snapshot([issue(3), issue(2), issue(1)], []);
+    const a = briefing(source, { limit: 1 }, new Date(time));
+    expect(a.actions.total).toBe(3);
+    expect(a.actions.omitted).toBe(2);
+    expect(textReport(a)).toContain("2 more omitted");
+    expect(a).toEqual(briefing(source, { limit: 1 }, new Date(time)));
+  });
+});
+
+describe("intake evidence boundaries", () => {
+  it("flags ready work with unresolved native prerequisites without claiming it", () => {
+    const one = issue();
+    one.body = "Depends on #8.";
+    const data = snapshot([one], []);
+    one.issueDependenciesSummary!.blockedBy = 1;
+    one.issueDependenciesSummary!.totalBlockedBy = 1;
+    one.blockedBy = page([
+      {
+        ...issue(8),
+        repository: { nameWithOwner: repo },
+        issueDependenciesSummary: {
+          blockedBy: 0,
+          totalBlockedBy: 0,
+          blocking: 0,
+          totalBlocking: 0,
+        },
+      },
+    ]);
+    const finding = brief(data).actions.items.find(
+      (item) => item.rule === "ready-prerequisites-unverified",
+    );
+    expect(finding?.uncertainty).toBe("candidate");
+    expect(finding?.evidence).toContain(`https://github.com/${repo}/issues/8`);
+  });
+  it("does not label an arbitrary issue link as architectural evidence", () => {
+    const one = issue();
+    one.body = "See https://github.com/example/project/issues/9 and doc/game-architecture.md.";
+    const data = brief(snapshot([one], []));
+    expect(data.ready.items[0]?.documentation).toEqual(["doc/game-architecture.md"]);
+  });
+  it("does not propose merge when mergeability is unknown", () => {
+    const pull = pr();
+    pull.mergeable = "UNKNOWN";
+    expect(
+      brief(snapshot([], [pull])).actions.items.some((item) => item.rule === "pr-inspect-merge"),
+    ).toBe(false);
+  });
+});
+
+describe("CLI freshness and local state safety", () => {
+  it("validates options before collecting and requires explicit offline cache", () => {
+    expect(() => argumentsFor(["--offline"])).toThrow("requires");
+    expect(() => argumentsFor(["--repo", "bad"])).toThrow("owner/name");
+    expect(() => argumentsFor(["--since", "yesterday"])).toThrow("ISO");
+    expect(() => argumentsFor(["--limit", "0"])).toThrow("positive");
+    expect(() => argumentsFor(["--offline", "--cache", "x", "--since", time])).toThrow(
+      "live fetch",
+    );
+  });
+  it("labels old cached snapshots offline, preserves checkpoint and rejects repository mismatch", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "triage-test-"));
+    try {
+      const cache = join(dir, "cache.json"),
+        checkpoint = join(dir, "checkpoint.json");
+      await atomicJson(cache, snapshot());
+      await atomicJson(checkpoint, { schemaVersion: 1, repository: repo, through: time });
+      let rendered = "";
+      expect(
+        await main(
+          ["--offline", "--cache", cache, "--checkpoint", checkpoint, "--json"],
+          async (text) => {
+            rendered = text;
+          },
+        ),
+      ).toBe(0);
+      expect(JSON.parse(rendered).freshness.offline).toBe(true);
+      expect(await checkpointSince(checkpoint, repo)).toBe(time);
+      await expect(cachedSnapshot(cache, "wrong/repo")).rejects.toThrow("invalid");
+    } finally {
+      await rm(dir, { recursive: true });
+    }
+  });
+  it("advances only after complete successful output, using start of collection", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "triage-test-"));
+    try {
+      const checkpoint = join(dir, "checkpoint.json");
+      const data = snapshot();
+      data.fetchedAt = "2026-11-12T10:05:00.000Z";
+      const runtime = { collect: async () => data, currentRepository: async () => repo };
+      await expect(
+        main(
+          ["--checkpoint", checkpoint],
+          async () => {
+            throw new Error("broken stdout");
+          },
+          runtime,
+        ),
+      ).rejects.toThrow("broken stdout");
+      expect(await checkpointSince(checkpoint, repo)).toBeUndefined();
+      expect(await main(["--checkpoint", checkpoint], async () => {}, runtime)).toBe(0);
+      expect(await checkpointSince(checkpoint, repo)).toBe(time);
+      data.warnings.push("incomplete");
+      expect(await main(["--checkpoint", checkpoint], async () => {}, runtime)).toBe(2);
+      expect(JSON.parse(await readFile(checkpoint, "utf8")).through).toBe(time);
+      await expect(
+        main(["--checkpoint", checkpoint], async () => {}, {
+          ...runtime,
+          collect: async () => {
+            throw new Error("API unavailable");
+          },
+        }),
+      ).rejects.toThrow("API unavailable");
+      expect(await checkpointSince(checkpoint, repo)).toBe(time);
+    } finally {
+      await rm(dir, { recursive: true });
+    }
+  });
+});
+
+describe("plain JavaScript gh wrapper", () => {
+  it.skipIf(process.platform === "win32")(
+    "runs directly with Node and reuses the inherited gh session without login",
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), "triage-gh-test-"));
+      try {
+        const log = join(dir, "calls");
+        const response = JSON.stringify({
+          data: { repository: { issues: page([]), pullRequests: page([]) } },
+        });
+        const fake = `#!/bin/sh
+[ "$TRIAGE_TEST_SESSION" = "already-configured" ] || exit 98
+echo "$1" >> "$TRIAGE_TEST_LOG"
+case "$1" in
+repo) printf '%s\\n' 'example/project' ;;
+api) printf '%s\\n' '${response}' ;;
+*) exit 99 ;;
+esac
+`;
+        await writeFile(join(dir, "gh"), fake, { mode: 0o700 });
+        const { stdout } = await promisify(execFile)(
+          process.execPath,
+          [fileURLToPath(new URL("./cli.js", import.meta.url)), "--json"],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              TRIAGE_TEST_SESSION: "already-configured",
+              TRIAGE_TEST_LOG: log,
+            },
+          },
+        );
+        expect(JSON.parse(stdout).repository).toBe(repo);
+        expect((await readFile(log, "utf8")).trim().split("\n")).toEqual(["repo", "api", "api"]);
+        for (const name of ["cli", "github", "briefing"]) {
+          const code = await readFile(new URL(`./${name}.js`, import.meta.url), "utf8");
+          expect(code).not.toMatch(/(?:from|import)\s+["'][^"']+\.ts["']/);
+        }
+      } finally {
+        await rm(dir, { recursive: true });
+      }
+    },
+  );
+});
+
+describe("compact briefing contract", () => {
+  it("deduplicates targets, separates parked questions and preserves full detail", async () => {
+    const { compactBriefing, compactText, sourceContext } = await import("./compact.js");
+    const parked = issue(7, ["status:parked", "question"]);
+    const mine = issue(8, ["agent:reader"]);
+    mine.lastEditedAt = "2026-11-12T12:00:00Z";
+    mine.comments = page([
+      { body: "old question?", url: `${mine.url}#comment`, author: null, createdAt: time },
+    ]);
+    const data = snapshot([parked, mine, issue()], [pr()]);
+    const expanded = briefing(data, { limit: 100, issue: 8 }, new Date(time));
+    const compact = compactBriefing(data, { limit: 5, agent: "reader" }, expanded);
+    expect(compact.schemaVersion).toBe(2);
+    expect(new Set(compact.actions.items).size).toBe(compact.actions.items.length);
+    expect(compact.actions.items).not.toContain(parked.url);
+    expect(compact.sections.deferred.items).toContain(parked.url);
+    expect(compact.sections.current.items).toContain(mine.url);
+    expect(compact.detail?.comments.nodes[0].body).toBe("old question?");
+    expect(sourceContext(mine).chronology).toContain("superseded");
+    expect(sourceContext(parked).chronology).toContain("Unknown");
+    const noDetail = { ...compact, detail: null };
+    expect(compactText(noDetail, 1500).length).toBeLessThanOrEqual(1500);
+    expect(compactText(noDetail, 1500)).toContain("omitted");
+  });
+  it("bounds independent requests, retains order and propagates failure", async () => {
+    const { concurrentMap } = await import("./github.js");
+    let active = 0;
+    let peak = 0;
+    const results = await concurrentMap([1, 2, 3, 4, 5, 6, 7], async (n: number) => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      active--;
+      return n * 2;
+    });
+    expect(peak).toBe(4);
+    expect(results).toEqual([2, 4, 6, 8, 10, 12, 14]);
+    await expect(
+      concurrentMap([1], async () => {
+        throw new Error("failed");
+      }),
+    ).rejects.toThrow("failed");
+  });
+});
