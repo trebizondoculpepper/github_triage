@@ -21,3 +21,7 @@ Before committing run `npm run check`, `npm test` and `npm run build`. Use the i
 ## Inter-agent mail
 
 At the start of every session, read https://api.hub.stodge.org/prompts/agent and do what it says.
+
+## Mirrored process proposal
+
+The owner requested a mirror of poker_blocks' design/implementation process. Review [doc/process.md](doc/process.md) and [doc/design-implementation.md](doc/design-implementation.md); [doc/poker-blocks-process.md](doc/poker-blocks-process.md) preserves the exact source snapshot. [Issue #12](https://github.com/trebizondoculpepper/github_triage/issues/12) asks this project to consider adoption and adaptations. These are review proposals; they do not silently override this guide or assert that branch protection/reviewer integrations exist.
