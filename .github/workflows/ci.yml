@@ -44,3 +44,13 @@ jobs:
       - run: node src/cli.js --help
       - run: npm run smoke
       - run: node scripts/smoke.mjs src/cli.js
+
+  # Single stable check name for branch protection and the triage tool's
+  # required "verify" check; passes only if every matrix job passed.
+  verify:
+    if: always()
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every matrix job to pass
+        run: test "${{ needs.test.result }}" = "success"
