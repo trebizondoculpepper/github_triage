@@ -62,7 +62,8 @@ try {
   const checkouts = [join(work, "checkout-a"), join(work, "checkout-b")];
   for (const dir of checkouts) await mkdir(dir);
   for (const cwd of checkouts) {
-    const cli = (args) => run(bin, args, { cwd, shell: windows });
+    // With shell: true, Windows needs the .cmd path quoted (temporary paths may contain spaces).
+    const cli = (args) => run(windows ? `"${bin}"` : bin, args, { cwd, shell: windows });
     const help = await cli(["--help"]);
     if (!help.stdout.startsWith("Usage:"))
       throw new Error(`Installed bin printed no help in ${cwd}.`);
