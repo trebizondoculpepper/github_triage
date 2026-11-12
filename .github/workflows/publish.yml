@@ -1,0 +1,88 @@
+name: Publish
+# npm releases (doc/npm-releases.md): verified main builds publish prereleases under `next`;
+# commits promoted to the `release` branch publish official versions under `latest`.
+on:
+  push:
+    branches: [main, release]
+
+permissions:
+  contents: read
+
+# Serialize publication; never cancel a run that may already be publishing.
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # Inert until the owner has set up npm trusted publishing and sets the repository
+    # variable NPM_PUBLISH to "true" (see doc/npm-releases.md, "Owner setup").
+    if: vars.NPM_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # tag and GitHub release for official versions
+      id-token: write # npm trusted publishing (OIDC); no npm token is stored
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: npm with trusted publishing support
+        run: npm install -g npm@^11.5.1
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      - run: npm run smoke
+      - run: npm run package-test
+      - name: Choose channel
+        id: channel
+        run: |
+          git fetch --no-tags origin main
+          if [ "$GITHUB_REF_NAME" = "release" ]; then
+            git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+              || { echo "::error::The release commit is not on main."; exit 1; }
+            echo "channel=latest" >> "$GITHUB_OUTPUT"
+          else
+            # A delayed run must not move `next` backwards: publish only main's current head.
+            if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then
+              echo "::notice::main has moved on; a newer run publishes."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+            fi
+            echo "channel=next" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Choose version
+        id: version
+        if: steps.channel.outputs.skip != 'true'
+        env:
+          CHANNEL: ${{ steps.channel.outputs.channel }}
+        run: |
+          node scripts/release-version.mjs "$CHANNEL" "$GITHUB_SHA" > version.json
+          cat version.json
+          echo "version=$(node -p 'require("./version.json").version ?? ""')" >> "$GITHUB_OUTPUT"
+          echo "published=$(node -p 'require("./version.json").alreadyPublished ?? ""')" >> "$GITHUB_OUTPUT"
+      - name: Publish to npm
+        if: steps.version.outputs.version != ''
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.channel.outputs.channel }}
+        run: |
+          npm version "$VERSION" --no-git-tag-version
+          npm pkg set gitHead="$GITHUB_SHA"
+          npm publish --provenance --access public --tag "$TAG"
+      - name: Tag and GitHub release
+        # Also runs when a retry finds the version already published but the release missing.
+        if: steps.channel.outputs.channel == 'latest' && (steps.version.outputs.version != '' || steps.version.outputs.published != '')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version || steps.version.outputs.published }}
+        run: |
+          if gh release view "v$VERSION" > /dev/null 2>&1; then
+            echo "Release v$VERSION already exists."
+          else
+            gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" --generate-notes
+          fi

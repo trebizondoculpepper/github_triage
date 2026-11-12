@@ -25,9 +25,21 @@ node /path/to/github_triage/src/cli.js --json
 
 The briefing and `deps N` are read-only. They do not claim, label, merge or close tickets. Suggestions, closed dependencies and question candidates require human/agent inspection; they are not approval. `deps add` and `deps remove` are the only commands that change GitHub: they edit native blocked-by relationships after live validation and post one explanatory comment, with `--dry-run` to preview ([dependency design](doc/issue-dependencies.md)). Claiming, flagging and the dependency migration are specified separately and not implemented yet.
 
+## Install in another project
+
+Once published (see [npm releases](doc/npm-releases.md); nothing is published yet), install a pinned version into a consumer project and run it with `npx`:
+
+```sh
+npm install --save-dev @trebizondoculpepper/github-triage        # official releases (latest)
+npm install --save-dev @trebizondoculpepper/github-triage@next   # development builds from main
+npx github-triage --help
+```
+
+The package contains only the built CLI, README and licence, and runs no install scripts. It still needs an authenticated `gh` at run time.
+
 ## Supported runtimes
 
-The CLI runs on Node.js 20 or later. CI tests it with Node.js 20, 22 and 24 on Ubuntu, macOS and Windows, using `npm ci` and the committed lockfile. Development tooling (Vite+ checks, tests and build) needs Node.js 22 or later, so the Node 20 jobs run the tooling on Node 22 and then smoke-test the built and source CLI on Node 20. Every job runs the Vite+ checks, the test suite, the build and the smoke tests. Line endings are LF on every platform (`.gitattributes`). One test fakes `gh` with a POSIX shell script and is skipped on Windows. On Windows, `npm run smoke` covers the same ground: it makes `gh` unreachable to exercise the failure path and uses offline fixtures for the success and incomplete-evidence exit codes.
+The CLI runs on Node.js 20 or later. CI tests it with Node.js 20, 22 and 24 on Ubuntu, macOS and Windows, using `npm ci` and the committed lockfile. Development tooling (Vite+ checks, tests and build) needs Node.js 22 or later, so the Node 20 jobs run the tooling on Node 22 and then smoke-test the built and source CLI on Node 20. Every job runs the Vite+ checks, the test suite, the build, the smoke tests and `npm run package-test`, which packs the real npm archive, checks its contents, installs it into a clean consumer and runs the installed command. Line endings are LF on every platform (`.gitattributes`). One test fakes `gh` with a POSIX shell script and is skipped on Windows. On Windows, `npm run smoke` covers the same ground: it makes `gh` unreachable to exercise the failure path and uses offline fixtures for the success and incomplete-evidence exit codes.
 
 ## Development
 

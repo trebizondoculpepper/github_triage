@@ -1012,3 +1012,39 @@ describe("installed npm bin", () => {
     60_000,
   );
 });
+
+describe("release versions (doc/npm-releases.md)", () => {
+  const sha = (n: number) => String(n).repeat(40).slice(0, 40);
+  it("follows the contract's sequence: 0.0.x-next before 0.1.0, patch per main build, minor per release", async () => {
+    const { chooseVersion } = await import("../scripts/release-version.mjs");
+    const history: { version: string; gitHead: string }[] = [];
+    const step = (channel: "next" | "latest", n: number) => {
+      const { version } = chooseVersion({ channel, sha: sha(n), published: history });
+      history.push({ version: version!, gitHead: sha(n) });
+      return version;
+    };
+    expect([step("next", 1), step("next", 2)]).toEqual(["0.0.1-next.1", "0.0.2-next.1"]);
+    expect(step("latest", 3)).toBe("0.1.0");
+    expect([step("next", 4), step("next", 5)]).toEqual(["0.1.1-next.1", "0.1.2-next.1"]);
+    expect(step("latest", 6)).toBe("0.2.0");
+    expect(step("next", 7)).toBe("0.2.1-next.1");
+  });
+  it("recognises a commit already published on the channel instead of assigning another version", async () => {
+    const { chooseVersion } = await import("../scripts/release-version.mjs");
+    const published = [{ version: "0.0.1-next.1", gitHead: sha(1) }];
+    expect(chooseVersion({ channel: "next", sha: sha(1), published })).toMatchObject({
+      version: null,
+      alreadyPublished: "0.0.1-next.1",
+    });
+    // The same commit may still be promoted to an official release.
+    expect(chooseVersion({ channel: "latest", sha: sha(1), published }).version).toBe("0.1.0");
+  });
+  it("orders prereleases before their release and ignores unrelated versions", async () => {
+    const { chooseVersion, compare, parse } = await import("../scripts/release-version.mjs");
+    expect(compare(parse("0.1.0-next.1")!, parse("0.1.0")!)).toBeLessThan(0);
+    expect(compare(parse("0.0.9-next.1")!, parse("0.1.0")!)).toBeLessThan(0);
+    expect(parse("1.0.0-beta.1")).toBeNull();
+    const published = [{ version: "1.0.0-beta.1" }, { version: "0.3.0" }];
+    expect(chooseVersion({ channel: "next", sha: sha(9), published }).version).toBe("0.3.1-next.1");
+  });
+});

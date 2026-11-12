@@ -1,5 +1,5 @@
 {
-  "name": "github-triage",
+  "name": "@trebizondoculpepper/github-triage",
   "version": "0.1.0",
   "description": "Evidence-linked GitHub issue and pull request briefings for coding agents",
   "bugs": {
@@ -11,9 +11,15 @@
     "url": "git+https://github.com/trebizondoculpepper/github_triage.git"
   },
   "bin": {
-    "github-triage": "src/cli.js"
+    "github-triage": "dist/cli.mjs"
   },
+  "files": [
+    "dist/cli.mjs"
+  ],
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "triage": "node src/cli.js",
     "build": "vp pack src/cli.js --format esm --out-dir dist",
@@ -22,7 +28,10 @@
     "fmt": "vp fmt",
     "test": "vp test run",
     "prepare": "vp config --hooks --no-agent",
-    "smoke": "node scripts/smoke.mjs dist/cli.mjs"
+    "smoke": "node scripts/smoke.mjs dist/cli.mjs",
+    "prepack": "npm run build",
+    "package-test": "node scripts/package-test.mjs",
+    "release": "node scripts/release.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

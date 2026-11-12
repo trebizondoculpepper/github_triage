@@ -37,6 +37,23 @@ Use npm trusted publishing from the designated GitHub Actions workflow. Bootstra
 
 Record the published version, source commit, channel, package identity, and verification evidence. npm publication and GitHub release creation are separate steps: report partial failures and resume without attempting to replace an immutable npm version or deleting published packages as routine retry behavior.
 
+## Implementation and owner setup
+
+Implemented in #17:
+
+- `package.json`: name `@trebizondoculpepper/github-triage`, bin `github-triage` → `dist/cli.mjs`, `files` allowlist (npm adds `package.json`, README and LICENSE), `prepack` builds, `publishConfig.access: public`. No install scripts reach consumers.
+- `npm run package-test` (`scripts/package-test.mjs`), run in every CI job and before publishing: packs the archive, asserts its exact contents, installs it into a clean consumer, and runs the installed bin (help, invalid arguments, offline smoke checks).
+- `scripts/release-version.mjs`: chooses the version from the registry's publication history and each version's `gitHead`, following "Channels and versions"; a commit already published on a channel is reported, not republished.
+- `.github/workflows/publish.yml`: on pushes to `main` (channel `next`) and `release` (channel `latest`), serialized without cancelling a run in progress. It verifies first, skips a `main` run that is no longer `main`'s head (so `next` never moves backwards), requires a release commit to be on `main`, publishes with npm trusted publishing and provenance, and for `latest` creates the `vX.Y.Z` tag and GitHub release (also on a retry that finds the version already published).
+- `npm run release` (`scripts/release.mjs`): the owner's explicit request, fast-forwarding `release` to `origin/main`. Nothing publishes from a working tree.
+
+**The publish workflow is inert until the owner enables it.** To enable publication, check each step against npm's current trusted-publishing documentation:
+
+1. Confirm the npm account `trebizondoculpepper` owns the `@trebizondoculpepper` scope.
+2. Configure a trusted publisher for the package: GitHub Actions, repository `trebizondoculpepper/github_triage`, workflow `publish.yml`. If npm requires the package to exist before a trusted publisher can be added, bootstrap the first version as npm's documentation describes, and record it here.
+3. Set the repository variable `NPM_PUBLISH` to `true` (Settings → Secrets and variables → Actions → Variables). No npm token is stored anywhere.
+4. The next push to `main` then publishes a `next` prerelease (the first is `0.0.1-next.1`). Run `npm run release` to publish the first official version, `0.1.0`.
+
 ## Delivery
 
 First review and merge this contract in a documentation-only PR. Then implement packaging and release workflows in a focused PR against it. Demonstrate archive installation before the initial publication. Configure npm access/trusted publisher with the owner as needed. Role views, claim commands, MCP, and wake-up adapters are independent features and must not be silently included or made prerequisites for this first release.
