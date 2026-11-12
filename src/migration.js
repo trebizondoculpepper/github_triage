@@ -29,7 +29,7 @@ const isHedged = (context, number) => hedged.test(clauseFor(context, number));
 async function resolveReference(repository, number, query) {
   const [owner, name] = repository.split("/");
   const data = await query(
-    `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on Issue{number url state stateReason} ... on PullRequest{number url state merged closingIssuesReferences(first:20){nodes{number url state repository{nameWithOwner}}}}}}}`,
+    `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on Issue{number url state stateReason} ... on PullRequest{number url state merged closingIssuesReferences(first:100){nodes{number url state repository{nameWithOwner}} pageInfo{hasNextPage}}}}}}`,
     { owner, name, number },
   );
   return data.repository?.issueOrPullRequest ?? null;
@@ -70,7 +70,12 @@ export async function planMigration(repository, runtime = {}) {
           status: "review",
           reason: "Self-reference.",
         });
-      else if (native.has(blocker) || edges.some((e) => e.blocker === blocker)) return;
+      // Local edges dedupe against local rows only; a cross-repository #N is a different issue.
+      else if (
+        native.has(blocker) ||
+        edges.some((e) => e.blocker === blocker && !e.crossRepository)
+      )
+        return;
       else
         edges.push({
           blocker,
@@ -93,7 +98,12 @@ export async function planMigration(repository, runtime = {}) {
         context: ref.context,
       };
       if (!sameRepo(ref.repository, repository)) {
-        edges.push({ ...base, status: "review", reason: "Cross-repository reference." });
+        edges.push({
+          ...base,
+          crossRepository: true,
+          status: "review",
+          reason: "Cross-repository reference.",
+        });
         continue;
       }
       if (ref.number === issue.number) {
@@ -110,12 +120,21 @@ export async function planMigration(repository, runtime = {}) {
         continue;
       }
       // A pull request cannot be a blocker: map it to the issues it closes.
+      if (target.closingIssuesReferences?.pageInfo?.hasNextPage) {
+        edges.push({
+          ...base,
+          url: target.url,
+          status: "review",
+          reason: `PR #${target.number} closes more than 100 issues; list incomplete.`,
+        });
+        continue;
+      }
       const closes = (target.closingIssuesReferences?.nodes ?? []).filter((n) =>
         sameRepo(n.repository.nameWithOwner, repository),
       );
       if (closes.length)
         for (const n of closes)
-          propose(n.number, n.url, n.state, `pr #${target.number}`, ref.context);
+          propose(n.number, n.url, n.state, `pr #${target.number}`, ref.context, ref.number);
       else if (target.merged)
         edges.push({
           ...base,
@@ -174,11 +193,14 @@ export async function planMigration(repository, runtime = {}) {
       });
   }
   const rows = tickets.flatMap((t) => [...t.edges, ...(t.labels ? [t.labels] : [])]);
+  const createdAt = now().toISOString();
   return {
     schemaVersion: 1,
     kind: "dependency-migration-plan",
     repository,
-    createdAt: now().toISOString(),
+    // Ties a progress journal to this plan; a regenerated plan gets a new id.
+    planId: `${repository}@${createdAt}`,
+    createdAt,
     guidance:
       'Review before applying: change any row\'s status, remove an edge or add a missed one. Only rows with status "apply" are applied.',
     summary: {
@@ -253,7 +275,16 @@ export async function applyMigration(plan, runtime = {}) {
   const query = runtime.query ?? ghQuery;
   const run = runtime.run ?? ghRun;
   const pace = runtime.pace ?? (() => new Promise((r) => setTimeout(r, 1000)));
-  const journal = runtime.journal ?? { schemaVersion: 1, repository: plan.repository, tickets: {} };
+  if (runtime.journal && runtime.journal.planId !== plan.planId)
+    throw new Error(
+      "The progress journal belongs to a different plan. Move it aside to start this plan afresh.",
+    );
+  const journal = runtime.journal ?? {
+    schemaVersion: 1,
+    repository: plan.repository,
+    planId: plan.planId,
+    tickets: {},
+  };
   const save = runtime.saveJournal ?? (async () => {});
   const repo = plan.repository;
   const results = [];

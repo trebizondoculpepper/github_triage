@@ -1256,7 +1256,12 @@ describe("dependency migration", () => {
       issues: { 1: { labels: ["status:blocked", "blocked:work"], body: "Depends on #2." }, 2: {} },
     });
     const p = await plan(env);
-    let journal: Record<string, any> = { schemaVersion: 1, repository: repo, tickets: {} };
+    let journal: Record<string, any> = {
+      schemaVersion: 1,
+      repository: repo,
+      planId: p.planId,
+      tickets: {},
+    };
     const failComment = async (args: string[]) => {
       if (args[1] === "comment") throw new Error("gh issue comment failed.");
       await env.run(args);
@@ -1280,7 +1285,12 @@ describe("dependency migration", () => {
   it("checkpoints each edge, so a failure on the second edge resumes cleanly", async () => {
     const env = live({ issues: { 1: { body: "Depends on #2 and #3." }, 2: {}, 3: {} } });
     const p = await plan(env);
-    let journal: Record<string, any> = { schemaVersion: 1, repository: repo, tickets: {} };
+    let journal: Record<string, any> = {
+      schemaVersion: 1,
+      repository: repo,
+      planId: p.planId,
+      tickets: {},
+    };
     const save = async (j: Record<string, any>) => void (journal = structuredClone(j));
     const first = await applyMigration(p, {
       query: env.query,
@@ -1317,6 +1327,54 @@ describe("dependency migration", () => {
     expect(result.results[0].reason).toContain("no open native blocker");
     expect(env.writes).toEqual([]);
     expect(result.exitCode).toBe(2);
+  });
+  it("refuses a progress journal left by a different plan", async () => {
+    const env = live({ issues: { 1: { body: "Depends on #2." }, 2: {}, 3: {} } });
+    const first = await plan(env);
+    const journal = {
+      schemaVersion: 1,
+      repository: repo,
+      planId: first.planId,
+      tickets: { 1: { steps: { comment: true } } },
+    };
+    const second = { ...first, planId: `${repo}@later` };
+    await expect(apply(second, env, { journal })).rejects.toThrow("different plan");
+  });
+  it("keeps a local edge when another repository's issue has the same number", async () => {
+    const env = live({
+      issues: { 1: { body: "Depends on #2 and https://github.com/other/repo/issues/2." }, 2: {} },
+    });
+    const p = await plan(env);
+    expect(p.tickets[0].edges.map((e) => [e.blocker, e.status])).toEqual([
+      [2, "review"],
+      [2, "apply"],
+    ]);
+  });
+  it("sends a PR reference to review when its closing issues are incomplete, and judges hedging by the PR's clause", async () => {
+    const env = live({
+      issues: { 1: { body: "Depends on #30; coordinate #31." }, 9: {}, 10: {} },
+      prs: { 30: { merged: false, closes: [9] }, 31: { merged: false, closes: [10] } },
+    });
+    const p = await plan(env);
+    expect(p.tickets[0].edges.map((e) => [e.blocker, e.status])).toEqual([
+      [9, "apply"],
+      [10, "review"],
+    ]);
+    const base = env.query;
+    const truncated: Query = async (source, variables) => {
+      const data = (await base(source, variables)) as any;
+      const node = data.repository?.issueOrPullRequest;
+      if (node?.__typename === "PullRequest")
+        node.closingIssuesReferences.pageInfo.hasNextPage = true;
+      return data;
+    };
+    const q = await planMigration(repo, {
+      query: truncated,
+      collect: env.snapshotNow as never,
+      now: clock,
+    });
+    expect(q.tickets[0].edges[0]).toMatchObject({ status: "review" });
+    expect(q.tickets[0].edges[0].reason).toContain("incomplete");
   });
   it("skips edges and labels that already match", async () => {
     const env = live({
