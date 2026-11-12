@@ -21,7 +21,8 @@
     "lint": "vp lint",
     "fmt": "vp fmt",
     "test": "vp test run",
-    "prepare": "vp config --hooks --no-agent"
+    "prepare": "vp config --hooks --no-agent",
+    "smoke": "node scripts/smoke.mjs dist/cli.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
