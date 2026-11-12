@@ -1007,6 +1007,12 @@ describe("release versions (doc/npm-releases.md)", () => {
     // The same commit may still be promoted to an official release.
     expect(chooseVersion({ channel: "latest", sha: sha(1), published }).version).toBe("0.1.0");
   });
+  it("moves to the following prerelease after a registry-lag conflict, never bumping a release", async () => {
+    const { followingPrerelease } = await import("../scripts/release-version.mjs");
+    expect(followingPrerelease("0.1.1-next.1")).toBe("0.1.2-next.1");
+    expect(followingPrerelease("0.0.9-next.1")).toBe("0.0.10-next.1");
+    expect(() => followingPrerelease("0.1.0")).toThrow();
+  });
   it("orders prereleases before their release and ignores unrelated versions", async () => {
     const { chooseVersion, compare, parse } = await import("../scripts/release-version.mjs");
     expect(compare(parse("0.1.0-next.1")!, parse("0.1.0")!)).toBeLessThan(0);

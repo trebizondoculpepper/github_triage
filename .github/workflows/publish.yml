@@ -74,20 +74,37 @@ jobs:
           echo "version=$(node -p 'require("./version.json").version ?? ""')" >> "$GITHUB_OUTPUT"
           echo "published=$(node -p 'require("./version.json").alreadyPublished ?? ""')" >> "$GITHUB_OUTPUT"
       - name: Publish to npm
+        id: publish
         if: steps.version.outputs.version != ''
         env:
           VERSION: ${{ steps.version.outputs.version }}
           TAG: ${{ steps.channel.outputs.channel }}
         run: |
-          npm version "$VERSION" --no-git-tag-version --allow-same-version
-          npm pkg set gitHead="$GITHUB_SHA"
-          npm publish --provenance --access public --tag "$TAG"
+          # The registry's read view can lag a publication by a minute or two (#57). If npm
+          # reports the chosen prerelease as taken, move to the next one; never bump `latest`.
+          for attempt in 1 2 3 4 5; do
+            npm version "$VERSION" --no-git-tag-version --allow-same-version
+            npm pkg set gitHead="$GITHUB_SHA"
+            if npm publish --provenance --access public --tag "$TAG" 2> publish.err; then
+              echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            cat publish.err >&2
+            if [ "$TAG" = "next" ] && grep -q "E409" publish.err; then
+              VERSION=$(node scripts/release-version.mjs following "$VERSION")
+              echo "::notice::Version taken (registry lag); retrying as $VERSION."
+              continue
+            fi
+            exit 1
+          done
+          echo "::error::No free prerelease version after 5 attempts."
+          exit 1
       - name: Tag and GitHub release
         # Also runs when a retry finds the version already published but the release missing.
         if: steps.channel.outputs.channel == 'latest' && (steps.version.outputs.version != '' || steps.version.outputs.published != '')
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version || steps.version.outputs.published }}
+          VERSION: ${{ steps.publish.outputs.version || steps.version.outputs.published }}
         run: |
           if gh release view "v$VERSION" > /dev/null 2>&1; then
             echo "Release v$VERSION already exists."

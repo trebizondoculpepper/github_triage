@@ -10,6 +10,7 @@
  *
  * Usage: node scripts/release-version.mjs next|latest <commit-sha> [package-name]
  * Prints JSON: { version, alreadyPublished, distTag }.
+ *        node scripts/release-version.mjs following <prerelease>   (prints the next prerelease)
  */
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -70,6 +71,19 @@ export function chooseVersion({ channel, sha, published }) {
   };
 }
 
+/**
+ * The next prerelease after one that npm reports as already taken, used when the registry's
+ * read view lagged behind an earlier publication (#57). Only `next` advances this way: an
+ * official version is never bumped past a conflict, because the conflict most likely means
+ * the same release is already published.
+ * @param {string} version
+ */
+export function followingPrerelease(version) {
+  const p = parse(version);
+  if (!p || p.next === null) throw new Error(`Not a -next prerelease: ${version}`);
+  return `${p.major}.${p.minor}.${p.patch + 1}-next.1`;
+}
+
 /** Read publication history (version and source commit) from the public registry. */
 export async function registryHistory(name, fetchImpl = fetch) {
   const response = await fetchImpl(`https://registry.npmjs.org/${name.replace("/", "%2f")}`);
@@ -81,6 +95,10 @@ export async function registryHistory(name, fetchImpl = fetch) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const [channel, sha, nameArg] = process.argv.slice(2);
+  if (channel === "following") {
+    process.stdout.write(followingPrerelease(sha) + "\n");
+    process.exit(0);
+  }
   if (!["next", "latest"].includes(channel) || !/^[0-9a-f]{40}$/.test(sha ?? "")) {
     console.error("Usage: release-version.mjs next|latest <40-hex commit sha> [package-name]");
     process.exit(1);
