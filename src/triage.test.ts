@@ -103,7 +103,7 @@ import {
 import { detectClientEntry, detectHarness, HARNESS_DETECTORS, resolveEntry } from "./harness.js";
 import { localDoctor, localDoctorExitCode, localDoctorText, nodeProbe } from "./localdoctor.js";
 import { configArgumentsFor } from "./configcli.js";
-import { parseDuration, resolveWindow, snapshotChangeEvidence } from "./changes.js";
+import { changeSubject, parseDuration, resolveWindow, snapshotChangeEvidence } from "./changes.js";
 import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
 
 const repo = "example/project";
@@ -9271,6 +9271,62 @@ describe("label-backed complexity classification and prepared reader (#151)", ()
 });
 
 describe("briefing change evidence and comparison windows (#168)", () => {
+  it("marks dependency links incomplete when nodes fall short of the native summary totals", () => {
+    const window = { from: "2026-11-12T00:00:00.000Z", through: "2026-11-13T00:00:00.000Z" };
+    const page = { hasNextPage: false, endCursor: null };
+    const base = {
+      number: 7,
+      title: "t",
+      url: "https://github.com/o/r/issues/7",
+      state: "OPEN",
+      createdAt: "2026-11-12T01:00:00Z",
+      updatedAt: "2026-11-12T02:00:00Z",
+      closedByPullRequestsReferences: { nodes: [], pageInfo: page },
+    };
+    const short = changeSubject(
+      "issue",
+      {
+        ...base,
+        issueDependenciesSummary: {
+          blockedBy: 1,
+          totalBlockedBy: 1,
+          blocking: 0,
+          totalBlocking: 0,
+        },
+        blockedBy: { nodes: [], pageInfo: page },
+        blocking: { nodes: [], pageInfo: page },
+      } as never,
+      window,
+    );
+    expect(short).toMatchObject({ linksComplete: false });
+    expect(short.unknown).toContain("links");
+    const missingSummary = changeSubject(
+      "issue",
+      {
+        ...base,
+        blockedBy: { nodes: [], pageInfo: page },
+        blocking: { nodes: [], pageInfo: page },
+      } as never,
+      window,
+    );
+    expect(missingSummary.linksComplete).toBe(false);
+    const exact = changeSubject(
+      "issue",
+      {
+        ...base,
+        issueDependenciesSummary: {
+          blockedBy: 0,
+          totalBlockedBy: 0,
+          blocking: 0,
+          totalBlocking: 0,
+        },
+        blockedBy: { nodes: [], pageInfo: page },
+        blocking: { nodes: [], pageInfo: page },
+      } as never,
+      window,
+    );
+    expect(exact.linksComplete).toBe(true);
+  });
   const t0 = "2026-11-13T09:00:00.000Z";
   const clock = () => new Date(t0);
   it("resolves exactly one window source with half-open UTC boundaries", () => {

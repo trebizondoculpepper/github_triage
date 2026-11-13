@@ -183,14 +183,26 @@ export interface ChangeEvidence {
 
 type Linkable = { number: number; url: string; repository?: { nameWithOwner: string } };
 type Connection<T> = { nodes: T[]; pageInfo: { hasNextPage: boolean } } | undefined | null;
-function links(relation: NativeLink["relation"], connection: Connection<Linkable>) {
+/**
+ * Links from one connection. Complete only when the connection has no further page and, where a
+ * native summary total is known, it holds exactly that many nodes (the same check
+ * `completeNative` applies to ordinary collection): a short page is incomplete, never "no links".
+ */
+function links(
+  relation: NativeLink["relation"],
+  connection: Connection<Linkable>,
+  expectedTotal?: number | null,
+) {
   const nodes = (connection?.nodes ?? []).map((node) => ({
     relation,
     number: node.number,
     url: node.url,
     ...(node.repository ? { repository: node.repository.nameWithOwner } : {}),
   }));
-  return { nodes, complete: !!connection && !connection.pageInfo.hasNextPage };
+  const paged = !!connection && !connection.pageInfo.hasNextPage;
+  const counted =
+    expectedTotal === undefined ? true : expectedTotal !== null && nodes.length === expectedTotal;
+  return { nodes, complete: paged && counted };
 }
 
 /** Changed issue node as selected with the evidence fields. */
@@ -222,8 +234,13 @@ export function changeSubject(
     ? [links("closes", pr.closingIssuesReferences)]
     : [
         links("closed-by", issue!.closedByPullRequestsReferences),
-        links("blocked-by", issue!.blockedBy),
-        links("blocking", issue!.blocking),
+        // Native dependencies must also match the summary totals; a missing summary is unknown.
+        links(
+          "blocked-by",
+          issue!.blockedBy,
+          issue!.issueDependenciesSummary?.totalBlockedBy ?? null,
+        ),
+        links("blocking", issue!.blocking, issue!.issueDependenciesSummary?.totalBlocking ?? null),
       ];
   const linksComplete = parts.every((part) => part.complete);
   if (!linksComplete) unknown.push("links");
