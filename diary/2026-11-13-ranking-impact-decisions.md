@@ -1,0 +1,3 @@
+# Ranking baseline and designer impact direction
+
+Recorded the approved bounded first ordering: addressed attention, own PR follow-up, actionable other-agent review, own active work, eligible implementation, optional estimation. Preserve existing pickup overrides and explicit age-only modes, with complexity informational until a later reviewed heuristic. Recorded designer impact XS–XXL as the mirror of implementer complexity, distinct from computed immediate unlock utility. Created #244–#248 with rationale and native delivery sequencing. No ranking or estimation runtime implementation changed.

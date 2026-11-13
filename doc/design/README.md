@@ -59,3 +59,5 @@ The owner accepts a recent Node requirement: [the current Node LTS](runtime.md),
 
 - [Triage efficiency, message trust and delivery follow-through](triage-efficiency-and-trust.md): owner decisions and staged research/implementation, #155 and #188–#205.
 - [Delivery lifecycle](delivery-lifecycle.md): reviewed architecture contract for claims, responsibility and verified completion (#188), refining #189–#192 and #182.
+
+- [Designer impact estimation direction](impact-estimation-direction.md): approved mirror-image metric and staged analysis/delivery, #244–#248.
