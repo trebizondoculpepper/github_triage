@@ -1,0 +1,3 @@
+# Briefing mode implementation contract
+
+Defined the owner-requested repository-wide catch-up mode for #163. Specified CLI syntax/default window, owner attention versus historical changes, retained event evidence, conservative agent attribution, deterministic sections and output, checkpoint/cache/offline semantics and a separate MCP mode adapter. The current collector drops detailed changed objects, so the implementation is split into retained evidence, aggregation, CLI lifecycle and MCP integration. Missing event evidence never becomes a fabricated action or actor. Initial scope is issues/PRs, not an undeclared release/deployment audit. No production implementation or live state changed.

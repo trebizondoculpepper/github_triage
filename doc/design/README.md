@@ -54,3 +54,5 @@ The owner accepts a recent Node requirement: [the current Node LTS](runtime.md),
 [Labels-only complexity](complexity-estimation.md) supersedes native-field setup and permission work. The recognized labels are the only size authority; no field migration is required.
 
 [Rule scenario plausibility](rule-scenario-plausibility.md) defines the small decision/explanation fixture suite before bulk agent trials. It is independent of production labels-only delivery.
+
+[Briefing mode](briefing-mode.md) specifies the repository-wide catch-up command, retained change evidence, attribution, sections and checkpoint safety for #163.
