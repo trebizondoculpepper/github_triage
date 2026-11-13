@@ -5,7 +5,7 @@ import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { collect, currentRepository } from "./github.js";
+import { collect, currentRepository, ghQuery } from "./github.js";
 import {
   applyDependencyChange,
   dependencyChangeText,
@@ -15,6 +15,7 @@ import {
   planDependencyChange,
 } from "./dependencies.js";
 import { compactBriefing, compactText } from "./compact.js";
+import { prStatusText, pullRequestStatus } from "./prstatus.js";
 import { defaultStaleHours, teamText, teamView } from "./team.js";
 import { migrationPlanText, planMigration } from "./migration.js";
 import { briefing, textReport } from "./briefing.js";
@@ -24,6 +25,7 @@ export const help = `Usage: github-triage [options]
 Read-only LLM action briefing. Requires authenticated gh and Node 20+.
   deps N [--tree]       Read native upstream/downstream dependencies (deps --help)
   deps add|remove N --on M --note WHY [--dry-run]  Change native dependencies
+  pr N                  Why is pull request N not progressing? Every blocker at once
   team [--stale-hours N]  Read-only: each agent's claims, linked PRs, activity and warnings
   --repo owner/name     Repository (default: current gh checkout)
   --json                Versioned structured output (from a checkout: npm run --silent triage)
@@ -210,7 +212,7 @@ export async function checkpointSince(path, repository) {
 /**
  * @param {string[]} args
  * @param {(text: string) => Promise<void>} [output]
- * @param {{collect: typeof collect, currentRepository: typeof currentRepository, dependencyReport?: typeof dependencyReport, planDependencyChange?: typeof planDependencyChange, ghRun?: import("./dependencies.js").GhRun, planMigration?: typeof planMigration, migrationRuntime?: Record<string, any>, now?: () => Date}} [runtime]
+ * @param {{collect: typeof collect, currentRepository: typeof currentRepository, dependencyReport?: typeof dependencyReport, planDependencyChange?: typeof planDependencyChange, ghRun?: import("./dependencies.js").GhRun, planMigration?: typeof planMigration, migrationRuntime?: Record<string, any>, now?: () => Date, query?: import("./github.js").Query}} [runtime]
  * @returns {Promise<number>}
  */
 export async function main(
@@ -250,6 +252,25 @@ export async function main(
     });
     await output(values.json ? JSON.stringify(view, null, 2) + "\n" : teamText(view));
     return view.completeness.complete ? 0 : 2;
+  }
+  if (args[0] === "pr") {
+    const { values, positionals } = parseArgs({
+      args: args.slice(1),
+      allowPositionals: true,
+      options: { repo: { type: "string" }, json: { type: "boolean" } },
+    });
+    if (positionals.length !== 1 || !/^[1-9]\d*$/.test(positionals[0]))
+      throw new Error("Usage: github-triage pr N [--json] [--repo owner/name]");
+    if (values.repo && !/^[\w.-]+\/[\w.-]+$/.test(values.repo))
+      throw new Error("--repo must be owner/name.");
+    const repository = values.repo ?? (await runtime.currentRepository());
+    const report = await pullRequestStatus(
+      repository,
+      Number(positionals[0]),
+      runtime.query ?? ghQuery,
+    );
+    await output(values.json ? JSON.stringify(report, null, 2) + "\n" : prStatusText(report));
+    return report.completeness.complete ? 0 : 2;
   }
   if (args[0] === "deps") {
     const values = depsArgumentsFor(args.slice(1));

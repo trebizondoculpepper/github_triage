@@ -1513,3 +1513,209 @@ describe("team view (#41, doc/design/diagnostics.md)", () => {
     }
   });
 });
+
+describe("pr status: why is a PR not progressing (#59)", () => {
+  const head = "a".repeat(40);
+  const run = (name: string, extra: Record<string, unknown> = {}) => ({
+    __typename: "CheckRun",
+    name,
+    status: "COMPLETED",
+    conclusion: "SUCCESS",
+    detailsUrl: `https://ci/${name}`,
+    startedAt: time,
+    ...extra,
+  });
+  const codexComment = (sha: string, status = "completed", unresolved = false) => ({
+    author: { login: "chatgpt-codex-connector" },
+    createdAt: "2026-11-12T09:00:00Z",
+    url: "https://c/1",
+    body: `summary <!-- codex-review-state:v1 {"code_review":{"commit_sha":"${sha}","has_any_findings":${unresolved},"has_unresolved_findings":${unresolved},"status":"${status}"}} -->`,
+  });
+  const pull = (o: Record<string, any> = {}) => ({
+    number: 12,
+    title: "Fix",
+    url: `https://github.com/${repo}/pull/12`,
+    state: "OPEN",
+    isDraft: false,
+    merged: false,
+    mergeable: "MERGEABLE",
+    mergeStateStatus: "CLEAN",
+    reviewDecision: null,
+    headRefOid: head,
+    headRefName: "fix",
+    baseRefName: "main",
+    updatedAt: time,
+    commits: {
+      nodes: [
+        {
+          commit: {
+            oid: head,
+            statusCheckRollup: {
+              contexts: { nodes: o.checks ?? [run("verify")], pageInfo: { hasNextPage: false } },
+            },
+          },
+        },
+      ],
+    },
+    reviews: { nodes: o.reviews ?? [] },
+    reviewThreads: { nodes: o.threads ?? [], pageInfo: { hasNextPage: false } },
+    comments: { nodes: o.comments ?? [] },
+    closingIssuesReferences: { nodes: o.issues ?? [] },
+    ...o.pr,
+  });
+  it("classifies checks: passed, pending, cancelled, failed, unknown", async () => {
+    const { classifyCheck } = await import("./prstatus.js");
+    expect(classifyCheck(run("a"))).toBe("passed");
+    expect(classifyCheck(run("a", { status: "IN_PROGRESS", conclusion: null }))).toBe("pending");
+    expect(classifyCheck({ context: "x", state: "PENDING" })).toBe("pending");
+    expect(classifyCheck(run("a", { conclusion: "CANCELLED" }))).toBe("cancelled");
+    expect(classifyCheck(run("a", { conclusion: "FAILURE" }))).toBe("failed");
+    expect(classifyCheck(run("a", { conclusion: "WEIRD" }))).toBe("unknown");
+  });
+  it("lists every blocker at once, distinguishing missing, pending and cancelled verification", async () => {
+    const { prStatus } = await import("./prstatus.js");
+    const r = prStatus(
+      repo,
+      pull({
+        checks: [
+          run("unit", { conclusion: "FAILURE" }),
+          run("mac", { conclusion: "CANCELLED", startedAt: null }),
+        ],
+        pr: { mergeable: "CONFLICTING", reviewDecision: "CHANGES_REQUESTED" },
+        threads: [
+          {
+            isResolved: false,
+            isOutdated: false,
+            path: "src/a.js",
+            line: 3,
+            comments: {
+              totalCount: 2,
+              nodes: [
+                {
+                  author: { login: "coderabbitai" },
+                  body: "Bug here",
+                  createdAt: time,
+                  url: "https://t/1",
+                },
+                { author: { login: "kavya" }, body: "Fixed", createdAt: time, url: "https://t/2" },
+              ],
+            },
+          },
+        ],
+      }),
+      { now: new Date(time) },
+    );
+    expect(r.blockers).toEqual([
+      `required check \`verify\` is missing on head ${head.slice(0, 7)}`,
+      "check unit failed",
+      "check mac cancelled without running (likely infrastructure, not a code defect): verification incomplete",
+      "merge conflicts with the base branch",
+      "changes requested",
+      "1 unresolved review thread(s)",
+    ]);
+    expect(r.threads.unresolved[0]).toMatchObject({
+      by: "coderabbitai",
+      replies: 1,
+      lastSpeaker: "kavya",
+    });
+    const pending = prStatus(
+      repo,
+      pull({ checks: [run("unit", { status: "QUEUED", conclusion: null })] }),
+    );
+    expect(pending.blockers[0]).toMatch(/not reported yet .*other checks still pending/);
+  });
+  it("tracks which commit each reviewer reviewed and whether Codex covered the head", async () => {
+    const { prStatus } = await import("./prstatus.js");
+    const reviews = [
+      {
+        author: { login: "codex" },
+        state: "COMMENTED",
+        submittedAt: "2026-11-12T08:00:00Z",
+        commit: { oid: "b".repeat(40) },
+      },
+      {
+        author: { login: "codex" },
+        state: "COMMENTED",
+        submittedAt: "2026-11-12T09:00:00Z",
+        commit: { oid: head },
+      },
+      {
+        author: { login: "rabbit" },
+        state: "COMMENTED",
+        submittedAt: "2026-11-12T07:00:00Z",
+        commit: { oid: "c".repeat(40) },
+      },
+    ];
+    const request = {
+      author: { login: "kavya" },
+      body: "@codex review",
+      createdAt: "2026-11-12T10:00:00Z",
+      url: "https://c/2",
+    };
+    const old = prStatus(
+      repo,
+      pull({ reviews, comments: [codexComment("b".repeat(40)), request] }),
+    );
+    expect(old.reviews.map((r) => [r.reviewer, r.current])).toEqual([
+      ["codex", true],
+      ["rabbit", false],
+    ]);
+    expect(old.blockers).toContain(
+      "Codex's latest review is for an older commit; current head not yet covered",
+    );
+    expect(old.reviewRequest!.status).toBe("no reaction yet");
+    const dirty = prStatus(
+      repo,
+      pull({ comments: [codexComment(head, "completed", true), request] }),
+    );
+    expect(dirty.blockers).toEqual(["Codex reports unresolved findings on the current head"]);
+    expect(dirty.reviewRequest!.status).toBe("current head reviewed (Codex)");
+    const running = prStatus(repo, pull({ comments: [codexComment(head, "running"), request] }));
+    expect(running.reviewRequest!.status).toMatch(/in progress/);
+  });
+  it("green evidence is only a merge consideration, and closed PRs report only their state", async () => {
+    const { prStatus } = await import("./prstatus.js");
+    const green = prStatus(
+      repo,
+      pull({
+        comments: [codexComment(head)],
+        issues: [
+          {
+            number: 5,
+            url: issue(5).url,
+            title: "T",
+            state: "OPEN",
+            labels: { nodes: [{ name: "agent:kavya" }] },
+          },
+        ],
+      }),
+    );
+    expect(green.blockers).toEqual([]);
+    expect(green.verdict).toMatch(/not approval/);
+    expect(green.linkedIssues[0].owners).toEqual(["kavya"]);
+    const merged = prStatus(
+      repo,
+      pull({ pr: { state: "MERGED", merged: true, mergeable: "UNKNOWN" }, checks: [] }),
+    );
+    expect(merged.blockers).toEqual(["pull request is merged"]);
+  });
+  it("runs through the injected query and validates arguments", async () => {
+    let text = "";
+    const runtime = {
+      collect: async () => {
+        throw new Error("no briefing");
+      },
+      currentRepository: async () => repo,
+      query: (async () => ({ repository: { pullRequest: pull() } })) as Query,
+    };
+    expect(await main(["pr", "12", "--json"], async (t) => void (text = t), runtime)).toBe(0);
+    expect(JSON.parse(text)).toMatchObject({ kind: "pr-status", schemaVersion: 1, blockers: [] });
+    for (const bad of [["pr"], ["pr", "x"], ["pr", "1", "2"]])
+      await expect(main(bad, async () => {}, runtime)).rejects.toThrow("Usage");
+    const missing = {
+      ...runtime,
+      query: (async () => ({ repository: { pullRequest: null } })) as Query,
+    };
+    await expect(main(["pr", "99"], async () => {}, missing)).rejects.toThrow("unavailable");
+  });
+});
