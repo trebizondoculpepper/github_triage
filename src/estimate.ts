@@ -486,15 +486,11 @@ export async function runEstimate(
       kind: "complexity-estimate",
       storage: "labels",
       size,
-      // A retry after a partial write (target already applied) still records what was replaced:
-      // the guard's OLD, else the size of the estimate this one supersedes.
-      previous: onlyTarget(before.sizes)
-        ? replace && replace !== size
-          ? [replace]
-          : before.provenance && before.provenance.size !== size
-            ? [before.provenance.size]
-            : before.sizes
-        : before.sizes,
+      // Record only observed evidence: the sizes this run read, or, on a retry after a partial
+      // write (target already applied), the size named by the explicit --replace guard. An older
+      // provenance comment is not evidence that this run is repairing it (the label may have
+      // been changed by hand since), so it never supplies a previous size.
+      previous: onlyTarget(before.sizes) && replace && replace !== size ? [replace] : before.sizes,
       rationale,
       assumptions,
       references,
@@ -504,6 +500,12 @@ export async function runEstimate(
       recordedAt: (runtime.now?.() ?? new Date()).toISOString(),
     };
     result.provenance = provenance;
+    const retryGuard = before.sizes.filter((observed) => observed !== size);
+    const retryHint =
+      retryGuard.length === 1
+        ? ` with --replace ${retryGuard[0]} so the replaced size is recorded`
+        : "";
+
     lines.push(
       `Complexity estimate for ${target.repository}#${number}: ${before.sizes.join(", ") || "unestimated"} -> ${size}`,
     );
@@ -596,7 +598,7 @@ export async function runEstimate(
           result.labelCreated ? "partial" : "failed",
           result.labelCreated ? 2 : 1,
           `GitHub did not apply ${definition.name} to #${number} (${denied(add) ?? "no result"}); the ticket's labels were not changed${result.labelCreated ? ", but the repository label was created and is kept" : ""}.`,
-          "Check gh auth status and that you may label issues here, then retry the same command.",
+          `Check gh auth status and that you may label issues here, then retry the same command${retryHint}.`,
         );
       added.push(definition.name);
     }
@@ -630,7 +632,7 @@ export async function runEstimate(
         : final
           ? `the ticket now carries ${final.sizes.join(", ") || "no size label"} (a concurrent change?)`
           : "the final labels could not be read";
-      result.recovery = `Inspect #${number}, then re-run the same command; nothing is rolled back.`;
+      result.recovery = `Inspect #${number}, then re-run the same command${retryHint}; nothing is rolled back.`;
       lines.push(
         `Partial: the size is not verified as ${size} alone: ${why}. No provenance comment was written.`,
         String(result.recovery),
@@ -644,7 +646,7 @@ export async function runEstimate(
     const url = prop(comment.data, "addComment", "commentEdge", "node", "url");
     if (typeof url !== "string") {
       result.provenanceWritten = false;
-      result.recovery = `Re-run the same command; the label is kept and only provenance is added.`;
+      result.recovery = `Re-run the same command${retryHint}; the label is kept and only provenance is added.`;
       lines.push(
         `Partial: #${number} carries ${label} but the provenance comment failed (${denied(comment) ?? "no result"}).`,
         String(result.recovery),

@@ -5106,6 +5106,34 @@ describe("estimate N records a size label with provenance (#152)", () => {
     expect(t.json()).toMatchObject({ previous: ["S", "XL"], final: { sizes: ["M"] } });
     expect(t.names()).toEqual(["bug", "complexity:M"]);
   });
+  it("records only observed sizes when older provenance disagrees with the current label", async () => {
+    // The label was changed by hand from S to M after an S estimate was recorded.
+    const t = harness({ labels: ["complexity:M"] });
+    t.remote.comments.push(
+      provenanceComment({
+        schemaVersion: 2,
+        kind: "complexity-estimate",
+        storage: "labels",
+        size: "S",
+        previous: [],
+        rationale: "older",
+        assumptions: [],
+        references: [],
+        estimator: null,
+        revision: null,
+        guidanceVersion: 1,
+        recordedAt: "2026-11-01T00:00:00.000Z",
+      }),
+    );
+    expect(await t.call(...base)).toBe(0);
+    expect(t.json()).toMatchObject({ previous: ["M"], provenance: { previous: ["M"] } });
+    expect(parseLabelProvenance(t.remote.comments.at(-1)!)?.previous).toEqual(["M"]);
+  });
+  it("tells a partial-write retry to pass --replace so the replaced size is recorded", async () => {
+    const t = harness({ labels: ["complexity:S"], failComment: true });
+    expect(await t.call(...base)).toBe(2);
+    expect(t.json().recovery).toContain("--replace S");
+  });
   it("is idempotent and reports the stored provenance, not a fresh timestamp", async () => {
     const t = harness({ labels: ["complexity:M"] });
     const stored = provenanceComment({
