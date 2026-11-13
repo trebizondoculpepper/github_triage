@@ -10,6 +10,8 @@ One operation accepts repo and PR, returning current head/fetch window, required
 
 An explicit deeper mode extends #59 with review rounds matched to commits, fixes/responses, reopened/resolved findings and recurring themes. Distinguish repeated defects, possible regressions, newly discovered old gaps and duplicate/stale findings. Do not infer causation or abandonment from count alone. Return candidate next actions: targeted fixes, broader invariant/design review, split scope or defer; explain uncertainty and value evidence. Do not run an LLM each background refresh or automatically change scope. A bounded signal feeds designer/owner views, with detail on demand.
 
+Implementation defaults (routine, under this contract): the mode is `pr N --history`; classification uses reviewer + file + normalized finding title only; the inspection threshold is 3 rounds with findings; result shape and bounds are documented in `doc/usage.md`. Wiring the signal into designer briefings and owner catch-up is a follow-up that consumes `signal` without new collection.
+
 ## #41 / #61: team and ticket ownership
 
 Team view lists explicit named-agent claims, linked PR state, latest ticket/PR activity, stale/multiple-claim candidates. Ticket lookup answers “who is working on this?” using the same records plus release/done/handoff evidence. Source-link contradictory label/comment history, without treating comment text as an authoritative claim parser. Origin/attention are not ownership. Recorded ownership, recent activity, and live presence are distinct. Without a supported presence source, say online/availability unknown. No presence service is a prerequisite; no shared-login attribution or automatic release. #61 owns focused lookup; #41 owns team aggregation.
