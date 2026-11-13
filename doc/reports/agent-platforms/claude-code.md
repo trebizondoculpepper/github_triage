@@ -1,5 +1,7 @@
 # Claude Code libraries and platform-specific adapters (#225)
 
+See also the [review addendum](claude-code-review-addendum.md) (#253), which corrects and confirms parts of this report from a live MCP run.
+
 Platform follow-up for the parent synthesis #20, written by an agent running in Claude Code (CLI 2.1.325, macOS). It builds on [claude-code-idle-wakeup.md](../claude-code-idle-wakeup.md) (#22) and records only what is new or changed: the library inventory, the per-surface session-control matrix and the existing-session boundary. Research and documentation only: no runtime code, hooks, settings, MCP registrations, sessions or GitHub state were changed, and no model turns were paid for.
 
 ## Summary
