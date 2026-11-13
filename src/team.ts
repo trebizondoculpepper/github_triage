@@ -71,7 +71,7 @@ export interface TeamOptions {
   offline?: boolean;
 }
 
-interface ActivityEvent {
+export interface ActivityEvent {
   at: string | null | undefined;
   source: string;
 }
@@ -79,13 +79,13 @@ interface ActivityEvent {
 /** Default staleness candidate threshold: the general briefing's two days (#41 contract). */
 export const defaultStaleHours = 48;
 
-const latest = (events: ActivityEvent[]): { at: string; source: string } | null =>
+export const latest = (events: ActivityEvent[]): { at: string; source: string } | null =>
   events
     .filter((e): e is { at: string; source: string } => !!e.at && Number.isFinite(Date.parse(e.at)))
     .sort((a, b) => b.at.localeCompare(a.at))[0] ?? null;
 
 /** A linked pull request's state, from the evidence the briefing already collects. */
-function pullRequestState(pr: PullRequest): LinkedPullRequest {
+export function pullRequestState(pr: PullRequest): LinkedPullRequest {
   const checks = prChecks(pr);
   const verify = checks.find((c) => c.name === workflow.verify)?.outcome ?? "UNKNOWN";
   return {
