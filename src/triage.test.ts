@@ -6136,6 +6136,106 @@ describe("pr review history: why does this keep failing review (#60)", () => {
     );
   });
 
+  it("never counts an unsubmitted (PENDING) review as coverage of the head", async () => {
+    const { reviewHistory } = await import("./reviewhistory.js");
+    const draft = { ...review(c4, "PENDING", { login: "alice" }), submittedAt: null };
+    const r = reviewHistory(repo, history({ reviews: [review(c1), draft] }), status);
+    expect(r.headReviewed).toBe(false);
+    expect(r.rounds.map((x) => x.commit)).toEqual([c1]);
+    const unsubmitted = reviewHistory(
+      repo,
+      history({ reviews: [{ ...review(c4), submittedAt: null }] }),
+      status,
+    );
+    expect(unsubmitted.headReviewed).toBe(false);
+  });
+
+  it("does not claim a recurrence order that only current resolution suggests", async () => {
+    const { reviewHistory, reviewHistoryText } = await import("./reviewhistory.js");
+    const r = reviewHistory(
+      repo,
+      history({
+        reviews: [review(c1), review(c2), review(c3), review(c4)],
+        threads: [
+          thread(c1, "Bound the output", { resolved: true }),
+          thread(c2, "Bound the output"),
+          thread(c2, "Handle empty input", { path: "src/a.ts" }),
+          thread(c3, "Check paths", { path: "src/a.ts" }),
+        ],
+      }),
+      status,
+    );
+    expect(r.findings.filter((f) => f.round! > 1).map((f) => f.class)).toEqual([
+      "recurrence-unordered",
+      "recurrence-unordered",
+      "recurrence-unordered",
+    ]);
+    expect(r.counts.repeated).toBe(0);
+    expect(r.counts["same-area-after-fix"]).toBe(0);
+    expect(r.signal.reasons.join(" ")).not.toMatch(/after resolution|already fixed/);
+    expect(r.uncertainty.join(" ")).toContain("resolution order is unestablished");
+    expect(reviewHistoryText(r)).toContain("recurrence-unordered 3");
+    // A fix cited after the later finding's commit does not establish order either.
+    const late = reviewHistory(
+      repo,
+      history({
+        threads: [
+          thread(c1, "Bound the output", { resolved: true, reply: "Fixed in 3333333" }),
+          thread(c2, "Bound the output"),
+        ],
+      }),
+      status,
+    );
+    expect(late.findings.find((f) => f.round === 2)?.class).toBe("recurrence-unordered");
+  });
+
+  it("retries once, then refuses to combine status and history for different heads", async () => {
+    const { pullRequestReviewHistory } = await import("./reviewhistory.js");
+    const live = (heads: string[]) => {
+      const calls: string[] = [];
+      let i = 0;
+      const query = (async (q: string) => {
+        calls.push(q);
+        const head = heads[Math.min(i++, heads.length - 1)];
+        return q.includes("statusCheckRollup")
+          ? {
+              repository: {
+                pullRequest: {
+                  ...history({ head }),
+                  title: "x",
+                  state: "OPEN",
+                  mergeable: "MERGEABLE",
+                  mergeStateStatus: "CLEAN",
+                  headRefName: "b",
+                  baseRefName: "main",
+                  updatedAt: time,
+                  commits: { nodes: [] },
+                  reviewThreads: { nodes: [], pageInfo: { hasNextPage: false } },
+                  closingIssuesReferences: { nodes: [] },
+                },
+              },
+            }
+          : { repository: { pullRequest: history({ head, reviews: [review(head)] }) } };
+      }) as Query;
+      return { calls, query };
+    };
+    const raced = live([c3, c4, c4, c4]);
+    const ok = await pullRequestReviewHistory(repo, 47, raced.query);
+    expect(raced.calls).toHaveLength(4);
+    expect(ok.cost.requests).toBe(4);
+    expect(ok.completeness.warnings.join(" ")).not.toContain("head changed");
+
+    const moving = live([c2, c3, c3, c4]);
+    const bad = await pullRequestReviewHistory(repo, 47, moving.query);
+    expect(moving.calls).toHaveLength(4);
+    expect(bad.completeness.complete).toBe(false);
+    expect(bad.completeness.warnings.join(" ")).toContain(
+      "head changed between the status and history queries",
+    );
+    expect(bad.current.verdict).toContain("inconsistent snapshot");
+    expect(bad.current.blockers.join(" ")).toContain("head moved during collection");
+  });
+
   it("runs pr N --history through the injected query", async () => {
     let text = "";
     const calls: string[] = [];

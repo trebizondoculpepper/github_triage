@@ -62,6 +62,7 @@ export type FindingClass =
   | "repeated"
   | "duplicate"
   | "same-area-after-fix"
+  | "recurrence-unordered"
   | "new-later";
 
 export type Finding = {
@@ -167,8 +168,14 @@ const key = (s: string): string =>
 export function reviewHistory(
   repository: string,
   pr: ReviewHistoryNode,
-  status: Pick<PrStatusReport, "blockers" | "verdict" | "completeness">,
-  { now = new Date(), startedAt }: { now?: Date; startedAt?: string } = {},
+  status: Pick<PrStatusReport, "blockers" | "verdict" | "completeness"> & {
+    pullRequest?: { head: string };
+  },
+  {
+    now = new Date(),
+    startedAt,
+    requests = 2,
+  }: { now?: Date; startedAt?: string; requests?: number } = {},
 ): ReviewHistoryReport {
   const head = pr.headRefOid;
   const author = pr.author ? login(pr.author) : null;
@@ -176,13 +183,30 @@ export function reviewHistory(
   const commits = pr.commits.nodes.map((n) => n.commit);
   const position = new Map(commits.map((c, i) => [c.oid, i]));
   const warnings: string[] = [...status.completeness.warnings];
+  // The #59 status and this history must describe the same head; never combine two heads.
+  const statusHead = status.pullRequest?.head;
+  const headMismatch = !!statusHead && statusHead !== head;
+  const current: ReviewHistoryReport["current"] = headMismatch
+    ? {
+        blockers: [
+          `head moved during collection: status read ${short(statusHead)}, history read ${short(head)}; current checks and verdict not combined, rerun`,
+        ],
+        verdict: `inconsistent snapshot (status head ${short(statusHead)}, history head ${short(head)}); rerun before acting`,
+      }
+    : { blockers: status.blockers, verdict: status.verdict };
+  if (headMismatch)
+    warnings.push(
+      `pull request head changed between the status and history queries (${short(statusHead)} then ${short(head)}); current-head evidence is inconsistent`,
+    );
 
   // Review events: formal reviews by anyone but the PR author (GitHub records the author's
   // thread replies as reviews too), plus Codex state markers naming the reviewed commit.
   type Event = { by: string; state: string; at: string | null; url: string; commit: string };
   const events: Event[] = [];
   for (const r of pr.reviews.nodes) {
+    // A draft (PENDING, unsubmitted) review is not a completed review of any commit.
     if (!r.commit?.oid || login(r.author) === author) continue;
+    if (r.state === "PENDING" || !r.submittedAt) continue;
     events.push({
       by: login(r.author),
       state: r.state,
@@ -290,6 +314,19 @@ export function reviewHistory(
   const sorted = raw
     .map((f) => ({ ...f, round: f.raisedOn ? (roundOf.get(f.raisedOn) ?? null) : null }))
     .sort((a, b) => (a.round ?? 0) - (b.round ?? 0) || (a.order < b.order ? -1 : 1));
+  // A recurrence is ordered only when an earlier finding's author reply cites a fix commit at or
+  // before the commit the later finding was raised on. Current isResolved alone does not show
+  // the earlier thread was resolved before the later finding.
+  const fixedBefore = (p: Finding, later: string | null): boolean => {
+    const at = later ? position.get(later) : undefined;
+    return (
+      at !== undefined &&
+      p.citedFixes.some((c) => {
+        const fix = position.get(c);
+        return fix !== undefined && fix <= at;
+      })
+    );
+  };
   const findings: Finding[] = [];
   for (const f of sorted) {
     const same = findings.filter(
@@ -306,10 +343,15 @@ export function reviewHistory(
       cls = "duplicate";
       basis = "same reviewer, file and title already raised on the same commit";
       related = same.map((p) => p.url);
-    } else if (same.some((p) => p.status === "resolved")) {
+    } else if (same.some((p) => p.status === "resolved" && fixedBefore(p, f.raisedOn))) {
       cls = "repeated";
       basis =
-        "same reviewer, file and title raised again on a later commit after the earlier thread was resolved: the earlier fix may be incomplete, or the finding was reopened";
+        "same reviewer, file and title raised again on a commit at or after a fix the author cited for the earlier thread: the earlier fix may be incomplete, or the finding was reopened";
+      related = same.filter((p) => fixedBefore(p, f.raisedOn)).map((p) => p.url);
+    } else if (same.some((p) => p.status === "resolved")) {
+      cls = "recurrence-unordered";
+      basis =
+        "same reviewer, file and title as an earlier thread that is resolved now, but no cited fix commit shows it was resolved before this finding: order unestablished";
       related = same.map((p) => p.url);
     } else if (same.length) {
       cls = "duplicate";
@@ -318,10 +360,15 @@ export function reviewHistory(
     } else if (f.round === null || f.round <= firstFindingRound) {
       cls = "initial";
       basis = "raised in the first round with findings";
-    } else if (area.length) {
+    } else if (area.some((p) => fixedBefore(p, f.raisedOn))) {
       cls = "same-area-after-fix";
       basis =
         "new finding in a file whose earlier finding was resolved: possibly a regression from that fix, possibly a newly noticed gap; causation not established";
+      related = area.filter((p) => fixedBefore(p, f.raisedOn)).map((p) => p.url);
+    } else if (area.length) {
+      cls = "recurrence-unordered";
+      basis =
+        "new finding in a file with an earlier finding that is resolved now, but no cited fix commit shows that fix preceded this finding: order unestablished";
       related = area.map((p) => p.url);
     } else {
       cls = "new-later";
@@ -369,6 +416,7 @@ export function reviewHistory(
     repeated: count("repeated"),
     duplicate: count("duplicate"),
     "same-area-after-fix": count("same-area-after-fix"),
+    "recurrence-unordered": count("recurrence-unordered"),
     "new-later": count("new-later"),
   };
   const roundsWithFindings = rounds.filter((r) => r.findingsRaised > 0).length;
@@ -435,6 +483,10 @@ export function reviewHistory(
     "Classifications compare reviewer, file and finding title only; they are candidates for inspection, not proof of cause.",
     "Value and importance are not assessed: deferring scope needs project evidence or agent judgement, not finding counts.",
   ];
+  if (counts["recurrence-unordered"])
+    uncertainty.push(
+      `${counts["recurrence-unordered"]} finding(s) resemble an earlier resolved one, but the resolution order is unestablished (no cited fix commit precedes them); they do not drive the repeated-cycle signal.`,
+    );
   if (pr.comments.nodes.length === 0 && pr.reviews.nodes.length === 0)
     uncertainty.push("No reviews or comments were found: review history is missing, not clean.");
 
@@ -462,7 +514,7 @@ export function reviewHistory(
     fetchedAt: now.toISOString(),
     startedAt: startedAt ?? now.toISOString(),
     pullRequest: { number: pr.number, url: pr.url, head, author },
-    current: { blockers: status.blockers, verdict: status.verdict },
+    current,
     rounds: rounds.slice(-historyLimits.rounds),
     omittedRounds: Math.max(0, rounds.length - historyLimits.rounds),
     headReviewed,
@@ -481,7 +533,7 @@ export function reviewHistory(
     nextActions,
     uncertainty,
     nextCommands: [command, `${command} --history --json`],
-    cost: { requests: 2 },
+    cost: { requests },
     completeness: { complete: !uniqueWarnings.length, warnings: uniqueWarnings },
   };
 }
@@ -494,12 +546,23 @@ export async function pullRequestReviewHistory(
   now: () => Date = () => new Date(),
 ): Promise<ReviewHistoryReport> {
   const startedAt = now().toISOString();
-  const status = await pullRequestStatus(repository, number, q, now);
   const [owner, name] = repository.split("/");
-  const data = await q(historyQuery, { owner, name, number });
-  const pr = selected<ReviewHistoryNode>(prop(data, "repository", "pullRequest"));
-  if (!pr) throw new Error(`Pull request #${number} is unavailable in ${repository}.`);
-  return reviewHistory(repository, pr, status, { now: now(), startedAt });
+  const collect = async () => {
+    const status = await pullRequestStatus(repository, number, q, now);
+    const data = await q(historyQuery, { owner, name, number });
+    const pr = selected<ReviewHistoryNode>(prop(data, "repository", "pullRequest"));
+    if (!pr) throw new Error(`Pull request #${number} is unavailable in ${repository}.`);
+    return { status, pr };
+  };
+  let { status, pr } = await collect();
+  let requests = 2;
+  // A push between the two queries gives them different heads: retry once, then report the
+  // mismatch (reviewHistory marks it incomplete) rather than combining two heads.
+  if (status.pullRequest.head !== pr.headRefOid) {
+    ({ status, pr } = await collect());
+    requests += 2;
+  }
+  return reviewHistory(repository, pr, status, { now: now(), startedAt, requests });
 }
 
 /** Text rendering. */
@@ -520,7 +583,7 @@ export function reviewHistoryText(r: ReviewHistoryReport): string {
         `  ${x.round}. ${x.commit.slice(0, 7)}${x.current ? " (head)" : ""}${x.inHistory ? "" : " (not in history)"}: ${x.findingsRaised} finding(s); ${x.reviewers.map((v) => `${v.by} ${v.state}`).join(", ") || "no review event"}${x.commitsSincePrevious !== null ? `; ${x.commitsSincePrevious} commit(s) since previous` : ""}`,
     ),
     "",
-    `FINDINGS: ${r.counts.total} (open ${r.counts.open}, resolved ${r.counts.resolved}; repeated ${r.counts.repeated}, duplicate ${r.counts.duplicate}, same-area-after-fix ${r.counts["same-area-after-fix"]}, new-later ${r.counts["new-later"]}, initial ${r.counts.initial})`,
+    `FINDINGS: ${r.counts.total} (open ${r.counts.open}, resolved ${r.counts.resolved}; repeated ${r.counts.repeated}, duplicate ${r.counts.duplicate}, same-area-after-fix ${r.counts["same-area-after-fix"]}, recurrence-unordered ${r.counts["recurrence-unordered"]}, new-later ${r.counts["new-later"]}, initial ${r.counts.initial})`,
     ...r.findings.map(
       (f) =>
         `  [${f.class}] r${f.round ?? "?"} ${f.status}${f.outdated ? " (outdated)" : ""} ${f.severity ? `${f.severity} ` : ""}${f.path ?? "general"}${f.line ? `:${f.line}` : ""} by ${f.by}: ${f.title}${f.citedFixes.length ? ` · fix cited ${f.citedFixes.map((c) => c.slice(0, 7)).join(",")}` : ""} ${f.url}`,
