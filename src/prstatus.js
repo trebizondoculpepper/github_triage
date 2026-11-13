@@ -130,7 +130,11 @@ export function prStatus(repository, pr, { now = new Date(), startedAt } = {}) {
       .at(-1)?.code_review ?? null;
   // Bots often update one summary comment in place, so a receipt's creation time does not show
   // whether a later request was answered. Codex's state marker records the commit it reviewed.
-  const lastRequest = comments.filter((c) => requestPattern.test(c.body ?? "")).at(-1) ?? null;
+  // Bot replies often quote "@coderabbitai review" as an instruction; only non-bot comments
+  // count as requests, so a receipt can never replace the request it answers.
+  const lastRequest =
+    comments.filter((c) => !isBot(c.author?.login) && requestPattern.test(c.body ?? "")).at(-1) ??
+    null;
   const requested =
     reviewerFor[(requestPattern.exec(lastRequest?.body ?? "")?.[1] ?? "").toLowerCase()];
   const answerer = (login) => (login ?? "").replace(/\[bot\]$/, "");

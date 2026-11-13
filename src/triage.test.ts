@@ -2896,3 +2896,71 @@ describe("pr status: required approvals, verify success and review scoping", () 
     expect(stale.blockers.some((b: string) => /older commit/.test(b))).toBe(false);
   });
 });
+
+describe("pr status: bot instructions are not review requests", () => {
+  it("keeps the human request answered when the bot reply quotes the request syntax", async () => {
+    const { prStatus } = await import("./prstatus.js");
+    const head = "a".repeat(40);
+    const pr = {
+      number: 12,
+      title: "Fix",
+      url: `https://github.com/${repo}/pull/12`,
+      state: "OPEN",
+      isDraft: false,
+      merged: false,
+      mergeable: "MERGEABLE",
+      mergeStateStatus: "CLEAN",
+      reviewDecision: null,
+      headRefOid: head,
+      headRefName: "fix",
+      baseRefName: "main",
+      updatedAt: time,
+      commits: {
+        nodes: [
+          {
+            commit: {
+              oid: head,
+              statusCheckRollup: {
+                contexts: {
+                  nodes: [
+                    {
+                      __typename: "CheckRun",
+                      name: "verify",
+                      status: "COMPLETED",
+                      conclusion: "SUCCESS",
+                      startedAt: time,
+                    },
+                  ],
+                  pageInfo: { hasNextPage: false },
+                },
+              },
+            },
+          },
+        ],
+      },
+      reviews: { nodes: [], pageInfo: { hasPreviousPage: false } },
+      reviewThreads: { nodes: [], pageInfo: { hasNextPage: false } },
+      comments: {
+        nodes: [
+          {
+            author: { login: "kavya" },
+            body: "@coderabbitai review",
+            createdAt: "2026-11-12T10:00:00Z",
+            url: "a",
+          },
+          {
+            author: { login: "coderabbitai" },
+            body: "Review done. To request another review, use `@coderabbitai review`.",
+            createdAt: "2026-11-12T11:00:00Z",
+            url: "b",
+          },
+        ],
+        pageInfo: { hasPreviousPage: false },
+      },
+      closingIssuesReferences: { nodes: [], pageInfo: { hasNextPage: false } },
+    };
+    const r = prStatus(repo, pr);
+    expect(r.reviewRequest!.url).toBe("a");
+    expect(r.reviewRequest!.status).toBe("a reviewer has posted since the request");
+  });
+});
