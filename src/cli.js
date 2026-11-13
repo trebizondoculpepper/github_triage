@@ -15,6 +15,7 @@ import {
   planDependencyChange,
 } from "./dependencies.js";
 import { compactBriefing, compactText } from "./compact.js";
+import { doctorStaleHours, ticketDoctor, ticketDoctorText } from "./ticketdoctor.js";
 import { checkForUpdate, installedVersion, optOutEnv, updateAdvisory } from "./updates.js";
 import { defaultStaleHours, teamText, teamView } from "./team.js";
 import { migrationPlanText, planMigration } from "./migration.js";
@@ -26,6 +27,7 @@ Read-only LLM action briefing. Requires authenticated gh and Node 20+.
   deps N [--tree]       Read native upstream/downstream dependencies (deps --help)
   deps add|remove N --on M --note WHY [--dry-run]  Change native dependencies
   team [--stale-hours N]  Read-only: each agent's claims, linked PRs, activity and warnings
+  ticket-doctor [--stale-hours N] [--limit N]  Read-only consistency scan of all open tickets
   --repo owner/name     Repository (default: current gh checkout)
   --json                Versioned structured output (from a checkout: npm run --silent triage)
   --issue N             Include full issue body/history, even if closed
@@ -257,6 +259,40 @@ export async function main(
 
 /** The command itself; `main` adds the version check around it. */
 async function run(args, output, runtime) {
+  if (args[0] === "ticket-doctor") {
+    const { values } = parseArgs({
+      args: args.slice(1),
+      options: {
+        repo: { type: "string" },
+        json: { type: "boolean" },
+        "stale-hours": { type: "string" },
+        limit: { type: "string" },
+        cache: { type: "string" },
+        offline: { type: "boolean" },
+      },
+    });
+    if (values.repo && !/^[\w.-]+\/[\w.-]+$/.test(values.repo))
+      throw new Error("--repo must be owner/name.");
+    const staleHours =
+      values["stale-hours"] === undefined ? doctorStaleHours : Number(values["stale-hours"]);
+    if (!Number.isFinite(staleHours) || staleHours <= 0)
+      throw new Error("--stale-hours must be a positive number.");
+    const limit = values.limit === undefined ? 30 : Number(values.limit);
+    if (!Number.isInteger(limit) || limit <= 0)
+      throw new Error("--limit must be a positive integer.");
+    if (values.offline && !values.cache) throw new Error("--offline requires --cache PATH.");
+    const snapshot = values.offline
+      ? await cachedSnapshot(values.cache, values.repo)
+      : await runtime.collect(values.repo ?? (await runtime.currentRepository()), {});
+    if (!values.offline && values.cache) await atomicJson(values.cache, snapshot);
+    const report = ticketDoctor(snapshot, {
+      staleHours,
+      limit,
+      now: runtime.now?.() ?? new Date(),
+    });
+    await output(values.json ? JSON.stringify(report, null, 2) + "\n" : ticketDoctorText(report));
+    return report.completeness.complete ? 0 : 2;
+  }
   if (args[0] === "team") {
     const { values } = parseArgs({
       args: args.slice(1),

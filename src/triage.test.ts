@@ -26,6 +26,7 @@ import { briefing, dependencyDone, textReport } from "./briefing.js";
 import { collect, declaredDependencies, graphqlAnswer, pages, type Query } from "./github.js";
 import { clauseFor, hedged, listWideHedge, planMigration } from "./migration.js";
 import { teamText, teamView } from "./team.js";
+import { ticketDoctor, ticketDoctorText } from "./ticketdoctor.js";
 import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
 
 const repo = "example/project";
@@ -1630,6 +1631,128 @@ describe("version check (#51, doc/design/updates.md)", () => {
           runtime,
         ),
       ).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true });
+    }
+  });
+});
+
+describe("Ticket Doctor v1 (#66, doc/design/diagnostics.md)", () => {
+  const at = (hoursAgo: number) => new Date(Date.parse(time) - hoursAgo * 3_600_000).toISOString();
+  const t = (n: number, labels: string[], extra: Partial<Issue> = {}): Issue => ({
+    ...issue(n, labels),
+    updatedAt: at(1),
+    ...extra,
+  });
+  const blockedBy = (urls: string[]) => ({
+    issueDependenciesSummary: {
+      blockedBy: urls.length,
+      totalBlockedBy: urls.length,
+      blocking: 0,
+      totalBlocking: 0,
+    },
+    blockedBy: page(
+      urls.map((url) => ({
+        ...issue(Number(url.split("/").pop())),
+        url,
+        repository: { nameWithOwner: repo },
+        issueDependenciesSummary: {
+          blockedBy: 0,
+          totalBlockedBy: 0,
+          blocking: 0,
+          totalBlocking: 0,
+        },
+      })),
+    ),
+  });
+  const build = () => {
+    const prOpen = pr();
+    prOpen.number = 90;
+    prOpen.state = "OPEN";
+    prOpen.closingIssuesReferences = page([{ number: 7, url: issue(7).url }]);
+    return snapshot(
+      [
+        t(1, ["bug", "status:ready"]), // clean
+        t(2, ["enhancement"]), // unclaimed, no readiness
+        t(3, ["bug", "status:ready", "status:parked"]), // two readiness labels
+        t(4, ["status:ready", "urgency:high", "urgency:low"]), // urgency conflict, no classification
+        t(5, ["bug", "status:ready", "question"]), // design conflict
+        t(6, ["bug", "agent:ana", "agent:bo"]), // two owners
+        t(7, ["bug", "status:ready"]), // open PR
+        t(8, ["bug", "status:blocked"]), // blocked without reason
+        t(9, ["bug", "agent:ana", "status:ready"], { updatedAt: at(30) }), // leftover + stale (24h)
+        t(10, ["bug", "status:ready"], { body: "Depends on #1." }), // drift
+        t(11, ["bug", "status:ready"], blockedBy([issue(12).url]) as Partial<Issue>),
+        t(12, ["bug", "status:ready"], blockedBy([issue(11).url]) as Partial<Issue>), // cycle 11<->12
+      ],
+      [prOpen],
+    );
+  };
+  const report = (options = {}) => ticketDoctor(build(), { now: new Date(time), ...options });
+  const kinds = (r: ReturnType<typeof report>, n: number) =>
+    r.tickets.find((x) => x.number === n)?.findings.map((f) => `${f.certainty}:${f.kind}`) ?? [];
+  it("finds each structured inconsistency with its certainty, and leaves clean tickets out", () => {
+    const r = report();
+    expect(kinds(r, 1)).toEqual([]);
+    expect(kinds(r, 2)).toEqual(["definite:readiness-missing"]);
+    expect(kinds(r, 3)).toEqual(["definite:readiness-conflict"]);
+    expect(kinds(r, 4)).toEqual(["definite:urgency-conflict", "candidate:classification-missing"]);
+    expect(kinds(r, 5)).toEqual(["definite:design-conflict"]);
+    expect(kinds(r, 6)).toEqual(["definite:multiple-owners", "definite:agent-multiple-claims"]);
+    expect(kinds(r, 7)).toEqual(["definite:ready-with-open-pr"]);
+    expect(kinds(r, 8)).toEqual(["definite:blocked-without-reason"]);
+    expect(kinds(r, 9)).toEqual([
+      "definite:agent-multiple-claims",
+      "candidate:leftover-readiness",
+      "candidate:stale-agent-activity",
+    ]);
+    expect(kinds(r, 10)).toEqual(["candidate:dependency-drift"]);
+    expect(kinds(r, 11)).toEqual(["definite:dependency-cycle"]);
+    expect(kinds(r, 12)).toEqual(["definite:dependency-cycle"]);
+  });
+  it("uses its own 24h staleness default, configurable, and bounds output with omitted counts", () => {
+    expect(kinds(report({ staleHours: 48 }), 9)).not.toContain("candidate:stale-agent-activity");
+    const small = report({ limit: 2 });
+    expect(small.tickets).toHaveLength(2);
+    expect(small.omittedTickets).toBe(small.summary.tickets - 2);
+    expect(small.tickets.every((x) => x.findings[0].certainty === "definite")).toBe(true);
+    expect(ticketDoctorText(small)).toContain("more tickets; use --limit or --json");
+  });
+  it("reports missing native evidence as unknown and runs offline from the CLI", async () => {
+    const old = t(20, ["bug", "status:ready"]) as Partial<Issue>;
+    delete old.blockedBy;
+    const r = ticketDoctor(snapshot([old as Issue], []), { now: new Date(time) });
+    expect(kinds(r, 20)).toEqual(["unknown:dependency-evidence-unknown"]);
+    const dir = await mkdtemp(join(tmpdir(), "triage-doctor-"));
+    try {
+      const cache = join(dir, "cache.json");
+      await atomicJson(cache, build());
+      let out = "";
+      const runtime = {
+        collect: async () => {
+          throw new Error("offline only");
+        },
+        currentRepository: async () => repo,
+        now: () => new Date(time),
+      };
+      expect(
+        await main(
+          ["ticket-doctor", "--offline", "--cache", cache, "--json"],
+          async (x) => void (out = x),
+          runtime,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(out)).toMatchObject({
+        kind: "ticket-doctor",
+        schemaVersion: 1,
+        scanned: 12,
+      });
+      for (const bad of [
+        ["ticket-doctor", "--limit", "0"],
+        ["ticket-doctor", "--stale-hours", "-1"],
+        ["ticket-doctor", "--offline"],
+      ])
+        await expect(main(bad, async () => {}, runtime)).rejects.toThrow();
     } finally {
       await rm(dir, { recursive: true });
     }
