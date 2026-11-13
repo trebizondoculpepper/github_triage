@@ -105,7 +105,7 @@ Generic stdio configuration (install globally first; nothing registers a host au
 { "command": "github-triage-mcp", "args": ["--project", "/absolute/project/path"] }
 ```
 
-`--repo owner/name` and `--agent NAME` set defaults; a tool's own `repo`/`agent` arguments win for that call. Without an agent, reads are unfocused. Automatic project-local identity lookup and client roots remain follow-up work (#25); no external identity service is required.
+`--repo owner/name` and `--agent NAME` set defaults; a tool's own `repo`/`agent` arguments win for that call. Without an agent, the server reads (never writes) the persisted `name` of an `[agents.KEY]` entry in the project's root `agent-inbox.toml`, chosen by `--entry KEY`, else `--harness NAME`, else the MCP client (Ori's `ori-SERVER` client selects `ori.SERVER`), else the harness detected from the environment. `selection.identitySource` reports which of `tool`, `startup`, `entry`, `harness`, `client`, `environment` decided; when none does, the read is unfocused (`unresolved`) and `selection.identityDiagnostic` says why and how to fix it. Client roots remain follow-up work (#25); no external identity service is required.
 
 ## Repository settings and sizing
 
