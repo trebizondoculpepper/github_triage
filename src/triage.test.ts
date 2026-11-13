@@ -5996,6 +5996,71 @@ describe("read-only MCP adapter (#25)", async () => {
     }
   });
 
+  /**
+   * Older-client compatibility (doc/design/mcp.md): a raw JSON-RPC exchange, as an older host
+   * would send it, rather than the current SDK client, which always offers the latest version.
+   */
+  const rawSession = async (protocolVersion: string) => {
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await createServer({ repo }, fake()).connect(serverSide);
+    const replies = new Map<number, { result?: Record<string, unknown>; error?: unknown }>();
+    const waiting = new Map<number, () => void>();
+    clientSide.onmessage = (message) => {
+      if (!("id" in message) || typeof message.id !== "number") return;
+      replies.set(message.id, message as { result?: Record<string, unknown>; error?: unknown });
+      waiting.get(message.id)?.();
+    };
+    await clientSide.start();
+    let next = 0;
+    const request = async (method: string, params: Record<string, unknown> = {}) => {
+      const id = ++next;
+      const replied = new Promise<void>((done) => waiting.set(id, done));
+      await clientSide.send({ jsonrpc: "2.0", id, method, params });
+      await replied;
+      const reply = replies.get(id);
+      if (!reply?.result) throw new Error(`${method} failed: ${JSON.stringify(reply?.error)}`);
+      return reply.result;
+    };
+    const init = await request("initialize", {
+      protocolVersion,
+      capabilities: {},
+      clientInfo: { name: "older-host", version: "0.0.1" },
+    });
+    await clientSide.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    return { init, request, close: () => clientSide.close() };
+  };
+
+  for (const version of ["2025-06-18", "2025-03-26", "2024-11-05"]) {
+    it(`negotiates ${version} for an older client and serves tools/list and tools/call`, async () => {
+      const session = await rawSession(version);
+      expect(session.init.protocolVersion).toBe(version);
+      expect(session.init.serverInfo).toMatchObject({ name: "github-triage" });
+      const { tools } = (await session.request("tools/list")) as { tools: { name: string }[] };
+      expect(tools.map((t) => t.name).sort()).toEqual([
+        "triage_briefing",
+        "triage_dependencies",
+        "triage_issue",
+      ]);
+      const call = (await session.request("tools/call", {
+        name: "triage_briefing",
+        arguments: {},
+      })) as { content?: unknown; structuredContent?: unknown; isError?: boolean };
+      expect(call.isError).not.toBe(true);
+      // Clients that predate structuredContent (before 2025-06-18) still get usable text.
+      expect(text(call)).toContain(repo);
+      expect(structured(call)).toMatchObject({ kind: "briefing", status: "complete" });
+      await session.close();
+    });
+  }
+
+  it("answers an unsupported protocol version with its own latest, not a silent downgrade", async () => {
+    const { LATEST_PROTOCOL_VERSION } = await import("@modelcontextprotocol/server");
+    const session = await rawSession("2023-01-01");
+    // Per the MCP lifecycle the client must then disconnect; the server never claims 2023-01-01.
+    expect(session.init.protocolVersion).toBe(LATEST_PROTOCOL_VERSION);
+    await session.close();
+  });
+
   it("lists exactly three read-only tools with strict inputs", async () => {
     const client = await connect(fake());
     const { tools } = await client.listTools();
