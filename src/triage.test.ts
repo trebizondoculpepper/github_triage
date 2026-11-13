@@ -22,6 +22,20 @@ import {
   dependencyText,
   planDependencyChange,
 } from "./dependencies.js";
+import {
+  CONFIG_PATH,
+  ConfigError,
+  githubRepositories,
+  loadConfig,
+  nodeFileSystem,
+  parseConfig,
+  resolveRepositoryTarget,
+  settingFor,
+  updateConfig,
+  type ConfigFileSystem,
+  type ConfigSchema,
+  type GitRunner,
+} from "./config.js";
 import { briefing, dependencyDone, textReport } from "./briefing.js";
 import { complexityGuidance } from "./complexity.js";
 import {
@@ -3554,6 +3568,304 @@ describe("who is working on a ticket (#61, doc/design/diagnostics.md)", () => {
     expect(JSON.parse(out).answer).toBe("recorded claim: ana");
     for (const bad of [["who"], ["who", "x"], ["who", "1", "--stale-hours", "0"]])
       await expect(main(bad, async () => {}, runtime)).rejects.toThrow();
+  });
+});
+
+describe("repository configuration service (#116, doc/design/repository-configuration.md)", () => {
+  const root = "/repo";
+  const path = join(root, CONFIG_PATH);
+  /** In-memory filesystem; `onBeforeRename` simulates a concurrent edit. */
+  function memoryFs(initial?: string) {
+    const files = new Map<string, string>(initial === undefined ? [] : [[path, initial]]);
+    const writes: string[] = [];
+    let onBeforeRename: (() => void) | undefined;
+    let failRename = false;
+    const fs: ConfigFileSystem = {
+      readText: async (file) => files.get(file) ?? null,
+      writeText: async (file, text) => {
+        writes.push(file);
+        files.set(file, text);
+      },
+      rename: async (from, to) => {
+        onBeforeRename?.();
+        if (failRename) throw new Error("disk full");
+        files.set(to, files.get(from)!);
+        files.delete(from);
+      },
+      remove: async (file) => void files.delete(file),
+      makeDirectory: async () => undefined,
+    };
+    return {
+      fs,
+      files,
+      writes,
+      concurrent: (edit: () => void) => (onBeforeRename = edit),
+      failRename: () => (failRename = true),
+    };
+  }
+  const target = { root, repository: "owner/name" };
+  const token = () => "t";
+
+  it("defaults complexity on, fieldId unset, when the file is absent", async () => {
+    const memory = memoryFs();
+    const config = await loadConfig(root, memory.fs);
+    expect(config.storedVersion).toBeNull();
+    expect(config.settings).toEqual([
+      { key: "complexity.enabled", value: true, source: "default" },
+      { key: "complexity.fieldId", value: null, source: "default" },
+    ]);
+    expect(memory.writes).toEqual([]);
+  });
+
+  it("treats an explicitly stored default as explicit", () => {
+    const config = parseConfig('{"schemaVersion":1,"complexity":{"enabled":true}}', undefined);
+    expect(settingFor(config, "complexity.enabled").source).toBe("explicit");
+    expect(settingFor(config, "complexity.fieldId").source).toBe("default");
+  });
+
+  it("reports explicit settings and their source", async () => {
+    const memory = memoryFs(
+      '{"schemaVersion":1,"complexity":{"enabled":false,"fieldId":"PVTF_1"}}',
+    );
+    const config = await loadConfig(root, memory.fs);
+    expect(settingFor(config, "complexity.enabled")).toEqual({
+      key: "complexity.enabled",
+      value: false,
+      source: "explicit",
+    });
+    expect(settingFor(config, "complexity.fieldId").value).toBe("PVTF_1");
+    expect(() => settingFor(config, "complexity.colour")).toThrow(ConfigError);
+  });
+
+  it.each([
+    ["not json", "malformed"],
+    ["[]", "malformed"],
+    ['{"complexity":{}}', "malformed"],
+    ['{"schemaVersion":2}', "unsupported-version"],
+    ['{"schemaVersion":1,"complexity":{"enabled":"yes"}}', "incompatible"],
+    ['{"schemaVersion":1,"token":"secret"}', "incompatible"],
+    // Empty objects must not bypass validation (Codex review on #131).
+    ['{"schemaVersion":1,"complexity":{"enabled":{}}}', "incompatible"],
+    ['{"schemaVersion":1,"futureSetting":{}}', "incompatible"],
+    ['{"schemaVersion":1,"complexity":{"enabled":true,"later":{}}}', "incompatible"],
+  ])("refuses %s without touching the file", async (raw, code) => {
+    const memory = memoryFs(raw);
+    await expect(loadConfig(root, memory.fs)).rejects.toMatchObject({ code });
+    await expect(
+      updateConfig(target, new Map([["complexity.enabled", false]]), { fs: memory.fs, token }),
+    ).rejects.toMatchObject({ code });
+    expect(memory.files.get(path)).toBe(raw);
+    expect(memory.writes).toEqual([]);
+  });
+
+  it("migrates older schemas in memory on read and only persists on write", async () => {
+    const schema: ConfigSchema = {
+      version: 2,
+      keys: [
+        {
+          key: "complexity.enabled",
+          type: "boolean",
+          nullable: false,
+          defaultValue: true,
+          description: "",
+        },
+        { key: "other", type: "string", nullable: true, defaultValue: null, description: "" },
+      ],
+      migrations: [
+        {
+          from: 1,
+          migrate: ({ estimates, ...rest }) => ({ ...rest, complexity: { enabled: estimates } }),
+        },
+      ],
+    };
+    const old = '{"schemaVersion":1,"estimates":false,"other":"kept"}';
+    const memory = memoryFs(old);
+    const read = await loadConfig(root, memory.fs, schema);
+    expect(read.storedVersion).toBe(1);
+    expect(read.explicit.get("complexity.enabled")).toBe(false);
+    expect(memory.files.get(path)).toBe(old);
+
+    const written = await updateConfig(target, new Map([["other", "changed"]]), {
+      fs: memory.fs,
+      schema,
+      token,
+    });
+    expect(written.changed).toBe(true);
+    expect(JSON.parse(memory.files.get(path)!)).toEqual({
+      schemaVersion: 2,
+      complexity: { enabled: false },
+      other: "changed",
+    });
+  });
+
+  it("refuses an older schema with no registered migration", async () => {
+    const memory = memoryFs('{"schemaVersion":1}');
+    const schema: ConfigSchema = { version: 2, keys: [], migrations: [] };
+    await expect(loadConfig(root, memory.fs, schema)).rejects.toMatchObject({
+      code: "unsupported-version",
+    });
+  });
+
+  it("writes atomically, preserves unrelated settings and skips equal writes", async () => {
+    const memory = memoryFs('{"schemaVersion":1,"complexity":{"fieldId":"PVTF_1"}}');
+    const result = await updateConfig(target, new Map([["complexity.enabled", false]]), {
+      fs: memory.fs,
+      token,
+    });
+    expect(result.changed).toBe(true);
+    expect(memory.writes).toEqual([`${path}.t.tmp`]);
+    expect(memory.files.has(`${path}.t.tmp`)).toBe(false);
+    expect(JSON.parse(memory.files.get(path)!)).toEqual({
+      schemaVersion: 1,
+      complexity: { enabled: false, fieldId: "PVTF_1" },
+    });
+    const again = await updateConfig(target, new Map([["complexity.enabled", false]]), {
+      fs: memory.fs,
+      token,
+    });
+    expect(again.changed).toBe(false);
+    expect(memory.writes).toHaveLength(1);
+  });
+
+  it("unsets a key back to its default and creates no file for default-only state", async () => {
+    const memory = memoryFs('{"schemaVersion":1,"complexity":{"fieldId":"PVTF_1"}}');
+    await updateConfig(target, new Map([["complexity.fieldId", undefined]]), {
+      fs: memory.fs,
+      token,
+    });
+    expect(JSON.parse(memory.files.get(path)!)).toEqual({ schemaVersion: 1 });
+    const empty = memoryFs();
+    const result = await updateConfig(target, new Map([["complexity.fieldId", undefined]]), {
+      fs: empty.fs,
+      token,
+    });
+    expect(result.changed).toBe(false);
+    expect(empty.files.size).toBe(0);
+  });
+
+  it("validates values against the registry before writing", async () => {
+    const memory = memoryFs();
+    for (const [key, value] of [
+      ["complexity.enabled", "false"],
+      ["complexity.enabled", null],
+      ["complexity.fieldId", ""],
+      ["complexity.colour", true],
+    ] as const) {
+      await expect(
+        updateConfig(target, new Map([[key, value]]), { fs: memory.fs, token }),
+      ).rejects.toBeInstanceOf(ConfigError);
+    }
+    expect(memory.writes).toEqual([]);
+  });
+
+  it("detects an intervening edit and leaves the other writer's file in place", async () => {
+    const memory = memoryFs('{"schemaVersion":1}');
+    const theirs = '{"schemaVersion":1,"complexity":{"fieldId":"PVTF_9"}}';
+    const fs: ConfigFileSystem = {
+      ...memory.fs,
+      writeText: async (file, text) => {
+        await memory.fs.writeText(file, text);
+        memory.files.set(path, theirs);
+      },
+    };
+    await expect(
+      updateConfig(target, new Map([["complexity.enabled", false]]), { fs, token }),
+    ).rejects.toMatchObject({ code: "conflict" });
+    expect(memory.files.get(path)).toBe(theirs);
+    expect(memory.files.has(`${path}.t.tmp`)).toBe(false);
+  });
+
+  it("removes the temporary file and keeps the original when the replace fails", async () => {
+    const original = '{"schemaVersion":1}';
+    const memory = memoryFs(original);
+    memory.failRename();
+    await expect(
+      updateConfig(target, new Map([["complexity.enabled", false]]), { fs: memory.fs, token }),
+    ).rejects.toThrow("disk full");
+    expect(memory.files.get(path)).toBe(original);
+    expect([...memory.files.keys()]).toEqual([path]);
+  });
+
+  it("writes through the real filesystem into a temporary checkout", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "triage-config-"));
+    try {
+      const local = { root: directory, repository: "owner/name" };
+      await updateConfig(local, new Map([["complexity.enabled", false]]));
+      const config = await loadConfig(directory);
+      expect(settingFor(config, "complexity.enabled").source).toBe("explicit");
+      expect(await readdir(join(directory, ".github"))).toEqual(["triage.json"]);
+      await expect(nodeFileSystem.readText(join(directory, "missing"))).resolves.toBeNull();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  describe("repository resolution before writes", () => {
+    const git =
+      (remotes: string, top = "/repo"): GitRunner =>
+      async (args) =>
+        args[0] === "rev-parse" ? `${top}\n` : remotes;
+
+    it("parses GitHub remotes in common forms", () => {
+      expect(
+        githubRepositories(
+          "origin\tgit@github.com:Owner/Name.git (fetch)\nup\thttps://github.com/a/b (push)\nx\thttps://gitlab.com/c/d (fetch)",
+        ),
+      ).toEqual(["owner/name", "a/b"]);
+    });
+
+    it("only accepts remotes whose host is exactly github.com", () => {
+      expect(
+        githubRepositories(
+          [
+            "a\thttps://notgithub.com/evil/one.git (fetch)",
+            "b\t/mirrors/github.com/evil/two.git (fetch)",
+            "c\thttps://example.com/github.com/evil/three.git (fetch)",
+            "d\tgit@github.com.evil.net:evil/four.git (fetch)",
+            "e\t../github.com/evil/five (fetch)",
+            "f\tssh://git@GitHub.com/Ok/One.git (fetch)",
+            "g\tgit@GITHUB.COM:ok/two (fetch)",
+            "h\thttps://user@github.com/ok/three/ (fetch)",
+          ].join("\n"),
+        ),
+      ).toEqual(["ok/one", "ok/two", "ok/three"]);
+    });
+
+    it("accepts a checkout whose remote matches --repo", async () => {
+      await expect(
+        resolveRepositoryTarget(
+          "/repo/src",
+          "owner/name",
+          git("origin\thttps://github.com/owner/name.git (fetch)"),
+        ),
+      ).resolves.toEqual({ root: "/repo", repository: "owner/name" });
+    });
+
+    it("refuses when --repo names an unrelated repository", async () => {
+      await expect(
+        resolveRepositoryTarget(
+          "/repo",
+          "other/project",
+          git("origin\thttps://github.com/owner/name (fetch)"),
+        ),
+      ).rejects.toMatchObject({ code: "repository-mismatch" });
+    });
+
+    it("refuses ambiguous remotes without --repo and non-checkouts", async () => {
+      await expect(
+        resolveRepositoryTarget(
+          "/repo",
+          undefined,
+          git("a\thttps://github.com/x/y (fetch)\nb\thttps://github.com/p/q (fetch)"),
+        ),
+      ).rejects.toMatchObject({ code: "repository-mismatch" });
+      const failing: GitRunner = async () => {
+        throw new Error("not a git repository");
+      };
+      await expect(resolveRepositoryTarget("/tmp", undefined, failing)).rejects.toMatchObject({
+        code: "not-a-repository",
+      });
+    });
   });
 });
 
