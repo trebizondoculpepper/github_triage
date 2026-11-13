@@ -92,6 +92,8 @@ export type Snapshot = {
   dependencies: Dependency[];
   changed: { number: number; title: string; url: string; state: string; updatedAt: string }[];
   since: string | null;
+  /** Optional, versioned briefing-mode evidence (#168); absent in legacy snapshots. */
+  changeEvidence?: import("./changes.js").ChangeEvidence;
   warnings: string[];
   metrics?: { requestCount: number; durationMs: number };
   rateLimit: { remaining: number; resetAt: string } | null;

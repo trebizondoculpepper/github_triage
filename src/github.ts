@@ -2,6 +2,21 @@
 import { completeNative, isRateLimit, nativeFields, RateLimitError } from "./dependencies.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import {
+  CHANGE_EVIDENCE_SCHEMA_VERSION,
+  CHANGE_SCOPE,
+  CHANGE_SCOPE_EXCLUDES,
+  changeSubject,
+  DEFAULT_CHANGE_PAGES,
+  issueEvidenceFields,
+  pullRequestEvidenceFields,
+} from "./changes.js";
+import type {
+  ComparisonWindow,
+  EvidenceIssue,
+  EvidencePullRequest,
+  SourceCoverage,
+} from "./changes.js";
 import type { Comment, Issue, Page, PullRequest, Reference, Snapshot } from "./types.js";
 
 const execute = promisify(execFile);
@@ -348,6 +363,13 @@ export interface CollectOptions {
    * the running gh child processes. A cancelled collection rejects; it never returns a report.
    */
   signal?: AbortSignal;
+  /**
+   * Briefing mode only (#168): a resolved comparison window. Retains normalized all-state
+   * change evidence with per-source coverage in `changeEvidence`. Exclusive with `since`.
+   */
+  changeWindow?: ComparisonWindow;
+  /** Page cap per all-state source in change-evidence mode (default DEFAULT_CHANGE_PAGES). */
+  maxChangePages?: number;
 }
 export async function collect(
   repository: string,
@@ -388,6 +410,57 @@ export async function collect(
     return cutoff
       ? nodes.filter((node) => Date.parse(node.updatedAt) >= Date.parse(cutoff))
       : nodes;
+  };
+  /**
+   * All-state changes since `cutoff`, newest update first, stopping at the cutoff or after
+   * `maxPages`. A cap hit before the cutoff is reported as incomplete coverage, never as
+   * "nothing changed". Items updated during collection can shift between pages, so nodes are
+   * deduplicated by URL and late updates (after T0) are retained: events are qualified later.
+   */
+  const boundedChanges = async <T extends { url: string; updatedAt: string }>(
+    field: "issues" | "pullRequests",
+    fields: string,
+    states: string,
+    cutoff: string,
+    maxPages: number,
+  ): Promise<[T[], SourceCoverage]> => {
+    const source = `query($owner:String!,$name:String!,$cursor:String){repository(owner:$owner,name:$name){${field}(first:50,after:$cursor,orderBy:{field:UPDATED_AT,direction:DESC}${states}){nodes{${fields}} ${info}}} rateLimit{remaining resetAt}}`;
+    let pageCount = 0;
+    let reachedCutoff = false;
+    let more = false;
+    const nodes = await pages<T>(
+      async (cursor) => {
+        const page = prop(await request(source, cursor ? { cursor } : {}), field);
+        pageCount++;
+        more = prop(page, "pageInfo", "hasNextPage") === true;
+        return page;
+      },
+      (batch) => {
+        reachedCutoff = batch.some((node) => Date.parse(node.updatedAt) < Date.parse(cutoff));
+        return reachedCutoff || pageCount >= maxPages;
+      },
+    );
+    const unique = [
+      ...new Map(
+        nodes
+          .filter((node) => Date.parse(node.updatedAt) >= Date.parse(cutoff))
+          .map((node) => [node.url, node]),
+      ).values(),
+    ];
+    const complete = reachedCutoff || !more;
+    const label = field === "issues" ? "issues" : "pull-requests";
+    return [
+      unique,
+      {
+        source: label,
+        complete,
+        pages: pageCount,
+        nodes: unique.length,
+        omission: complete
+          ? null
+          : `${label} page cap (${maxPages} x 50) reached before ${cutoff}; older changes were not read.`,
+      },
+    ];
   };
   const locate =
     options.locate ??
@@ -459,29 +532,69 @@ export async function collect(
         ]),
     ).values(),
   ];
+  if (options.since && options.changeWindow)
+    throw new Error("Choose either since or a change window, not both.");
+  const since = options.since ?? options.changeWindow?.from ?? undefined;
   let changed: Snapshot["changed"] = [];
-  if (options.since) {
+  let changeEvidence: Snapshot["changeEvidence"];
+  if (since && options.changeWindow) {
+    const window = options.changeWindow;
+    const maxPages = options.maxChangePages ?? DEFAULT_CHANGE_PAGES;
+    if (!Number.isSafeInteger(maxPages) || maxPages < 1)
+      throw new Error("maxChangePages must be a positive integer.");
+    const before = requestCount;
+    const [issueNodes, issueCoverage] = await boundedChanges<EvidenceIssue>(
+      "issues",
+      `${common} stateReason ${nativeFields} ${issueEvidenceFields}`,
+      ",states:[OPEN,CLOSED]",
+      since,
+      maxPages,
+    );
+    const [prNodes, prCoverage] = await boundedChanges<EvidencePullRequest>(
+      "pullRequests",
+      `${prFields} ${pullRequestEvidenceFields}`,
+      ",states:[OPEN,CLOSED,MERGED]",
+      since,
+      maxPages,
+    );
+    changed = summarize([...issueNodes, ...prNodes]);
+    const coverage = [issueCoverage, prCoverage];
+    for (const item of coverage)
+      if (!item.complete) warnings.push(`Change evidence incomplete: ${item.omission}`);
+    changeEvidence = {
+      schemaVersion: CHANGE_EVIDENCE_SCHEMA_VERSION,
+      window,
+      scope: { includes: CHANGE_SCOPE, excludes: CHANGE_SCOPE_EXCLUDES },
+      coverage,
+      complete: coverage.every((item) => item.complete),
+      subjects: [
+        ...issueNodes.map((node) => changeSubject("issue", node, window)),
+        ...prNodes.map((node) => changeSubject("pull-request", node, window)),
+      ],
+      cost: { requests: requestCount - before, maxPagesPerSource: maxPages },
+    };
+  } else if (options.changeWindow) {
+    // Baseline: no previous window, so nothing is labelled newly changed and no history query.
+    changeEvidence = {
+      schemaVersion: CHANGE_EVIDENCE_SCHEMA_VERSION,
+      window: options.changeWindow,
+      scope: { includes: CHANGE_SCOPE, excludes: CHANGE_SCOPE_EXCLUDES },
+      coverage: [],
+      complete: true,
+      subjects: [],
+      cost: { requests: 0, maxPagesPerSource: 0 },
+    };
+  } else if (since) {
     const values = await Promise.all([
       collection<Issue>(
         "issues",
         `${common} stateReason ${closedBy} ${nativeFields}`,
         ",states:[OPEN,CLOSED]",
-        options.since,
+        since,
       ),
-      collection<PullRequest>(
-        "pullRequests",
-        prFields,
-        ",states:[OPEN,CLOSED,MERGED]",
-        options.since,
-      ),
+      collection<PullRequest>("pullRequests", prFields, ",states:[OPEN,CLOSED,MERGED]", since),
     ]);
-    changed = [...values[0], ...values[1]].map(({ number, title, url, state, updatedAt }) => ({
-      number,
-      title,
-      url,
-      state,
-      updatedAt,
-    }));
+    changed = summarize([...values[0], ...values[1]]);
   }
   return {
     schemaVersion: 1,
@@ -492,12 +605,22 @@ export async function collect(
     pullRequests,
     dependencies,
     changed,
-    since: options.since ?? null,
+    since: since ?? null,
+    ...(changeEvidence ? { changeEvidence } : {}),
     warnings,
     rateLimit,
     metrics: { requestCount, durationMs: Date.parse(now().toISOString()) - Date.parse(startedAt) },
   };
 }
+
+const summarize = (nodes: (Issue | PullRequest)[]): Snapshot["changed"] =>
+  nodes.map(({ number, title, url, state, updatedAt }) => ({
+    number,
+    title,
+    url,
+    state,
+    updatedAt,
+  }));
 
 /** Bounded independent reads; results retain input order. */
 export async function concurrentMap<T, R>(
