@@ -192,12 +192,13 @@ export class IssueUnavailable extends Error {
   }
 }
 
-export async function currentRepository(): Promise<string> {
+/** Resolve the gh repository of the working directory (or of `cwd`, e.g. an MCP project). */
+export async function currentRepository(cwd?: string): Promise<string> {
   try {
     const { stdout } = await execute(
       "gh",
       ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
-      { timeout: 30_000 },
+      { timeout: 30_000, cwd },
     );
     return stdout.trim();
   } catch {

@@ -14,7 +14,6 @@ import {
   ghRun,
   planDependencyChange,
 } from "./dependencies.js";
-import { compactBriefing, compactText } from "./compact.js";
 import { prStatusText, pullRequestStatus } from "./prstatus.js";
 import { doctorStaleHours, ticketDoctor, ticketDoctorText } from "./ticketdoctor.js";
 import { applyPlan, claimText, planClaim, planNeedsHuman } from "./claims.js";
@@ -22,7 +21,7 @@ import { checkForUpdate, installedVersion, optOutEnv, updateAdvisory } from "./u
 import { defaultStaleHours, teamText, teamView } from "./team.js";
 import { ticketOwnership, ticketOwnershipText } from "./who.js";
 import { migrationPlanText, planMigration } from "./migration.js";
-import { briefing, textReport } from "./briefing.js";
+import { presentBriefing, unavailableText } from "./service.js";
 import { pickupOrders } from "./ranking.js";
 import type { PickupOrder } from "./ranking.js";
 import { complexityGuidanceJson, complexityGuidanceText } from "./complexity.js";
@@ -31,7 +30,6 @@ import type { ConfigRuntime } from "./configcli.js";
 import { runSetup, terminalPrompt } from "./complexitysetup.js";
 import type { SetupRuntime } from "./complexitysetup.js";
 import { estimateUsage, runEstimate } from "./estimate.js";
-import { collectEstimationInput } from "./estimation.js";
 import type { EstimationRuntime } from "./estimation.js";
 import type { EstimateRuntime } from "./estimate.js";
 import { diagnoseComplexityConfig } from "./complexitydoctor.js";
@@ -690,34 +688,14 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
         );
       }
       const report = { schemaVersion: 1, kind: "issue-unavailable", ...d };
-      await output(
-        options.json
-          ? JSON.stringify(report, null, 2) + "\n"
-          : `Issue #${d.number} in ${d.repository}: ${d.state.toUpperCase()}\n${d.detail}\n${d.state === "moved" ? `Destination: ${String(d.destination.url)} (use --include-transferred to read it)\n` : ""}Next: ${d.next}\n`,
-      );
+      await output(options.json ? JSON.stringify(report, null, 2) + "\n" : unavailableText(d));
       return 2;
     }
     if (options.cache) await atomicJson(options.cache, snapshot);
   }
   if (options.issue && !snapshot.issues.some((issue) => issue.number === options.issue))
     throw new Error(`Issue #${options.issue} not in this cache. Refresh live with --issue.`);
-  const estimation = await collectEstimationInput(
-    snapshot.repository,
-    { offline: !!options.offline },
-    runtime.estimation,
-  );
-  const expanded = briefing(
-    snapshot,
-    options.full
-      ? { ...options, estimation }
-      : {
-          ...options,
-          estimation,
-          limit: Math.max(snapshot.issues.length + snapshot.pullRequests.length, 1) * 20,
-        },
-  );
-  const compact = options.full ? null : compactBriefing(snapshot, options, expanded);
-  const report = compact ?? expanded;
+  const { report, text } = await presentBriefing(snapshot, options, runtime.estimation);
   const checkpoint = options.checkpoint
     ? {
         previousWindow: snapshot.since,
@@ -734,7 +712,7 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
   await output(
     options.json
       ? JSON.stringify({ ...report, checkpoint }, null, 2) + "\n"
-      : (compact ? compactText(compact, options.maxChars) : textReport(expanded)) + checkpointText,
+      : text + checkpointText,
   );
   if (!options.offline && options.checkpoint && report.completeness.complete)
     // Start time deliberately overlaps windows: updates arriving during collection are not lost.

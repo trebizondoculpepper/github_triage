@@ -1,0 +1,353 @@
+#!/usr/bin/env node
+/**
+ * Read-only stdio MCP adapter (doc/design/mcp.md, #25). Three tools over the shared read
+ * service; no mutation, shell, file-path, cache or checkpoint routes are registered.
+ */
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+import { McpServer } from "@modelcontextprotocol/server";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
+import * as z from "zod";
+import { collect, currentRepository } from "./github.js";
+import { dependencyReport } from "./dependencies.js";
+import { readBriefing, readDependencies } from "./service.js";
+import type { ReadRuntime } from "./service.js";
+import { installedVersion } from "./updates.js";
+
+/** Startup selection, explicit only in this slice (roots and agent-inbox lookup follow). */
+export interface McpOptions {
+  /** Configured local project used for repository resolution and repository configuration. */
+  project?: string;
+  repo?: string;
+  agent?: string;
+}
+
+/** Injected boundaries; tests replace every GitHub-facing one. */
+export interface McpRuntime extends ReadRuntime {
+  currentRepository: (cwd?: string) => Promise<string>;
+}
+
+export const mcpHelp = `Usage: github-triage-mcp [--project PATH] [--repo owner/name] [--agent NAME]
+Read-only stdio MCP server for github-triage. Requires authenticated gh and Node 26+.
+Tools: triage_briefing, triage_issue, triage_dependencies. Never changes GitHub.
+  --project PATH        Local project checkout used to resolve the default repository
+  --repo owner/name     Default repository (a tool's repo argument wins)
+  --agent NAME          Default agent for focused reads (a tool's agent argument wins)
+  --help                Show usage
+Stdout carries only the MCP protocol; diagnostics go to stderr.
+`;
+
+const repoPattern = /^[\w.-]+\/[\w.-]+$/;
+const agentPattern = /^[A-Za-z0-9][\w.-]*$/;
+
+/** Parse startup arguments; throws on invalid input. */
+export function mcpArguments(args: string[]): McpOptions & { help?: boolean } {
+  const { values } = parseArgs({
+    args,
+    options: {
+      project: { type: "string" },
+      repo: { type: "string" },
+      agent: { type: "string" },
+      help: { type: "boolean" },
+    },
+  });
+  if (values.repo !== undefined && !repoPattern.test(values.repo))
+    throw new Error("--repo must be owner/name.");
+  if (values.agent !== undefined && !agentPattern.test(values.agent))
+    throw new Error("--agent must be an agent name such as kavya_sabbagh.");
+  return {
+    help: values.help,
+    project: values.project === undefined ? undefined : resolve(values.project),
+    repo: values.repo,
+    agent: values.agent,
+  };
+}
+
+const repo = z.string().regex(repoPattern, "repo must be owner/name").optional();
+const agent = z.string().regex(agentPattern, "agent must be an agent name").optional();
+const number = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const maxChars = z.number().int().min(1000).max(40000).default(10000);
+const since = z
+  .string()
+  .regex(/^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d{2}:\d{2})$/, "since must be an ISO timestamp with a time")
+  .refine((text) => Number.isFinite(Date.parse(text)), "since must be a valid timestamp")
+  .optional();
+
+export const briefingInput = z.strictObject({
+  repo,
+  agent,
+  since,
+  limit: z.number().int().min(1).max(100).default(5),
+  maxChars,
+});
+export const issueInput = z.strictObject({ number, repo, agent, maxChars });
+export const dependenciesInput = z.strictObject({
+  number,
+  repo,
+  tree: z.boolean().default(false),
+});
+
+const identitySource = z.enum(["tool", "startup", "unresolved"]);
+/** Versioned MCP envelope; `result` is the unchanged versioned CLI JSON. */
+export const envelope = z.object({
+  schemaVersion: z.literal(1),
+  kind: z.enum(["briefing", "issue", "dependencies"]),
+  status: z.enum(["complete", "incomplete", "error"]),
+  selection: z.object({
+    repository: z.string().nullable(),
+    agent: z.string().nullable(),
+    identitySource,
+  }),
+  result: z.record(z.string(), z.unknown()).nullable(),
+  error: z.object({ code: z.string(), message: z.string() }).nullable(),
+});
+export type Envelope = z.infer<typeof envelope>;
+
+const annotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true,
+} as const;
+
+/** Stable, sanitized failures: no stack traces, subprocess stderr or configuration. */
+const failures = {
+  "repository-unresolved":
+    "No repository selected. Pass repo as owner/name, or start the server with --repo or --project.",
+  "collection-failed":
+    "GitHub evidence could not be collected. Check gh authentication and repository access, then retry.",
+  cancelled: "The request was cancelled before collection finished; no result is reported.",
+} as const;
+type FailureCode = keyof typeof failures;
+
+class Failure extends Error {
+  constructor(readonly code: FailureCode) {
+    super(failures[code]);
+  }
+}
+
+type Kind = Envelope["kind"];
+type Selection = Envelope["selection"];
+
+function toolResult(structured: Envelope, text: string) {
+  return {
+    content: [{ type: "text" as const, text }],
+    structuredContent: structured,
+    ...(structured.status === "error" ? { isError: true } : {}),
+  };
+}
+
+function plain(value: object): Record<string, unknown> {
+  // The CLI's JSON output is exactly this serialization; keep the MCP result byte-compatible.
+  const parsed: unknown = JSON.parse(JSON.stringify(value));
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+    throw new Error("Report did not serialize to an object.");
+  return parsed as Record<string, unknown>;
+}
+
+/** Build one server for one connection; no state is shared between calls or connections. */
+export function createServer(
+  options: McpOptions,
+  runtime: McpRuntime,
+  version = "0.0.0",
+): McpServer {
+  const server = new McpServer({ name: "github-triage", version });
+
+  const select = async (
+    args: { repo?: string; agent?: string },
+    signal: AbortSignal,
+  ): Promise<Selection & { repository: string }> => {
+    let repository = args.repo ?? options.repo;
+    if (!repository) {
+      try {
+        repository = await runtime.currentRepository(options.project);
+      } catch {
+        throw new Failure("repository-unresolved");
+      }
+      if (!repoPattern.test(repository)) throw new Failure("repository-unresolved");
+    }
+    if (signal.aborted) throw new Failure("cancelled");
+    const name = args.agent ?? options.agent ?? null;
+    return {
+      repository,
+      agent: name,
+      identitySource: args.agent ? "tool" : options.agent ? "startup" : "unresolved",
+    };
+  };
+
+  const identityNotice = (selection: Selection): string =>
+    selection.identitySource === "unresolved"
+      ? "Identity: unresolved; this is an unfocused read. Pass agent to focus it.\n"
+      : "";
+
+  /** Run one call with per-call selection, mapping failures to a sanitized error envelope. */
+  const call = async (
+    kind: Kind,
+    args: { repo?: string; agent?: string },
+    signal: AbortSignal,
+    read: (selection: Selection & { repository: string }) => Promise<{
+      status: "complete" | "incomplete";
+      result: Record<string, unknown>;
+      text: string;
+    }>,
+  ) => {
+    let selection: Selection = {
+      repository: args.repo ?? options.repo ?? null,
+      agent: args.agent ?? options.agent ?? null,
+      identitySource: args.agent ? "tool" : options.agent ? "startup" : "unresolved",
+    };
+    try {
+      const selected = await select(args, signal);
+      selection = selected;
+      const outcome = await read(selected);
+      if (signal.aborted) throw new Failure("cancelled");
+      const notice =
+        outcome.status === "incomplete"
+          ? "INCOMPLETE evidence: do not treat missing findings as clean or eligible.\n"
+          : "";
+      return toolResult(
+        {
+          schemaVersion: 1,
+          kind,
+          status: outcome.status,
+          selection,
+          result: outcome.result,
+          error: null,
+        },
+        notice + identityNotice(selection) + outcome.text,
+      );
+    } catch (error) {
+      const code: FailureCode =
+        error instanceof Failure ? error.code : signal.aborted ? "cancelled" : "collection-failed";
+      return toolResult(
+        {
+          schemaVersion: 1,
+          kind,
+          status: "error",
+          selection,
+          result: null,
+          error: { code, message: failures[code] },
+        },
+        `Error (${code}): ${failures[code]}\n`,
+      );
+    }
+  };
+
+  server.registerTool(
+    "triage_briefing",
+    {
+      title: "Triage briefing",
+      description:
+        "Evidence-linked action briefing for a GitHub repository: what needs attention and what to pick up next. Call at the start of work or with since to catch up.",
+      inputSchema: briefingInput,
+      outputSchema: envelope,
+      annotations,
+    },
+    async (args, ctx) =>
+      call("briefing", args, ctx.mcpReq.signal, async (selection) => {
+        const read = await readBriefing(runtime, {
+          repository: selection.repository,
+          agent: selection.agent ?? undefined,
+          since: args.since ? new Date(args.since).toISOString() : undefined,
+          limit: args.limit,
+          maxChars: args.maxChars,
+        });
+        if (read.kind === "unavailable") throw new Failure("collection-failed");
+        return {
+          status: read.complete ? "complete" : "incomplete",
+          result: plain(read.report),
+          text: read.text,
+        };
+      }),
+  );
+
+  server.registerTool(
+    "triage_issue",
+    {
+      title: "Triage issue intake",
+      description:
+        "Full intake for one issue: body, history, dependencies and ownership evidence, even if closed. Diagnoses transferred, missing or inaccessible issues. Call before working on a ticket.",
+      inputSchema: issueInput,
+      outputSchema: envelope,
+      annotations,
+    },
+    async (args, ctx) =>
+      call("issue", args, ctx.mcpReq.signal, async (selection) => {
+        const read = await readBriefing(runtime, {
+          repository: selection.repository,
+          agent: selection.agent ?? undefined,
+          issue: args.number,
+          limit: 5,
+          maxChars: args.maxChars,
+        });
+        if (read.kind === "unavailable")
+          return {
+            status: "incomplete",
+            result: plain({ schemaVersion: 1, kind: "issue-unavailable", ...read.diagnosis }),
+            text: read.text,
+          };
+        return {
+          status: read.complete ? "complete" : "incomplete",
+          result: plain(read.report),
+          text: read.text,
+        };
+      }),
+  );
+
+  server.registerTool(
+    "triage_dependencies",
+    {
+      title: "Native issue dependencies",
+      description:
+        "Native GitHub blocked-by/blocking relationships for one issue; with tree, the transitive graph and cycles. Call before claiming or ordering work.",
+      inputSchema: dependenciesInput,
+      outputSchema: envelope,
+      annotations,
+    },
+    async (args, ctx) =>
+      call("dependencies", { repo: args.repo }, ctx.mcpReq.signal, async (selection) => {
+        const read = await readDependencies(runtime, selection.repository, args.number, args.tree);
+        return { status: "complete", result: plain(read.report), text: read.text };
+      }),
+  );
+
+  return server;
+}
+
+/** Production boundaries: authenticated gh through the existing argument-array runners. */
+export const defaultRuntime = (options: McpOptions): McpRuntime => ({
+  collect,
+  dependencyReport,
+  currentRepository,
+  estimation: options.project ? { cwd: options.project } : undefined,
+});
+
+function isEntryPoint(entry: string | undefined): boolean {
+  if (!entry) return false;
+  try {
+    return realpathSync(resolve(entry)) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint(process.argv[1])) {
+  try {
+    const options = mcpArguments(process.argv.slice(2));
+    if (options.help) process.stdout.write(mcpHelp);
+    else {
+      const { version } = await installedVersion();
+      const runtime = defaultRuntime(options);
+      serveStdio(() => createServer(options, runtime, version ?? "0.0.0"), {
+        onerror: (error) => process.stderr.write(`github-triage-mcp: ${error.message}\n`),
+      });
+    }
+  } catch (error) {
+    process.stderr.write(
+      `github-triage-mcp: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    process.exitCode = 1;
+  }
+}

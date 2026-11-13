@@ -5167,3 +5167,253 @@ describe("estimation queue and briefing visibility (#122)", () => {
     }
   });
 });
+
+describe("read-only MCP adapter (#25)", async () => {
+  const { Client } = await import("@modelcontextprotocol/client");
+  const { InMemoryTransport } = await import("@modelcontextprotocol/server");
+  const { createServer, envelope, mcpArguments } = await import("./mcp.js");
+  const { IssueUnavailable } = await import("./github.js");
+  type Runtime = import("./mcp.js").McpRuntime;
+  type Options = import("./mcp.js").McpOptions;
+
+  const fake = (overrides: Partial<Runtime> = {}): Runtime & { seen: string[] } => {
+    const seen: string[] = [];
+    return {
+      seen,
+      currentRepository: async () => repo,
+      collect: async (repository: string, options?: { issue?: number; since?: string }) => {
+        seen.push(`${repository}#${options?.issue ?? "-"}@${options?.since ?? "-"}`);
+        return { ...snapshot(), repository };
+      },
+      dependencyReport: (r: string, n: number, o?: { tree?: boolean }) =>
+        dependencyReport(r, n, o, graphQuery({ edges: [[1, 2]] }).query, clock),
+      ...overrides,
+    };
+  };
+  const connect = async (runtime: Runtime, options: Options = {}) => {
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await createServer(options, runtime).connect(serverSide);
+    const client = new Client({ name: "test", version: "1.0.0" });
+    await client.connect(clientSide);
+    return client;
+  };
+  const structured = (result: { structuredContent?: unknown }) =>
+    envelope.parse(result.structuredContent);
+  const text = (result: { content?: unknown }): string => {
+    const first: unknown = Array.isArray(result.content) ? result.content[0] : undefined;
+    return typeof first === "object" && first !== null && "text" in first ? String(first.text) : "";
+  };
+
+  it("lists exactly three read-only tools with strict inputs", async () => {
+    const client = await connect(fake());
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name).sort()).toEqual([
+      "triage_briefing",
+      "triage_dependencies",
+      "triage_issue",
+    ]);
+    for (const tool of tools) {
+      expect(tool.annotations).toMatchObject({
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      });
+      expect(tool.inputSchema.additionalProperties).toBe(false);
+      expect(tool.outputSchema).toBeDefined();
+    }
+    await client.close();
+  });
+
+  it("returns the same versioned JSON as the CLI for briefing, issue and dependencies", async () => {
+    const runtime = fake();
+    const client = await connect(runtime, { repo });
+    const cli = async (args: string[]) => {
+      let out = "";
+      await main([...args, "--json", "--no-update-check"], async (t) => void (out = t), runtime);
+      return JSON.parse(out);
+    };
+    const brief = structured(await client.callTool({ name: "triage_briefing", arguments: {} }));
+    expect(brief).toMatchObject({
+      schemaVersion: 1,
+      kind: "briefing",
+      status: "complete",
+      selection: { repository: repo, agent: null, identitySource: "unresolved" },
+      error: null,
+    });
+    const { checkpoint: _, ...cliBrief } = await cli(["--repo", repo]);
+    expect(brief.result).toEqual(cliBrief);
+    const intake = structured(
+      await client.callTool({ name: "triage_issue", arguments: { number: 1, agent: "ana" } }),
+    );
+    const { checkpoint: __, ...cliIssue } = await cli([
+      "--repo",
+      repo,
+      "--issue",
+      "1",
+      "--agent",
+      "ana",
+    ]);
+    expect(intake).toMatchObject({
+      kind: "issue",
+      selection: { agent: "ana", identitySource: "tool" },
+    });
+    expect(intake.result).toEqual(cliIssue);
+    const deps = structured(
+      await client.callTool({ name: "triage_dependencies", arguments: { number: 1, tree: true } }),
+    );
+    expect(deps.result).toEqual(await cli(["deps", "1", "--tree", "--repo", repo]));
+    await client.close();
+  });
+
+  it("rejects unknown properties and out-of-range values before collection", async () => {
+    const runtime = fake();
+    const client = await connect(runtime);
+    for (const [name, args] of [
+      ["triage_briefing", { path: "/etc" }],
+      ["triage_briefing", { limit: 0 }],
+      ["triage_briefing", { maxChars: 50 }],
+      ["triage_briefing", { since: "2026-11-12" }],
+      ["triage_issue", { number: -1 }],
+      ["triage_issue", {}],
+      ["triage_dependencies", { number: 1, repo: "not a repo" }],
+    ] as const) {
+      const result = await client.callTool({ name, arguments: args }).catch((error) => ({
+        isError: true,
+        thrown: error,
+      }));
+      expect(result.isError, `${name} ${JSON.stringify(args)}`).toBe(true);
+    }
+    expect(runtime.seen).toEqual([]);
+    await client.close();
+  });
+
+  it("keeps per-call selection: tool repo/agent win and concurrent calls do not interfere", async () => {
+    const runtime = fake();
+    const client = await connect(runtime, { repo: "start/default", agent: "boot" });
+    const [a, b, c] = await Promise.all([
+      client.callTool({ name: "triage_briefing", arguments: { repo: "o/a" } }),
+      client.callTool({ name: "triage_briefing", arguments: { repo: "o/b", agent: "zed" } }),
+      client.callTool({ name: "triage_briefing", arguments: {} }),
+    ]);
+    expect(structured(a).selection).toEqual({
+      repository: "o/a",
+      agent: "boot",
+      identitySource: "startup",
+    });
+    expect(structured(b).selection).toEqual({
+      repository: "o/b",
+      agent: "zed",
+      identitySource: "tool",
+    });
+    expect(structured(c).selection.repository).toBe("start/default");
+    expect(runtime.seen.sort()).toEqual(["o/a#-@-", "o/b#-@-", "start/default#-@-"]);
+    await client.close();
+  });
+
+  it("resolves the default repository in the configured project and reports unresolved identity", async () => {
+    const dirs: (string | undefined)[] = [];
+    const client = await connect(
+      fake({ currentRepository: async (cwd) => (dirs.push(cwd), repo) }),
+      { project: "/work/project" },
+    );
+    const result = await client.callTool({ name: "triage_briefing", arguments: {} });
+    expect(dirs).toEqual(["/work/project"]);
+    expect(text(result)).toMatch(/Identity: unresolved; this is an unfocused read/);
+    await client.close();
+  });
+
+  it("returns sanitized errors, never raw failure text", async () => {
+    const client = await connect(
+      fake({
+        currentRepository: async () => {
+          throw new Error("gh: secret-token-123 stderr");
+        },
+        collect: async () => {
+          throw new Error("ghp_SECRET raw stderr\n    at stack");
+        },
+      }),
+    );
+    const unresolved = await client.callTool({ name: "triage_briefing", arguments: {} });
+    expect(unresolved.isError).toBe(true);
+    expect(structured(unresolved)).toMatchObject({
+      status: "error",
+      result: null,
+      error: { code: "repository-unresolved" },
+    });
+    const failed = await client.callTool({ name: "triage_briefing", arguments: { repo } });
+    expect(structured(failed).error?.code).toBe("collection-failed");
+    expect(JSON.stringify(failed)).not.toMatch(/SECRET|secret-token|stack|stderr/);
+    await client.close();
+  });
+
+  it("reports incomplete evidence and unavailable issues as incomplete, not complete", async () => {
+    const client = await connect(
+      fake({
+        collect: async (_r: string, options?: { issue?: number }) => {
+          if (options?.issue === 9)
+            throw new IssueUnavailable({
+              repository: repo,
+              number: 9,
+              url: `https://github.com/${repo}/issues/9`,
+              state: "forbidden",
+              detail: "No access.",
+              next: "Check permissions.",
+            });
+          return { ...snapshot(), warnings: ["Pull requests were truncated."] };
+        },
+      }),
+      { repo },
+    );
+    const partial = await client.callTool({ name: "triage_briefing", arguments: {} });
+    expect(structured(partial).status).toBe("incomplete");
+    expect(text(partial)).toMatch(/^INCOMPLETE evidence/);
+    const denied = await client.callTool({ name: "triage_issue", arguments: { number: 9 } });
+    expect(structured(denied)).toMatchObject({
+      status: "incomplete",
+      result: { kind: "issue-unavailable", state: "forbidden" },
+    });
+    expect(text(denied)).toMatch(/FORBIDDEN/);
+    await client.close();
+  });
+
+  it("does not report a cancelled call as complete", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let started = () => {};
+    const begun = new Promise<void>((resolve) => (started = resolve));
+    const client = await connect(
+      fake({
+        collect: async () => {
+          started();
+          await gate;
+          return snapshot();
+        },
+      }),
+      { repo },
+    );
+    const controller = new AbortController();
+    const pending = client
+      .callTool({ name: "triage_briefing", arguments: {} }, { signal: controller.signal })
+      .then(
+        (result) => ({ result }),
+        (error: unknown) => ({ error }),
+      );
+    await begun;
+    controller.abort();
+    release();
+    const outcome = await pending;
+    expect("error" in outcome || structured(outcome.result).status === "error").toBe(true);
+    await client.close();
+  });
+
+  it("validates startup arguments", () => {
+    expect(mcpArguments(["--repo", "o/r", "--agent", "ana"])).toMatchObject({
+      repo: "o/r",
+      agent: "ana",
+    });
+    expect(() => mcpArguments(["--repo", "bad"])).toThrow();
+    expect(() => mcpArguments(["--agent", "-x"])).toThrow();
+    expect(() => mcpArguments(["--harness", "ori"])).toThrow();
+  });
+});
