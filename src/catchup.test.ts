@@ -2,6 +2,8 @@ import { describe, expect, it } from "vite-plus/test";
 import { catchUp, catchUpJson, catchUpText } from "./catchup.js";
 import { changeSubject, resolveWindow } from "./changes.js";
 import type { ChangeEvidence, EvidenceIssue, EvidencePullRequest } from "./changes.js";
+import { collect } from "./github.js";
+import type { Query } from "./github.js";
 import type { Comment, Issue, Page, PullRequest, Snapshot } from "./types.js";
 
 const repo = "example/project";
@@ -226,14 +228,14 @@ const current = () => {
         body: "Looks good",
         url: `${url("pull", 41)}#review-1`,
         author: { login: "shared-owner" },
-        createdAt: inside(1),
+        submittedAt: inside(1),
         state: "APPROVED",
       },
       {
         body: "One nit",
         url: `${url("pull", 41)}#review-2`,
         author: { login: "shared-owner" },
-        createdAt: inside(2),
+        submittedAt: inside(2),
         state: "COMMENTED",
       },
     ]),
@@ -493,5 +495,146 @@ describe("repository catch-up aggregation (#169)", () => {
     );
     report = catchUp(snap([], [], evidence([mergedPr, dependent])), { now: clock, limit: 100 });
     expect(report.sections.completed.items.map((r) => r.subject.number).sort()).toEqual([10, 20]);
+  });
+
+  // ---- Regression: build snapshots through the real collector with a fake GraphQL boundary
+  // that, like GitHub, returns only the fields the query selected. Hand-built snapshots hid
+  // that live reviews had no timestamp.
+  /** Keep only the keys of each review node that the query's review selection names. */
+  const selectReviewFields = (source: string, node: PullRequest) => {
+    const marker = "reviews(first:100){nodes{";
+    const start = source.indexOf(marker);
+    let selection = "";
+    for (let i = start + marker.length, depth = 1; start >= 0 && depth > 0; i++) {
+      depth += source[i] === "{" ? 1 : source[i] === "}" ? -1 : 0;
+      // Only top-level field names of the review node count.
+      if (depth === 1 && source[i] !== "}") selection += source[i];
+      else if (source[i] === "{") selection += " ";
+    }
+    const names = new Set(selection.split(/\s+/).filter(Boolean));
+    return {
+      ...node,
+      reviews: {
+        ...node.reviews,
+        nodes: node.reviews.nodes.map((review) =>
+          Object.fromEntries(Object.entries(review).filter(([key]) => names.has(key))),
+        ),
+      },
+    };
+  };
+  const fakeGh =
+    (prs: PullRequest[]): Query =>
+    async (source) => {
+      const field = source.includes("pullRequests(") ? "pullRequests" : "issues";
+      const allStates = source.includes("states:[");
+      const nodes =
+        field === "issues"
+          ? []
+          : prs
+              .filter((p) => allStates || p.state === "OPEN")
+              .map((p) => selectReviewFields(source, p));
+      return {
+        repository: { [field]: page(nodes) },
+        rateLimit: { remaining: 4000, resetAt: t0 },
+      };
+    };
+  const review = (n: number, id: number, at: string | null, state = "APPROVED") => ({
+    body: "Reviewed",
+    url: `${url("pull", n)}#pullrequestreview-${id}`,
+    author: { login: "reviewer" },
+    state,
+    submittedAt: at,
+  });
+  const claimOn = (n: number, id: number, at: string) =>
+    comment(
+      n,
+      id,
+      "Claimed by `ana` with `github-triage claim`.\n<!-- github-triage:claim:aaaa -->",
+      at,
+    );
+
+  it("counts live reviews by their submission time through the real collector", async () => {
+    const open = pr(50, [], "SUCCESS", {
+      createdAt: inside(30),
+      updatedAt: inside(1),
+      reviews: page([review(50, 1, inside(2))]),
+    });
+    const snapshot = await collect(repo, { changeWindow: window }, fakeGh([open]), clock);
+    expect(snapshot.pullRequests[0]!.reviews.nodes[0]).toHaveProperty("submittedAt", inside(2));
+    const report = catchUp(snapshot, { now: clock, limit: 100 });
+    expect(report.summary.reviews).toBe(1);
+    expect(report.completeness.history).toBe("complete");
+    expect(report.checkpoint.candidate).toBe(t0);
+  });
+
+  it("keeps operations on subjects closed in the window, deduplicated with open ones", async () => {
+    const closed = pr(51, [], "SUCCESS", {
+      state: "MERGED",
+      mergedAt: inside(1),
+      createdAt: inside(30),
+      updatedAt: inside(1),
+      comments: page([claimOn(51, 7, inside(3)), comment(51, 8, "chatter", inside(3))]),
+      reviews: page([review(51, 2, inside(2))]),
+    });
+    const open = pr(52, [], "SUCCESS", {
+      createdAt: inside(30),
+      updatedAt: inside(1),
+      comments: page([claimOn(52, 9, inside(4))]),
+      reviews: page([review(52, 3, inside(2))]),
+    });
+    const snapshot = await collect(repo, { changeWindow: window }, fakeGh([closed, open]), clock);
+    const report = catchUp(snapshot, { now: clock, limit: 100 });
+    const rows = report.sections.progress.items.filter((r) => ["review", "claim"].includes(r.kind));
+    expect(rows.map((r) => `${r.subject.number}:${r.kind}`).sort()).toEqual([
+      "51:claim",
+      "51:review",
+      "52:claim",
+      "52:review",
+    ]);
+    expect(report.summary).toMatchObject({ reviews: 2, operations: 2 });
+    expect(report.completeness.history).toBe("complete");
+    expect(report.checkpoint.candidate).toBe(t0);
+  });
+
+  it("reports truncated or untimed operation history as incomplete, never as none", async () => {
+    const truncated = {
+      ...pr(53, [], "SUCCESS", {
+        state: "CLOSED",
+        createdAt: inside(30),
+        updatedAt: inside(1),
+        comments: page([claimOn(53, 10, inside(3))], true),
+      }),
+      closedAt: inside(1),
+    };
+    let report = catchUp(
+      await collect(repo, { changeWindow: window }, fakeGh([truncated]), clock),
+      { now: clock, limit: 100 },
+    );
+    expect(report.completeness.history).toBe("incomplete");
+    expect(report.completeness.warnings.join(" ")).toContain(url("pull", 53));
+    expect(report.checkpoint.candidate).toBeNull();
+    const untimed = pr(54, [], "SUCCESS", {
+      createdAt: inside(30),
+      updatedAt: inside(1),
+      reviews: page([review(54, 4, null)]),
+    });
+    report = catchUp(await collect(repo, { changeWindow: window }, fakeGh([untimed]), clock), {
+      now: clock,
+      limit: 100,
+    });
+    expect(report.completeness.history).toBe("incomplete");
+    expect(report.checkpoint.candidate).toBeNull();
+    expect(catchUpText(report)).not.toContain("0 review(s)");
+  });
+
+  it("describes cancelled checks the same way in activity and blockers", () => {
+    const cancelled = pr(55, [], "CANCELLED");
+    const report = catchUp(snap([], [cancelled], evidence([])), { now: clock, limit: 100 });
+    const row = report.sections.activity.items.find((r) => r.subject.number === 55)!;
+    expect(row.description).toContain("checks cancelled; verification incomplete");
+    expect(row.description).not.toContain("failing");
+    expect(row.next).toBe("Rerun checks on PR #55.");
+    const blockers = report.sections.blockers.items.filter((r) => r.subject.number === 55);
+    expect(blockers.map((r) => r.kind)).toEqual(["cancelled-checks"]);
   });
 });

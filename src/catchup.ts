@@ -12,7 +12,13 @@
 import { analysisRules, excerpt, owners, prChecks, workflow } from "./briefing.js";
 import type { Bounded } from "./briefing.js";
 import { inWindow, snapshotChangeEvidence } from "./changes.js";
-import type { ChangeEvidence, ChangeSubject, ComparisonWindow, SourceCoverage } from "./changes.js";
+import type {
+  ChangeEvidence,
+  ChangeSubject,
+  ComparisonWindow,
+  SourceCoverage,
+  SubjectOperation,
+} from "./changes.js";
 import type { Action, Comment, Issue, PullRequest, Snapshot } from "./types.js";
 
 export const CATCHUP_SCHEMA_VERSION = 1;
@@ -217,14 +223,14 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
   const retained = snapshotChangeEvidence(snapshot);
   const evidence: ChangeEvidence | null = retained.available ? retained.evidence : null;
   const window: ComparisonWindow | null = evidence?.window ?? null;
-  const historyStatus: HistoryStatus = !evidence
+  let historyStatus: HistoryStatus = !evidence
     ? "unavailable"
     : window?.from === null
       ? "baseline"
       : evidence.complete
         ? "complete"
         : "incomplete";
-  const historyNotice =
+  let historyNotice =
     historyStatus === "unavailable"
       ? `History unavailable: ${retained.available ? "" : retained.reason} This is not "no changes".`
       : historyStatus === "baseline"
@@ -448,58 +454,109 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
         detailCommand: detail(s.kind, s.number),
       });
   }
-  if (window?.from)
+  // Operations come from open snapshot items (fully paginated comments) and from the retained
+  // evidence of every changed subject, so work closed in the window keeps its claims, releases
+  // and reviews. Rows share one id per subject and event, so the two sources deduplicate.
+  const operations: { s: SubjectRef; op: SubjectOperation }[] = [];
+  /** Subjects whose operation history could not be established completely. */
+  const unknownOperations = new Set<string>();
+  if (window?.from) {
     for (const item of items) {
       const kind = kindOf(item);
-      if (isPr(item))
-        for (const review of item.reviews.nodes)
-          if (qualifies(review.createdAt))
-            progressRows.push({
-              id: rowId(kind, item.number, `review:${review.url}`),
-              kind: "review",
-              subject: ref(item, kind),
-              related: [],
-              at: review.createdAt ?? null,
-              timing: "event",
-              description: `Review ${review.state}${review.body ? `: "${excerpt(review.body, 160)}"` : ""}`,
-              reasons: ["review submitted in window"],
-              evidence: [review.url],
-              next: null,
-              uncertainty: "factual",
-              attribution: [
-                { ...unknownAttribution(review.author?.login ?? null), relation: "review-author" },
-              ],
-              detailCommand: detail(kind, item.number),
-            });
-      for (const comment of item.comments.nodes) {
-        const record = operationRecord(comment);
-        if (!record || !qualifies(comment.createdAt)) continue;
-        progressRows.push({
-          id: rowId(kind, item.number, `${record.operation}:${comment.url}`),
-          kind: record.operation,
-          subject: ref(item, kind),
-          related: [],
-          at: comment.createdAt ?? null,
-          timing: "event",
-          description: `Reported ${record.operation} by ${record.agent ?? "unknown agent"}`,
-          reasons: ["structured workflow record in window"],
-          evidence: [comment.url],
-          next: null,
-          uncertainty: "reported",
-          attribution: [
-            {
-              agent: record.agent,
-              relation: record.operation === "claim" ? "claim-record" : "release-record",
-              source: comment.url,
-              // Format validation is not authentication: reported, never verified.
-              certainty: record.agent ? "reported" : "unknown",
-              githubActor: comment.author?.login ?? null,
+      for (const comment of item.comments.nodes)
+        if (operationRecord(comment))
+          operations.push({
+            s: ref(item, kind),
+            op: {
+              source: "comment",
+              url: comment.url,
+              at: comment.createdAt ?? null,
+              body: comment.body,
+              author: comment.author?.login ?? null,
+              state: null,
             },
-          ],
-          detailCommand: detail(kind, item.number),
-        });
-      }
+          });
+      if (isPr(item))
+        for (const review of item.reviews.nodes) {
+          if (review.state === "PENDING") continue;
+          // A review without its submission time cannot be qualified: unknown, never "none".
+          if (!review.submittedAt) unknownOperations.add(item.url);
+          operations.push({
+            s: ref(item, kind),
+            op: {
+              source: "review",
+              url: review.url,
+              at: review.submittedAt ?? null,
+              body: review.body ?? "",
+              author: review.author?.login ?? null,
+              state: review.state,
+            },
+          });
+        }
     }
+    for (const s of subjects) {
+      for (const op of s.operations ?? []) operations.push({ s: subjectRef(s), op });
+      // An open subject's comments are fully paginated in the snapshot (truncated reviews are a
+      // snapshot warning); a closed subject has only its retained, possibly truncated, evidence.
+      if (s.operationsComplete !== true && !byUrl.has(s.url)) unknownOperations.add(s.url);
+    }
+  }
+  for (const { s, op } of operations) {
+    if (!qualifies(op.at)) continue;
+    if (op.source === "review") {
+      progressRows.push({
+        id: rowId(s.kind, s.number, `review:${op.url}`),
+        kind: "review",
+        subject: s,
+        related: [],
+        at: op.at,
+        timing: "event",
+        description: `Review ${op.state}${op.body ? `: "${excerpt(op.body, 160)}"` : ""}`,
+        reasons: ["review submitted in window"],
+        evidence: [op.url],
+        next: null,
+        uncertainty: "factual",
+        attribution: [{ ...unknownAttribution(op.author), relation: "review-author" }],
+        detailCommand: detail(s.kind, s.number),
+      });
+      continue;
+    }
+    const record = operationRecord({
+      body: op.body,
+      url: op.url,
+      author: op.author ? { login: op.author } : null,
+    });
+    if (!record) continue;
+    progressRows.push({
+      id: rowId(s.kind, s.number, `${record.operation}:${op.url}`),
+      kind: record.operation,
+      subject: s,
+      related: [],
+      at: op.at,
+      timing: "event",
+      description: `Reported ${record.operation} by ${record.agent ?? "unknown agent"}`,
+      reasons: ["structured workflow record in window"],
+      evidence: [op.url],
+      next: null,
+      uncertainty: "reported",
+      attribution: [
+        {
+          agent: record.agent,
+          relation: record.operation === "claim" ? "claim-record" : "release-record",
+          source: op.url,
+          // Format validation is not authentication: reported, never verified.
+          certainty: record.agent ? "reported" : "unknown",
+          githubActor: op.author,
+        },
+      ],
+      detailCommand: detail(s.kind, s.number),
+    });
+  }
+
+  if (historyStatus === "complete" && unknownOperations.size) {
+    historyStatus = "incomplete";
+    historyNotice = `Operation history (reviews, claims, releases) is incomplete for ${[...unknownOperations].sort().join(", ")}; absent rows do not mean nothing happened.`;
+  }
 
   // ---- Blockers / risks (current). Onset is unknown without delta evidence.
   const blockerRows: CatchUpRow[] = [];
@@ -530,12 +587,7 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
     });
   for (const pr of snapshot.pullRequests) {
     if (!workflow.openStates.includes(pr.state)) continue;
-    const checks = prChecks(pr);
-    const failed = checks.filter(
-      (c) => workflow.failure.includes(c.outcome) && c.outcome !== "CANCELLED",
-    );
-    const cancelled = checks.filter((c) => c.outcome === "CANCELLED");
-    const pending = checks.filter((c) => workflow.unfinished.includes(c.outcome));
+    const { failed, cancelled, pending } = classifyChecks(pr);
     if (failed.length)
       blocker(
         pr,
@@ -805,18 +857,34 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
 }
 export type CatchUpReport = ReturnType<typeof catchUp>;
 
-function prStatusWord(pr: PullRequest): string {
+/**
+ * The one check classification shared by the blocker rows and current activity, so the two can
+ * never disagree: a cancelled check is incomplete verification, not a failure.
+ */
+function classifyChecks(pr: PullRequest) {
   const checks = prChecks(pr);
+  return {
+    checks,
+    failed: checks.filter((c) => workflow.failure.includes(c.outcome) && c.outcome !== "CANCELLED"),
+    cancelled: checks.filter((c) => c.outcome === "CANCELLED"),
+    pending: checks.filter((c) => workflow.unfinished.includes(c.outcome)),
+  };
+}
+const CANCELLED_WORD = "checks cancelled; verification incomplete";
+function prStatusWord(pr: PullRequest): string {
+  const { checks, failed, cancelled, pending } = classifyChecks(pr);
   if (pr.isDraft) return "draft";
   if (workflow.conflicts.includes(pr.mergeable)) return "conflicting";
-  if (checks.some((c) => workflow.failure.includes(c.outcome))) return "checks failing";
-  if (checks.some((c) => workflow.unfinished.includes(c.outcome))) return "checks pending";
+  if (failed.length) return "checks failing";
+  if (cancelled.length) return CANCELLED_WORD;
+  if (pending.length) return "checks pending";
   if (pr.reviewThreads.nodes.some((t) => !t.isResolved)) return "review findings open";
   return checks.length ? "checks passing" : "checks unknown";
 }
 function nextFor(pr: PullRequest): string {
   const word = prStatusWord(pr);
   if (word === "checks failing") return `Fix failing checks on PR #${pr.number}.`;
+  if (word === CANCELLED_WORD) return `Rerun checks on PR #${pr.number}.`;
   if (word === "checks pending") return `Wait for checks on PR #${pr.number}.`;
   if (word === "conflicting") return `Resolve conflicts on PR #${pr.number}.`;
   if (word === "review findings open") return `Address review findings on PR #${pr.number}.`;

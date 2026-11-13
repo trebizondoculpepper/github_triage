@@ -148,6 +148,24 @@ export interface ChangeEvent {
   /** Qualified by the event's own timestamp; null for a baseline. */
   inWindow: boolean | null;
 }
+/**
+ * One retained operation on a changed subject: a structured claim/release marker comment or a
+ * submitted review. Kept on the subject so operations survive when the subject closes in the
+ * window and leaves the open snapshot. `at` is null when GitHub supplied no timestamp.
+ */
+export interface SubjectOperation {
+  source: "comment" | "review";
+  url: string;
+  at: string | null;
+  body: string;
+  author: string | null;
+  /** Review state (APPROVED, COMMENTED, ...); null for comments. */
+  state: string | null;
+}
+/** Structured workflow markers retained from comments; ordinary comments are not kept. */
+export const OPERATION_MARKERS = ["<!-- github-triage:claim:", "<!-- github-triage:release:"];
+const MAX_OPERATION_BODY = 2000;
+
 export interface ChangeSubject {
   kind: "issue" | "pull-request";
   number: number;
@@ -168,6 +186,13 @@ export interface ChangeSubject {
   updatedOnly: boolean;
   /** Facts that could not be established, by field name. */
   unknown: string[];
+  /** In-window (or untimed) operations; absent on evidence retained before this field. */
+  operations?: SubjectOperation[];
+  /**
+   * False when comments or reviews were truncated or a review had no timestamp: the subject's
+   * operation history is unknown beyond what `operations` holds.
+   */
+  operationsComplete?: boolean;
 }
 export interface ChangeEvidence {
   schemaVersion: typeof CHANGE_EVIDENCE_SCHEMA_VERSION;
@@ -253,6 +278,38 @@ export function changeSubject(
     add("merged", mergedAt);
     if (node.state === "CLOSED") add("closed-unmerged", closedAt);
   } else if (node.state === "CLOSED") add("closed", closedAt);
+  // Bounded operation evidence: only marker comments and reviews, only in-window or untimed.
+  const operations: SubjectOperation[] = [];
+  let operationsComplete = !node.comments?.pageInfo?.hasNextPage;
+  const keep = (op: SubjectOperation) => {
+    const qualified = inWindow(op.at, window);
+    if (op.at === null || qualified === null) operationsComplete = false;
+    if (qualified !== false) operations.push({ ...op, body: op.body.slice(0, MAX_OPERATION_BODY) });
+  };
+  for (const c of node.comments?.nodes ?? [])
+    if (OPERATION_MARKERS.some((m) => c.body?.includes(m)))
+      keep({
+        source: "comment",
+        url: c.url,
+        at: c.createdAt ?? null,
+        body: c.body,
+        author: c.author?.login ?? null,
+        state: null,
+      });
+  if (pr) {
+    if (pr.reviews?.pageInfo?.hasNextPage) operationsComplete = false;
+    for (const r of pr.reviews?.nodes ?? [])
+      if (r.state !== "PENDING")
+        keep({
+          source: "review",
+          url: r.url,
+          at: r.submittedAt ?? null,
+          body: r.body ?? "",
+          author: r.author?.login ?? null,
+          state: r.state,
+        });
+  }
+  if (!operationsComplete) unknown.push("operations");
   return {
     kind,
     number: node.number,
@@ -269,6 +326,8 @@ export function changeSubject(
     events,
     updatedOnly: !!inWindow(node.updatedAt, window) && !events.some((e) => e.inWindow),
     unknown,
+    operations,
+    operationsComplete,
   };
 }
 
