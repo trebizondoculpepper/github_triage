@@ -17,7 +17,7 @@ import { readBriefing, readDependencies } from "./service.js";
 import type { ReadRuntime } from "./service.js";
 import { installedVersion } from "./updates.js";
 
-/** Startup selection, explicit only in this slice (roots and agent-inbox lookup follow). */
+/** Startup selection, explicit only so far (roots and agent-inbox lookup are pending on #25). */
 export interface McpOptions {
   /** Configured local project used for repository resolution and repository configuration. */
   project?: string;
@@ -27,7 +27,7 @@ export interface McpOptions {
 
 /** Injected boundaries; tests replace every GitHub-facing one. */
 export interface McpRuntime extends ReadRuntime {
-  currentRepository: (cwd?: string) => Promise<string>;
+  currentRepository: (cwd?: string, signal?: AbortSignal) => Promise<string>;
 }
 
 export const mcpHelp = `Usage: github-triage-mcp [--project PATH] [--repo owner/name] [--agent NAME]
@@ -244,8 +244,9 @@ export function createServer(
     let repository = args.repo ?? options.repo;
     if (!repository) {
       try {
-        repository = await runtime.currentRepository(options.project);
+        repository = await runtime.currentRepository(options.project, signal);
       } catch {
+        if (signal.aborted) throw new Failure("cancelled");
         throw new Failure("repository-unresolved");
       }
       if (!repoPattern.test(repository)) throw new Failure("repository-unresolved");
@@ -342,6 +343,7 @@ export function createServer(
           since: args.since ? new Date(args.since).toISOString() : undefined,
           limit: args.limit,
           maxChars: args.maxChars,
+          signal: ctx.mcpReq.signal,
         });
         if (read.kind === "unavailable") throw new Failure("collection-failed");
         return {
@@ -370,6 +372,7 @@ export function createServer(
           issue: args.number,
           limit: 5,
           maxChars: args.maxChars,
+          signal: ctx.mcpReq.signal,
         });
         if (read.kind === "unavailable")
           return {
@@ -399,7 +402,13 @@ export function createServer(
     },
     async (args, ctx) =>
       call("dependencies", { repo: args.repo }, ctx.mcpReq.signal, async (selection) => {
-        const read = await readDependencies(runtime, selection.repository, args.number, args.tree);
+        const read = await readDependencies(
+          runtime,
+          selection.repository,
+          args.number,
+          args.tree,
+          ctx.mcpReq.signal,
+        );
         return { status: "complete", result: plain(read.report), text: read.text };
       }),
   );

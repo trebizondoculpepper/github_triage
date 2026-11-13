@@ -45,6 +45,7 @@ import { complexityConfigText, diagnoseComplexityConfig } from "./complexitydoct
 import {
   collect,
   declaredDependencies,
+  ghQueryWith,
   graphqlAnswer,
   pages,
   type IssueDiagnosis,
@@ -418,6 +419,52 @@ describe("CLI freshness and local state safety", () => {
 });
 
 describe("plain JavaScript gh wrapper", () => {
+  it.skipIf(process.platform === "win32")(
+    "terminates the running gh child process when a read is aborted",
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), "triage-gh-abort-"));
+      const path = process.env.PATH;
+      try {
+        const pidFile = join(dir, "pid");
+        // The fake gh records its pid, then replaces itself with a long sleep.
+        await writeFile(join(dir, "gh"), `#!/bin/sh\necho $$ > "${pidFile}"\nexec sleep 30\n`, {
+          mode: 0o700,
+        });
+        process.env.PATH = `${dir}:${path}`;
+        const controller = new AbortController();
+        const pending = ghQueryWith(controller.signal)("query{viewer{login}}", {}).then(
+          () => "resolved",
+          (error: unknown) => error,
+        );
+        let pid = 0;
+        for (let i = 0; i < 200 && !pid; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          pid = Number((await readFile(pidFile, "utf8").catch(() => "")).trim());
+        }
+        expect(pid).toBeGreaterThan(0);
+        controller.abort();
+        expect(await pending).toMatchObject({ name: "AbortError" });
+        let alive = true;
+        for (let i = 0; i < 200 && alive; i++) {
+          try {
+            process.kill(pid, 0);
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          } catch {
+            alive = false;
+          }
+        }
+        expect(alive).toBe(false);
+        // An already aborted signal never starts gh at all.
+        await rm(pidFile);
+        await expect(ghQueryWith(controller.signal)("query{viewer{login}}", {})).rejects.toThrow();
+        await expect(readFile(pidFile, "utf8")).rejects.toThrow();
+      } finally {
+        process.env.PATH = path;
+        await rm(dir, { recursive: true });
+      }
+    },
+  );
+
   it.skipIf(process.platform === "win32")(
     "runs directly with Node and reuses the inherited gh session without login",
     async () => {
@@ -5432,6 +5479,45 @@ describe("read-only MCP adapter (#25)", async () => {
     release();
     const outcome = await pending;
     expect("error" in outcome || structured(outcome.result).status === "error").toBe(true);
+    await client.close();
+  });
+
+  it("hands the call's abort signal to collection and dependency reads", async () => {
+    const seen: AbortSignal[] = [];
+    const hang = (signal: AbortSignal | undefined) => {
+      if (signal) seen.push(signal);
+      return new Promise<never>((_resolve, reject) =>
+        signal?.addEventListener("abort", () => reject(signal.reason)),
+      );
+    };
+    const client = await connect(
+      fake({
+        collect: async (_r: string, options?: { signal?: AbortSignal }) => hang(options?.signal),
+        dependencyReport: async (_r: string, _n: number, options?: { signal?: AbortSignal }) =>
+          hang(options?.signal),
+      }),
+      { repo },
+    );
+    for (const [name, args] of [
+      ["triage_briefing", {}],
+      ["triage_dependencies", { number: 1 }],
+    ] as const) {
+      const before = seen.length;
+      const controller = new AbortController();
+      const pending = client
+        .callTool({ name, arguments: args }, { signal: controller.signal })
+        .then(
+          (result) => ({ result }),
+          (error: unknown) => ({ error }),
+        );
+      await expect.poll(() => seen.length).toBe(before + 1);
+      controller.abort();
+      const outcome = await pending;
+      expect("error" in outcome || structured(outcome.result).status === "error").toBe(true);
+      // The server-side signal for that call fires, so the gh child is terminated.
+      await expect.poll(() => seen.at(-1)?.aborted).toBe(true);
+    }
+    expect(seen).toHaveLength(2);
     await client.close();
   });
 
