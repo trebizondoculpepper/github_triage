@@ -28,3 +28,7 @@ Use injected GitHub, clock, environment and filesystem boundaries. Assert meanin
 ## Source language
 
 The owner chose a full [TypeScript migration](typescript.md) in #91. This supersedes earlier plain-JavaScript design preferences, including MCP. Current runtime source remains JavaScript until that focused implementation lands; published bundles remain JavaScript for Node compatibility.
+
+## Optional event production
+
+[Polling and domain events](polling-events.md) (#32) follow baseline MCP. The opt-in 30-minute, process-local watcher does not require host wake-up adapters or the deferred shared daemon/SQLite design.
