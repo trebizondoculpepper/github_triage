@@ -23,6 +23,8 @@ import { defaultStaleHours, teamText, teamView } from "./team.js";
 import { ticketOwnership, ticketOwnershipText } from "./who.js";
 import { migrationPlanText, planMigration } from "./migration.js";
 import { briefing, textReport } from "./briefing.js";
+import { pickupOrders } from "./ranking.js";
+import type { PickupOrder } from "./ranking.js";
 import type { GhRun } from "./dependencies.js";
 import type { Query } from "./github.js";
 import type { Snapshot } from "./types.js";
@@ -84,6 +86,13 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   --offline             Read explicit cache; no GitHub queries/checkpoint advancement
   --full                Expanded version-1 report
   --agent NAME          Your identity: attention:NAME first, then agent:NAME work
+  --platform P          Your platform (e.g. claude-code); platform:* tickets need a match.
+                        Without it, restricted tickets are inspection context, not pickup
+  --order MODE          Pickup order only: impact (default: urgency, immediate unlocks,
+                        incomplete first, oldest), or oldest/newest (creation time alone,
+                        ignoring urgency/impact; both still shown). Never changes eligibility,
+                        claims, addressed attention or the PR/owned-work groups above pickup
+  --stale-hours N       Flag claims with no ticket/linked-PR activity for N hours (default 48)
   --max-chars N         Compact text budget (default 10000)
   --limit N             Next steps (default 5 compact, 10 expanded)
   --no-update-check     Skip the npm version check (also ${optOutEnv}=1)
@@ -250,11 +259,22 @@ export function argumentsFor(args: string[]) {
       offline: { type: "boolean" },
       "include-transferred": { type: "boolean" },
       limit: { type: "string" },
+      order: { type: "string" },
+      platform: { type: "string" },
+      "stale-hours": { type: "string" },
       help: { type: "boolean" },
     },
   });
   if (values.repo && !/^[\w.-]+\/[\w.-]+$/.test(values.repo))
     throw new Error("--repo must be owner/name.");
+  const order = values.order ?? "impact";
+  if (!isPickupOrder(order)) throw new Error(`--order must be one of ${pickupOrders.join(", ")}.`);
+  if (values.platform !== undefined && !/^[\w.-]+$/.test(values.platform))
+    throw new Error("--platform must be a platform name such as claude-code.");
+  const staleHours =
+    values["stale-hours"] === undefined ? undefined : Number(values["stale-hours"]);
+  if (staleHours !== undefined && (!Number.isFinite(staleHours) || staleHours <= 0))
+    throw new Error("--stale-hours must be a positive number.");
   const positive = (text: string, option: string): number => {
     if (!/^[1-9]\d*$/.test(text) || !Number.isSafeInteger(Number(text)))
       throw new Error(`${option} must be a positive integer.`);
@@ -276,8 +296,12 @@ export function argumentsFor(args: string[]) {
     limit: positive(values.limit ?? (values.full ? "10" : "5"), "--limit"),
     maxChars: positive(values["max-chars"] ?? "10000", "--max-chars"),
     since: values.since ? new Date(values.since).toISOString() : undefined,
+    order,
+    staleHours,
   };
 }
+const isPickupOrder = (text: string): text is PickupOrder =>
+  (pickupOrders as readonly string[]).includes(text);
 export async function atomicJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(resolve(path)), { recursive: true });
   const temporary = `${path}.${process.pid}.tmp`;

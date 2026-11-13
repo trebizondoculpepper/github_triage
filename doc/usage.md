@@ -10,6 +10,10 @@ Two explicit, agent-maintained markers form separate briefing groups: `design:de
 
 `urgency:high` and `urgency:low` override the calculated order of general pickup only: high first, then unlabelled, then low, and within each band the usual impact order. The briefing says when an override moved a ticket. Both labels together are reported as a conflict and ordered as unspecified. Urgency never changes eligibility, claims or authority, and explicit addressed attention stays ahead of it.
 
+## Next-action ranking
+
+The implementer briefing follows the [ranking contract](design/briefings.md): addressed attention first, then actionable PR follow-up (your own first; pending CI is waiting, not a fix), your own active work, then eligible pickup. Eligible pickup is open, unclaimed, `status:ready` or `status:incomplete`, with complete native evidence, no open blockers, no question/design prerequisite, no open closing PR, and no known platform mismatch. The default `--order impact` sorts pickup by urgency band, distinct immediate dependants it would make otherwise eligible, released incomplete work before unstarted, oldest creation time, then issue number. `--order oldest` or `--order newest` sorts pickup by creation time alone (then issue number); urgency, unlock and incomplete metadata stay visible in each reason but do not affect the order. `--platform P` states your platform for `platform:*` restricted tickets; without it, restricted tickets are shown as unverified inspection context, never pickup. Claims with no ticket or linked-PR activity for `--stale-hours` (default 48) are flagged as candidates; nothing is ever released automatically.
+
 ## Find work, then inspect evidence
 
 ```sh
