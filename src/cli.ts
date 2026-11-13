@@ -5,7 +5,14 @@ import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { collect, currentRepository, ghQuery, IssueUnavailable } from "./github.js";
+import {
+  collect,
+  currentRepository,
+  ghQuery,
+  ghRest,
+  IssueUnavailable,
+  permissionLookup,
+} from "./github.js";
 import {
   applyDependencyChange,
   dependencyChangeText,
@@ -54,7 +61,7 @@ import type { EstimateRuntime } from "./estimate.js";
 import { localDoctor, localDoctorExitCode, localDoctorText } from "./localdoctor.js";
 import type { LocalDoctorRuntime } from "./localdoctor.js";
 import type { GhRun } from "./dependencies.js";
-import type { Query } from "./github.js";
+import type { Query, Rest } from "./github.js";
 import type { Snapshot } from "./types.js";
 
 /** Parsed `deps` arguments: help, a migration plan, a native change, or a read. */
@@ -83,6 +90,8 @@ export interface Runtime {
   planMigration?: typeof planMigration;
   migrationRuntime?: Parameters<typeof planMigration>[1];
   query?: Query;
+  /** Read-only REST boundary; claim and release use it for comment authors' permissions (#212). */
+  rest?: Rest;
   now?: () => Date;
   updateCheck?: typeof cachedCheckForUpdate;
   stderr?: (text: string) => void;
@@ -627,13 +636,15 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
     const values = workflowArgumentsFor(args[0], args.slice(1));
     const repository = values.repo ?? (await runtime.currentRepository());
     const query = runtime.query ?? ghQuery;
+    // Per run: a permission learned now is never reused by a later invocation.
+    const permission = permissionLookup(repository, runtime.rest ?? ghRest);
     // Read live immediately before changing; never act on a cached snapshot.
     const plan =
       "questions" in values
         ? await planNeedsHuman(repository, values, query)
         : "outcome" in values
-          ? await planRelease(repository, values, query)
-          : await planClaim(repository, values, query);
+          ? await planRelease(repository, values, query, permission)
+          : await planClaim(repository, values, query, permission);
     const result =
       values.dryRun || !plan.ok
         ? { ...plan, exitCode: plan.ok ? 0 : 1 }

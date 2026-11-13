@@ -80,8 +80,12 @@ import {
   ghQueryWith,
   graphqlAnswer,
   pages,
+  permissionLookup,
   type IssueDiagnosis,
+  type PermissionLookup,
   type Query,
+  type RepositoryPermission,
+  type Rest,
 } from "./github.js";
 import { clauseFor, hedged, listWideHedge, planMigration } from "./migration.js";
 import { applyPlan, claimText, planClaim, planNeedsHuman, planRelease } from "./claims.js";
@@ -1533,6 +1537,23 @@ describe("help names the installed command (#53)", () => {
   });
 });
 
+/** Comment author and edit evidence (#212): an unedited comment by a user. */
+const by = (login = "kavya") => ({
+  author: { __typename: "User", login },
+  lastEditedAt: null as string | null,
+  includesCreatedEdit: false,
+  editor: null as { __typename: string; login: string } | null,
+});
+/** An injected per-test permission lookup: never live; write unless the table says otherwise. */
+const permissions = (table: Record<string, RepositoryPermission> = {}) => {
+  const calls: string[] = [];
+  const lookup: PermissionLookup = async (login) => {
+    calls.push(login);
+    return table[login] ?? "write";
+  };
+  return Object.assign(lookup, { calls });
+};
+
 describe("claim and needs-human (doc/design/workflow.md)", () => {
   type Ticket = {
     typename?: string;
@@ -1542,6 +1563,7 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
     openPrs?: number[];
     comments?: (string | { body: string; createdAt: string })[];
     labelledAt?: string;
+    permission?: Record<string, RepositoryPermission>;
     claims?: number[];
     repoLabels?: string[];
     afterWriteOwners?: string[];
@@ -1586,7 +1608,10 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
                       })),
                     ),
                     comments: page(
-                      (t.comments ?? []).map((c) => (typeof c === "string" ? { body: c } : c)),
+                      (t.comments ?? []).map((c) => ({
+                        ...by(),
+                        ...(typeof c === "string" ? { body: c } : c),
+                      })),
                     ),
                     timelineItems: page(
                       t.labelledAt
@@ -1607,7 +1632,7 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
     };
     const writes: string[][] = [];
     const run = async (args: string[]) => void writes.push(args);
-    return { query, run, writes };
+    return { query, run, writes, permission: permissions(t.permission) };
   };
   const at = (hoursAgo: number) => new Date(Date.parse(time) - hoursAgo * 3_600_000).toISOString();
   /** A recorded release handoff comment, as `release` writes it. */
@@ -1620,8 +1645,10 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
     body: `Handoff.\n\n<!-- github-triage:release:0123456789abcdef ${JSON.stringify({ v: 1, agent, outcome, target: "status:awaiting-review", remove: [], retained: [], claimedAt })} -->`,
     createdAt,
   });
-  const claim = (t: Ticket, extra = {}) =>
-    planClaim(repo, { number: 7, agent: "kavya", ...extra }, fake(t).query);
+  const claim = (t: Ticket, extra = {}) => {
+    const env = fake(t);
+    return planClaim(repo, { number: 7, agent: "kavya", ...extra }, env.query, env.permission);
+  };
 
   it("claims an eligible ticket: creates the agent label if needed, swaps readiness, comments once", async () => {
     const env = fake({ labels: ["status:ready"] });
@@ -1739,6 +1766,7 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
       labels: ["status:awaiting-review"],
       openPrs: [70],
       comments: [doneBy("kavya")],
+      labelledAt: "2026-11-12T09:00:00Z",
       ...extra,
     });
     it("refuses rework authorised only by a handoff with an unknown claim time", async () => {
@@ -1757,7 +1785,12 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
     });
     it("reclaims the caller's own awaiting-review issue: claims and leaves review state", async () => {
       const env = fake({ ...waiting(), repoLabels: ["agent:kavya"] });
-      const plan = await planClaim(repo, { number: 7, agent: "kavya", rework: true }, env.query);
+      const plan = await planClaim(
+        repo,
+        { number: 7, agent: "kavya", rework: true },
+        env.query,
+        env.permission,
+      );
       const result = await applyPlan(repo, plan, env);
       expect(result.exitCode).toBe(0);
       expect(env.writes[0]).toEqual([
@@ -6959,8 +6992,9 @@ describe("role-shaped briefings (#1, doc/design/briefings.md)", () => {
 describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
   type Live = {
     labels: string[];
-    comments: { body: string; createdAt: string }[];
+    comments: ({ body: string; createdAt: string } & Partial<ReturnType<typeof by>>)[];
     state?: string;
+    permission?: Record<string, RepositoryPermission>;
     linkedOpenPr?: boolean;
     prState?: string | null;
     labelledAt?: string;
@@ -6998,7 +7032,7 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
     const commentWindow = (end: number) => {
       const start = Math.max(0, end - 100);
       return {
-        nodes: s.comments.slice(start, end),
+        nodes: s.comments.slice(start, end).map((c) => ({ ...by(), ...c })),
         pageInfo: { hasPreviousPage: start > 0, startCursor: String(start) },
       };
     };
@@ -7055,11 +7089,24 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
       if (args[1] === "comment")
         s.comments.push({ body: args[args.indexOf("--body") + 1], createdAt: tick() });
     };
-    return { s, query, run, writes, addLabel, removeLabel };
+    return {
+      s,
+      query,
+      run,
+      writes,
+      addLabel,
+      removeLabel,
+      permission: permissions(initial.permission),
+    };
   };
   const pr = `https://github.com/${repo}/pull/70`;
   const release = (env: ReturnType<typeof live>, extra: Record<string, unknown> = {}) =>
-    planRelease(repo, { number: 7, agent: "kavya", outcome: "incomplete", ...extra }, env.query);
+    planRelease(
+      repo,
+      { number: 7, agent: "kavya", outcome: "incomplete", ...extra },
+      env.query,
+      env.permission,
+    );
 
   it("releases incomplete work with a note: the recorded handoff comment first, then labels", async () => {
     const env = live({ labels: ["agent:kavya", "bug", "question", "attention:nicole"] });
@@ -7313,7 +7360,12 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
         0,
       );
       await noise(env, n);
-      return planClaim(repo, { number: 7, agent: "kavya", rework: true }, env.query);
+      return planClaim(
+        repo,
+        { number: 7, agent: "kavya", rework: true },
+        env.query,
+        env.permission,
+      );
     };
     it("rework finds the caller's done handoff buried under more than 100 comments", async () => {
       expect(await handedOver(150)).toMatchObject({ ok: true, noop: false });
@@ -7508,6 +7560,10 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
         currentRepository: async () => repo,
         query: env.query,
         ghRun: env.run,
+        // No marker to verify, so no permission lookup; never a live call.
+        rest: async () => {
+          throw new Error("no live permission calls in tests");
+        },
       },
     );
     expect(code).toBe(0);
@@ -7516,6 +7572,192 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
       schemaVersion: 1,
       ok: true,
       facts: { outcome: "incomplete" },
+    });
+  });
+  describe("marker authority: only current writers' markers drive writes (#212)", () => {
+    const since = "2026-11-12T09:00:00.000Z";
+    const later = (n: number) => new Date(Date.parse(time) + 3_600_000 + n * 1000).toISOString();
+    const releaseOp = (claimedAt: string | null = since) =>
+      `<!-- github-triage:release:${createHash("sha256")
+        .update(JSON.stringify([repo, 7, "kavya", claimedAt]))
+        .digest("hex")
+        .slice(0, 16)}`;
+    /** A release record in the exact public format, posted by whoever `author` says. */
+    const handoff = (
+      plan: Partial<{
+        agent: string;
+        outcome: string;
+        target: string | null;
+        claimedAt: string | null;
+      }>,
+      createdAt: string,
+      author: Partial<ReturnType<typeof by>> = by(),
+    ) => {
+      const record = {
+        v: 1,
+        agent: "kavya",
+        outcome: "done",
+        target: "status:awaiting-review",
+        remove: ["agent:kavya"],
+        retained: [],
+        claimedAt: since,
+        ...plan,
+      };
+      return {
+        body: `Handoff.\n\n${releaseOp(record.claimedAt)} ${JSON.stringify(record)} -->`,
+        createdAt,
+        ...by(),
+        ...author,
+      };
+    };
+    const mallory = by("mallory");
+    /** kavya handed over with done; the issue awaits review on an open PR. */
+    const awaiting = (
+      comments: Live["comments"],
+      permission: Record<string, RepositoryPermission> = {},
+    ) =>
+      live({
+        labels: ["status:awaiting-review"],
+        linkedOpenPr: true,
+        comments,
+        permission: { mallory: "read", ...permission },
+      });
+    const rework = (env: ReturnType<typeof live>, permission: PermissionLookup = env.permission) =>
+      planClaim(repo, { number: 7, agent: "kavya", rework: true }, env.query, permission);
+
+    it("(a) a forged done marker from a read-only author does not authorise rework", async () => {
+      const env = awaiting([handoff({}, later(1), mallory)]);
+      const plan = await rework(env);
+      expect(plan).toMatchObject({ ok: false, error: "REWORK_NOT_AUTHORISED" });
+      expect(refused(plan).prerequisite).toMatch(/mallory has read permission/);
+      expect(env.permission.calls).toEqual(["mallory"]);
+    });
+    it("(b) a forged release marker neither changes nor suppresses a release retry", async () => {
+      // An interrupted genuine handoff, then a forged newer record with a different target.
+      const env = live({ labels: ["agent:kavya"], permission: { mallory: "read" } });
+      await applyPlan(repo, await release(env), {
+        run: async (args) => {
+          if (args[1] === "edit") throw new Error("failed");
+          await env.run(args);
+        },
+        query: env.query,
+      });
+      env.s.comments.push(
+        handoff({ outcome: "incomplete", target: "status:ready" }, later(1), mallory),
+      );
+      const retry = accepted(await release(env));
+      expect(retry.facts.target).toBe("status:incomplete");
+      expect(retry.changes.map((c) => c.command.join(" ")).join(" ")).not.toMatch(/status:ready/);
+      expect(retry.notes?.join(" ")).toMatch(/Ignored marker.*mallory has read permission/);
+      // With no genuine record, a forged one cannot turn the release into a silent no-op.
+      const fresh = live({ labels: ["agent:kavya"], permission: { mallory: "read" } });
+      fresh.s.comments.push(handoff({ outcome: "incomplete" }, later(1), mallory));
+      const plan = accepted(await release(fresh, { note: "n" }));
+      expect(plan.changes.map((c) => c.step)).toContain("comment");
+      // Nor can a forged claim marker suppress the claim comment.
+      const claimed = live({ labels: ["agent:kavya"], permission: { mallory: "read" } });
+      const op = `<!-- github-triage:claim:${createHash("sha256")
+        .update(JSON.stringify([repo, 7, "kavya"]))
+        .digest("hex")
+        .slice(0, 16)} -->`;
+      claimed.s.comments.push({ body: op, createdAt: later(1), ...mallory });
+      const repair = accepted(
+        await planClaim(repo, { number: 7, agent: "kavya" }, claimed.query, claimed.permission),
+      );
+      expect(repair.changes.map((c) => c.step)).toEqual(["comment"]);
+      expect(repair.notes?.join(" ")).toMatch(/mallory/);
+    });
+    it("(c) a genuine write-author marker still works, even under a newer forged one", async () => {
+      expect(await rework(awaiting([handoff({}, later(1))]))).toMatchObject({ ok: true });
+      const env = awaiting([
+        handoff({}, later(1)),
+        handoff({ agent: "other", outcome: "incomplete" }, later(2), mallory),
+      ]);
+      const plan = accepted(await rework(env));
+      expect(plan.notes?.join(" ")).toMatch(/mallory/);
+      // Maintain and admin carry the same authority as write.
+      for (const level of ["maintain", "admin"] as const)
+        expect(await rework(awaiting([handoff({}, later(1))], { kavya: level }))).toMatchObject({
+          ok: true,
+        });
+      // An app or bot account has none, whatever its permission.
+      const bot = { author: { __typename: "Bot", login: "github-actions" } };
+      expect(await rework(awaiting([handoff({}, later(1), bot)]))).toMatchObject({
+        ok: false,
+        error: "REWORK_NOT_AUTHORISED",
+      });
+    });
+    it("(d) a marker edited by a non-writer is refused; an unknown editor is unverified", async () => {
+      const edited = (editor: { __typename: string; login: string } | null) =>
+        awaiting([handoff({}, later(1), { lastEditedAt: later(2), editor })]);
+      expect(await rework(edited(mallory.author))).toMatchObject({
+        ok: false,
+        error: "REWORK_NOT_AUTHORISED",
+        prerequisite: expect.stringMatching(/editor mallory has read permission/),
+      });
+      expect(await rework(edited(null))).toMatchObject({ ok: false, error: "MARKER_UNVERIFIED" });
+      // The author's own edit keeps its authority.
+      expect(await rework(edited(by().author))).toMatchObject({ ok: true });
+    });
+    it("(e) a failed or rate-limited permission lookup is unknown and refused", async () => {
+      const env = awaiting([handoff({}, later(1))], { kavya: "unknown" });
+      const plan = await rework(env);
+      expect(plan).toMatchObject({ ok: false, error: "MARKER_UNVERIFIED" });
+      expect(refused(plan).prerequisite).toMatch(/a maintainer must re-post or confirm/);
+      // The real lookup turns every failure into unknown, through the injected REST boundary.
+      const failures: Rest[] = [
+        async () => ({ status: 403, body: { message: "API rate limit exceeded", status: "403" } }),
+        async () => ({ status: 404, body: { message: "Not Found", status: "404" } }),
+        async () => ({ status: null, body: null }),
+        async () => {
+          throw new Error("network");
+        },
+        async () => ({ status: 200, body: { permission: "write", user: { login: "someone" } } }),
+        async () => ({ status: 200, body: { permission: "weird" } }),
+      ];
+      for (const rest of failures)
+        expect(await permissionLookup(repo, rest)("kavya")).toBe("unknown");
+      const unknown = await rework(
+        awaiting([handoff({}, later(1))]),
+        permissionLookup(repo, failures[0]),
+      );
+      expect(unknown).toMatchObject({ ok: false, error: "MARKER_UNVERIFIED" });
+      // An interrupted release retry is refused too, never repaired on unverified intent.
+      const retry = live({ labels: ["agent:kavya"], permission: { kavya: "unknown" } });
+      retry.s.comments.push(
+        handoff({ outcome: "incomplete", target: "status:incomplete" }, later(1)),
+      );
+      expect(await release(retry)).toMatchObject({ ok: false, error: "MARKER_UNVERIFIED" });
+    });
+    it("(f) a done marker recorded for another claim time does not authorise rework", async () => {
+      const env = awaiting([handoff({ claimedAt: "2026-11-12T08:00:00.000Z" }, later(1))]);
+      expect(await rework(env)).toMatchObject({ ok: false, error: "REWORK_NOT_AUTHORISED" });
+    });
+    it("(g) permissions are cached per run: one request per distinct author, never reused", async () => {
+      const paths: string[] = [];
+      const rest: Rest = async (path) => {
+        paths.push(path);
+        return {
+          status: 200,
+          body: path.includes("/kavya/")
+            ? { permission: "write", role_name: "maintain", user: { login: "kavya" } }
+            : { permission: "read", role_name: "read", user: { login: "mallory" } },
+        };
+      };
+      const comments = [
+        handoff({}, later(1)),
+        handoff({ agent: "other" }, later(2), mallory),
+        handoff({ agent: "other" }, later(3), mallory),
+      ];
+      const first = await rework(awaiting(comments), permissionLookup(repo, rest));
+      expect(first).toMatchObject({ ok: true });
+      expect(paths).toEqual([
+        `repos/${repo}/collaborators/mallory/permission`,
+        `repos/${repo}/collaborators/kavya/permission`,
+      ]);
+      // A new run asks again: nothing is remembered between runs.
+      await rework(awaiting(comments), permissionLookup(repo, rest));
+      expect(paths).toHaveLength(4);
     });
   });
 });
