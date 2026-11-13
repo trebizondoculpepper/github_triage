@@ -6,6 +6,10 @@ Research #78, 2026-11-13. **Protocol ready; empirical results pending.** No mode
 
 Follow [the proportionate-research instructions](../design/research-stages.md). Initial plausibility/preparation is capped at roughly one hour of agent time and can use a capable agent. The original narrow proof of concept has a plausibility bar; this later study of feasibility/practicality/adherence must not block it. Repetitive trials should be handed to a cheaper agent after plausibility review. A possible $20 experiment cap is for later agreement, not approval to spend now. Counts below are evaluation proposals, not an initial-stage acceptance requirement.
 
+## Prerequisite plausibility, not bulk trials
+
+The owner requested a bounded [scenario-based rule-engine suite](../design/rule-scenario-plausibility.md) before automated bulk agent evaluation. That suite checks what the rules recommend for PR/implementation/estimation choices and their fact/rule explanations. It is not the repeated A/B agent-adherence study below, does not require paid model calls and must not be blocked by the later model/budget decision. Its result is basic decision-system plausibility, not proof that reasons improve agent behavior.
+
 ## Question and hypotheses
 
 Does adding reasons to otherwise identical workflow rules improve observable agent behavior? The primary contrast is A (rules) versus B (same rules plus reasons). Hypotheses: B reduces violations or improves recovery; alternatively it has no benefit, adds cost, or encourages invented exceptions. These are competing hypotheses, not conclusions.

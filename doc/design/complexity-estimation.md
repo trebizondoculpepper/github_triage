@@ -1,6 +1,8 @@
-# Repository-relative complexity: initial guidance and rollout
+# Repository-relative complexity using labels
 
-Owner-approved architecture, merged in PR #114. Focused implementation tickets are design-ready; native blockers and current ownership still govern pickup. The first delivery is complexity only: optional T-shirt estimation using bundled guidance, native GitHub storage and CLI/MCP help. Repository-history recalibration is also deferred until estimates exist. Designer escalation, automatic splitting and new ranking weights are not decided here. No fields, labels or runtime features are created by this document.
+## Why and scope
+
+Owner decision: complexity is stored only in repository issue labels. This avoids account-wide native-field setup and field-specific authorization. No one uses the earlier field backend: remove it without migration, dual-backend configuration or compatibility machinery. Complexity remains enabled by default, with an explicit repository opt-out. This contract supersedes field-storage/setup requirements in the earlier complexity tickets and PR #114; it does not claim the replacement implementation is shipped yet.
 
 ## Default complexity guidance
 
@@ -19,50 +21,53 @@ These are proposed retrospective anchors, not measured effort or elapsed-time fa
 
 Store stable reference tickets and a guidance version in repository-specific calibration. Initially use this bundled structural rubric when a repository lacks anchors, stating that local calibration is incomplete. Do not hard-code this repository's ticket numbers into implementation rules or use its anchors as another repository's benchmarks. A later maintenance feature can review calibration against actual delivered scope and surprises, not waiting time, review count or an agent's personal speed. Initial delivery does not require historical estimates, repository anchors or that maintenance feature. Scope changes can justify re-estimation; unchanged commits do not require repeated estimates.
 
-## Repository setup and configuration diagnostics
+## Label representation and collection
 
-Use [repository configuration](repository-configuration.md), mediated by `config get/set/list/help`; agents do not edit the configuration file. Complexity defaults to enabled. Disabling it is an explicit repository opt-out and suppresses its estimation queue and field diagnostics, without deleting stored estimates or mappings.
+Recognized sizes are `complexity:XS`, `complexity:S`, `complexity:M`, `complexity:L`, `complexity:XL`, `complexity:XXL`. Create canonical uppercase suffixes and compare existing names case-insensitively, matching GitHub label identity. Use a shared registered classifier in estimation, briefings and Ticket Doctor, not copied per-command logic. Only these six size labels are managed; unrelated labels remain untouched.
 
-Setup first reads the effective enablement state. When enabled, discover compatible fields and prompt the operator to reuse/select or create one; explain its actual ownership and visibility before a shared change. Never silently create a field just because the default is enabled. Unattended execution must supply an explicit selection/creation decision, or return an actionable setup-required result without hanging. Persist the selected field through the same configuration service after verifying compatibility. A failed local save after remote creation reports the created identifier and recovery rather than claiming complete setup or duplicating it on retry.
+With complete label evidence: no recognized size is unestimated, one is estimated, and more than one is a conflict requiring inspection. Incomplete or inaccessible labels mean unknown, never unestimated. A conflict is not resolved by choosing the largest, smallest or newest label. Ordinary read-only commands never create labels or change ticket state. Native issue fields and provenance comments are not competing authorities for current size; the recognized label set is authoritative. The provenance can be stale when a manual label change disagrees with it.
 
-Read-only Ticket Doctor reports missing mapping, inaccessible/deleted field, incompatible type/options or unsupported native API capability when enabled. Show evidence, distinguish unavailable from absent, and provide implemented setup/config recovery syntax. Local doctor may reuse the validator but does not create a second owner for configuration rules. Unestimated tickets are normal queue candidates, not configuration errors. Missing mapping does not disable other triage capabilities.
+## Recording and revising an estimate
 
-GitHub currently documents issue-field definitions at user/organization scope, not repository-owned definitions. Setup offers only verified supported scopes: repository settings and calibration remain repository-specific, and the prompt must explain any owner-wide effect. If repository-owned fields are unavailable, say so; do not silently substitute labels or a Project field.
+Keep the explicit `estimate N --size SIZE --rationale TEXT [--assumption TEXT]...` operation. Require a justification for the newly assigned size. An agent may disagree with another estimate and replace it; it need not explain or defend the prior agent's reasoning. Do not require a separate change-reason argument or mandatory agreement from the previous estimator. If an optional expected-old-value guard is retained, it is an explicit caller choice, never required merely because a prior estimate exists.
 
-## Native storage and repository meaning
+The operation reads fresh repository/ticket labels, ensures the requested repository label exists, applies it and removes other recognized complexity size labels from that ticket. Create only the requested missing label during this explicit write; no separate setup or complete pre-created label set is required. Reuse existing definitions without silently changing their colors/descriptions. An already-exists race is handled by fresh verification. Preserve all unrelated labels and never replace the complete label collection from a stale snapshot.
 
-Use native GitHub fields, never size labels as a silent fallback. The initial field is Complexity (single-select, XS through XXL). GitHub's [issue-field documentation](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/managing-issue-fields) describes customizable single-select fields for user/organization-owned repositories. Definitions live at the account/organization level; the repository profile supplies calibration and field-ID mapping. Shared vocabulary does not imply cross-repository size equivalence. A GitHub Project board is not required for the repository-relative concept.
+Explicit recording may replace a conflicting set: history records all observed previous sizes, the assigned size, rationale, assumptions, available estimator attribution, guidance version, repository revision and timestamp. No responsibility for another agent's earlier judgment is implied. Read-only conflict detection itself never repairs anything. Use the established provenance-comment mechanism with an intentionally versioned label-backed record, not field IDs. Identical retries return the existing stored provenance; same-size updates with a materially different rationale can record a new assessment.
 
-Select field IDs explicitly, confirm options/visibility/read-write API support, and report unsupported or inaccessible configuration clearly. Do not automatically alter account-wide options or private/public visibility. No Project-field copy or label duplicate becomes a competing source of truth. The bounded native-field discovery/setup slice must establish actual API capability before implementation promises a write path.
+Label creation, label changes and the comment can be separate remote operations. Report partial completion precisely, verify the resulting label set and avoid destructive rollback. A concurrent contradictory size or unreadable final state is conflict/unknown, not successful completion; do not promise an atomic GitHub transaction or absolute compare-and-swap guarantee. Retries re-read facts and avoid duplicate comments where recorded evidence establishes the same completed operation. Never acquire a claim, clear blockers, change readiness or reserve future implementation as a side effect.
 
-Record rationale, assumptions, evidence/reference tickets, estimator identity when available, repository revision and guidance version alongside the native values through an explicit, documented provenance mechanism. Preserve other agents' estimates; a stale read must not silently overwrite a newer result. Expose partial results honestly if recording the native complexity value and its provenance requires multiple remote steps. Missing identity does not authorize inventing a name or changing local identity files.
+## Permissions and diagnostics
+
+Reuse the authenticated GitHub boundary. Applying labels and creating a missing repository label still require the appropriate GitHub permissions. Report denied/unknown access with the requested operation and useful recovery; no account-level native-field permissions or automatic credential refresh is required. Missing size-label definitions are normal until the first explicit estimate, not a repository setup defect.
+
+Keep general local Doctor diagnostics for runtime, authentication and checkout, and keep the unresolved local-identity reconciliation (#64) independent. Remove the complexity field/mapping/creation-permission Doctor work (#150). Ticket Doctor may report conflicting recognized size labels and incomplete label evidence through the shared classifier, without repairing them or making unestimated tickets errors.
 
 ## Estimation as implementer work
 
-Keep separate eligibility for implementation and estimation. Native blockers prevent implementation pickup but do not, by themselves, prevent sizing. Estimate conditionally: “M if blocker B supplies the documented API; waiting excluded.” If the unresolved choice changes scope materially, report alternatives or inability to size confidently. Do not clear blockers, claim readiness, reserve implementation or split tickets merely by recording an estimate.
+Keep separate eligibility for implementation and estimation. Open native blockers prevent implementation pickup but do not by themselves prevent sizing. Estimate the full deliverable conditionally on stated prerequisites, excluding waiting. Materially unknown scope is reported as alternatives or unknown rather than a fabricated size.
 
-Normal work selection advances attention/PR follow-up, active contributions and eligible implementation first; estimation/refinement is useful when there is no higher-value work available, or on explicit request. The estimation queue includes unestimated and meaningfully stale estimates, including blocked tickets. It must not inherit the implementation-ready-only filter. Queue inspection and explicit estimate-recording operations acquire no claim and do not reserve future implementation. Keep the existing one-active-contribution rule: automatic work selection offers estimation only after higher-priority active work, and never silently acquires a second claim. A distinct long-lived estimation-claim lifecycle would require a separate future design; it is not required for this bounded capability.
+Preserve the optional queue and `--estimate` view. With complexity enabled, it contains known-unestimated and meaningfully stale assessments; include blocked tickets while preserving their implementation-ineligible status. Explain conflicts as inspection candidates, distinct from ordinary unestimated work. Disabled complexity suppresses the queue without deleting labels or history. Read sizes from the ordinary collected labels: no extra native-field queries, field mapping, owner-wide discovery or account setup.
 
-## Help and MCP guidance
+Default work selection keeps addressed attention, actionable PR follow-up, current contributions and eligible implementation ahead of optional estimation. The queue/record operation acquires no claim. This change does not add size-weighted pickup scores, mandatory estimates, automatic splitting or designer escalation. Explicit oldest/newest ordering retains its existing semantics and all relevant metadata stays visible within output budgets.
 
-Bundle the initial complexity rubric with the estimation capability. Estimation --help and the equivalent MCP-discoverable help/guidance surface expose the same defaults, examples, meaning of blocked-ticket assumptions and native-field prerequisites. A short tool description points to full local guidance without a general documentation search. Never present proposed commands as installed or misuse stderr/text on MCP protocol stdout.
+## Help, configuration and output
 
-Use one versioned guidance definition shared by the renderers; do not maintain separate CLI/MCP prose. Rules-system overrides are a future extension: no custom rule language, per-repository executable policy or mandatory designer escalation is required for the initial capability. Repository reference anchors can vary while the initial structural default remains discoverable.
+Keep one versioned XS–XXL guidance definition shared by CLI and MCP surfaces; update its storage/prerequisite text to labels. Preserve `complexity.enabled`; remove `complexity.fieldId` and native-field setup options/routes from the registered configuration/command surface. No backend selector or field conversion is introduced. Old unused keys are unsupported configuration with a clear command-mediated correction if encountered, not an automatic migration project. Review schema versions when removing public field-backed properties: introduce the appropriate new version for breaking shapes rather than silently change an existing schema. CLI/MCP share evidence and semantics; do not advertise unimplemented mutation tools.
 
-## Focused delivery slices
+Read-only output distinguishes estimated/unestimated/stale/conflicting/unknown as applicable, with complete label evidence and omission notices. Refresh README, usage, command help, error recovery, installed archive smoke and fixtures alongside their behavior slices. No field-specific scopes, setup command or retired integration is a user prerequisite.
 
-The repository configuration epic supplies the typed/migratable storage service and `config get/set/list/help`. Complexity delivery then comprises bundled sizing/help guidance, native-field discovery and prompted setup, Ticket Doctor configuration checks, recording estimates, and an optional estimation queue with compact visibility. Each slice has its own justification, acceptance and dependency links; reviewed architecture must land before behavior changes.
+## Focused delivery and future work
 
-Repository recalibration is separately deferred until estimates exist. It can compare estimated and delivered scope within a repository and propose revised guidance/benchmarks for review, without silently rewriting historical estimates. Designer escalation, automatic splitting and new ranking weights are not part of these slices.
+The shared label classifier/read-side slice (#151) can be implemented and tested independently, but it must not activate label-backed queue/briefing reads while the writer still uses fields. Keep the existing read route until #152 switches both production reads and writes to labels together, consuming the prepared classifier/reader. Do not introduce a user-visible backend selector, dual active authority or migration. Remove obsolete field modules, configuration and help only after both read/write replacements are delivered, so intermediate main remains buildable. Each ticket has its own Why, acceptance and native implementation dependencies. This documentation must merge before behavior changes.
 
-## Delivery tracking
+Historical recalibration (#123) stays deferred until labels and estimates provide sufficient repository-specific examples. Guidance defaults work without historical benchmarks. Closed field-era tickets remain delivery history and are superseded by the replacement tickets; no issue is reopened merely to erase completed work. No field migration or compatibility backend is in scope.
 
-- [115](https://github.com/trebizondoculpepper/github_triage/issues/115) — Epic: repository configuration mediated by the triage tool
-- [116](https://github.com/trebizondoculpepper/github_triage/issues/116) — Repository configuration: typed storage, defaults and schema migrations
-- [117](https://github.com/trebizondoculpepper/github_triage/issues/117) — Repository configuration: config get, set, list and help
-- [118](https://github.com/trebizondoculpepper/github_triage/issues/118) — Complexity estimation: bundle XS–XXL guidance and expose it through help
-- [119](https://github.com/trebizondoculpepper/github_triage/issues/119) — Complexity setup: discover a native field and prompt before configuring it
-- [120](https://github.com/trebizondoculpepper/github_triage/issues/120) — Ticket Doctor: diagnose repository complexity configuration
-- [121](https://github.com/trebizondoculpepper/github_triage/issues/121) — Complexity estimation: record a size with rationale and assumptions
-- [122](https://github.com/trebizondoculpepper/github_triage/issues/122) — Complexity estimation: optional implementer queue and briefing visibility
-- [123](https://github.com/trebizondoculpepper/github_triage/issues/123) — Deferred: recalibrate repository complexity guidance from recorded estimates
+## Replacement delivery tracking
+
+- #151: shared label classification and queue/briefing reads.
+- #152: explicit label-backed recording and current-size justification.
+- #153: remove retired field modules, settings, diagnostics and help after the read/write replacements.
+- #154: independent scenario-based rule plausibility suite.
+
+Field-era work remains closed history; #150 is retired rather than implemented. General Doctor cleanup #64 remains separate.

@@ -48,3 +48,7 @@ The owner accepts a recent Node requirement: [the current Node LTS](runtime.md),
 [Repository-relative complexity estimation](complexity-estimation.md) records default T-shirt guidance and proposed small delivery slices. Native-field integration and estimation queues are not implemented or implicitly approved. Historical recalibration is later work; risk assessment belongs in a separate change set.
 
 [Repository configuration](repository-configuration.md) defines the proposed repository-only config command boundary, defaults and migration responsibilities.
+
+[Labels-only complexity](complexity-estimation.md) supersedes native-field setup and permission work. The recognized labels are the only size authority; no field migration is required.
+
+[Rule scenario plausibility](rule-scenario-plausibility.md) defines the small decision/explanation fixture suite before bulk agent trials. It is independent of production labels-only delivery.

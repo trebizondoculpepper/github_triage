@@ -20,7 +20,7 @@ Team view lists explicit named-agent claims, linked PR state, latest ticket/PR a
 
 Diagnose intended project, selected harness/server entry, supported local configuration parse/identity/name, triage_role, supported role, Git ignored versus already tracked configuration, and missing runtime/gh access as separate checks. No repairs, login, identity creation, role writes, hooks or Git tracking changes. Return actionable in-band results, especially for hosts discarding stderr. Missing/ambiguous detection is explicit. Reuse the standalone identity resolution contract. Diagnose unavailable or unimplemented local resolution explicitly; no external service is required.
 
-Implementation defaults (routine, under this contract): the command is `doctor`; check IDs, statuses (`ok`/`missing`/`invalid`/`access`/`unsupported`/`unknown`) and exit codes are documented in `doc/usage.md`. Until a TOML parser is approved (#25), the `agent-inbox.toml` entry, name and `triage_role` checks report `unsupported` rather than hand-parsing.
+Implementation defaults: the command is `doctor`; stable check IDs, statuses and exit codes are documented in `doc/usage.md`. Existing local-identity checks are under design reconciliation in #25/#64; do not remove a local identity file or its checks merely because the external service/check-in requirement was withdrawn. Explicit agent/role selection remains supported. No external service or communications check-in is required; the persistent local lookup/storage contract must be reconciled separately. The labels-only complexity decision retires field-specific permission/setup diagnostics; basic authentication is still not proof of permission for an explicit label mutation. Such mutations report access failures in their own operation.
 
 ## #66: Ticket Doctor v1
 
@@ -41,3 +41,7 @@ Fixtures cover current versus stale SHA, cancelled/no-log CI, multiple blockers,
 ## #39: transferred issue inspection
 
 Use `--include-transferred` to opt into transferred-out work in recommendations; default excludes it from actionable local work. Explicit `--issue N` always diagnoses its transfer when GitHub supplies authoritative transfer/redirect evidence, showing original and destination URLs. Do not silently take destination ownership or infer transfer from a missing/forbidden response. Missing, inaccessible and moved are distinct; if evidence cannot distinguish them, report unavailable/unknown with a next inspection command. Preserve origin repository and destination identity in JSON and cross-repository links. Inject redirects/transfer evidence in tests; no live transfer or automatic issue rewrite. Document bounded fallback reads rather than generic GraphQL failure alone.
+
+## Complexity label consistency
+
+Follow [complexity-estimation.md](complexity-estimation.md): conflicting recognized size labels are an inspection finding, incomplete label evidence stays unknown, and no size is an ordinary unestimated ticket. Read-only doctors never create labels or repair conflicts. Native field mappings, definition discovery and creation-permission probes are removed by the labels-only replacement; no missing-label-definition setup warning is needed.
