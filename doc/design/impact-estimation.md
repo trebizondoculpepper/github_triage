@@ -126,7 +126,7 @@ Provenance read authority follows the #215 rule (#212 through `TrustDecision`, a
 
 ## Reading: states, staleness and unknowns
 
-The shared reader returns, per ticket and per metric, one paired state, which is exactly the `rankedActions` vocabulary from blended-action-queues.md:
+The shared reader returns, per ticket and per metric, one paired state, which is exactly the `rankedActions` vocabulary from blended-action-queues.md. This vocabulary applies only inside new properties (`assessments` on report subjects, and `rankedActions` items); it never replaces the existing `EstimateState` values (`estimated`, `unestimated`, `stale`, `conflicting`, `unknown`) carried by `complexity.state` and the estimation report (see [Side-by-side display](#side-by-side-display) for the mapping):
 
 | State        | Condition (complete label evidence unless stated)                                                                            |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------- |
@@ -138,7 +138,7 @@ The shared reader returns, per ticket and per metric, one paired state, which is
 | `unknown`    | Labels truncated, comment history incomplete, or provenance author permission unknown                                        |
 | `disabled`   | `impact.enabled` is false                                                                                                    |
 
-A label with no github-triage provenance (set by hand) is `current` with the reason "no recorded rationale", matching complexity today. `size` is non-null only for `current` and `stale`. The existing internal classifier lumps invalid into `conflicting`; the paired projection separates them using its `unrecognized` list, for both metrics. Missing evidence is `unknown` or `unassessed`, never a default size. Changes to dependants do not make an impact estimate stale automatically: no graph traversal.
+A label with no github-triage provenance (set by hand) is `current` with the reason "no recorded rationale", matching complexity today. `size` is non-null only for `current` and `stale`. The existing classifier lumps invalid into `conflicting`, and the existing `complexity.state` keeps doing so; only the new paired projection separates them, using the classifier's `unrecognized` list, for both metrics. Missing evidence is `unknown` or `unassessed`, never a default size. Changes to dependants do not make an impact estimate stale automatically: no graph traversal.
 
 ## Invalid labels and Ticket Doctor
 
@@ -168,15 +168,42 @@ A focused designer view equivalent to `--estimate` is not required; it may be ad
 
 ## Side-by-side display
 
-Shared read facts, computed once per snapshot from collected labels and comments, feed both queue and display. Each ticket in compact and expanded text/JSON, and each `rankedActions` item, carries:
+Shared read facts, computed once per snapshot from collected labels and comments, feed both queue and display.
+
+**Existing fields are unchanged.** Compact report subjects already expose `complexity` as an `EstimateEntry | null` (`src/estimation.ts`: `number`, `title`, `url`, `createdAt`, `size`, `state`, `recorded`, `implementation`, `reasons`), with `state` in `estimated | unestimated | stale | conflicting | unknown`, and `null` when estimation is disabled or the subject is not an open issue. The expanded and compact reports expose the same entries through the `estimation` object (`queue.items`, `conflicts`, `entries`). Its name, type, fields, state values and null semantics stay exactly as they are, on the CLI JSON and on MCP results that return the same report.
+
+**New property: `assessments`.** Each compact and expanded report subject gains one new, separately named property holding the paired view:
 
 ```json
-"complexity": {"state": "current", "size": "S"},
-"impact":     {"state": "unassessed", "size": null},
-"unlocks": 2, "unlocksUnknown": []
+"assessments": {
+  "impact":     {"state": "unassessed", "size": null, "provenance": null},
+  "complexity": {"state": "current", "size": "S", "provenance": "https://github.com/owner/name/issues/7#issuecomment-1"},
+  "unlocks": 2,
+  "unlocksUnknown": []
+}
 ```
 
-Text renders one fixed order, impact first because it is the benefit question: `impact L · complexity S · unlocks at least 2`. Non-current states render as words: `impact unassessed`, `impact stale (was L)`, `impact conflict`, `impact invalid`, `impact unknown`, `impact disabled`. Detail views link the newest trusted provenance comment for each metric. Addition is additive; no existing field changes type, so no schema version bump is needed. If an existing field must change shape, introduce a new schema version instead. No extra collection: labels and comments already arrive in the snapshot.
+`state` uses the paired vocabulary above, `size` is non-null only for `current` and `stale`, and `provenance` is the newest trusted provenance comment URL or null. `rankedActions` items carry the same `complexity`/`impact` pair at top level as already contracted in blended-action-queues.md; that object is itself new, so those keys collide with nothing.
+
+`assessments` was chosen over a sibling `impact: EstimateEntry` field because it is the smaller, clearer additive change. Mirroring `EstimateEntry` for impact would either copy a vocabulary that cannot express `invalid` or `disabled`, or give two same-shaped fields different state meanings; it would also duplicate per-ticket queue fields (`implementation`, `recorded`) the paired view does not need. One new object keeps the old vocabulary in the old field and the new vocabulary in the new one, and puts both metrics side by side for presentation.
+
+Mapping from the paired state to the existing `complexity.state`, for consumers reconciling the two (the existing field is computed as today, not from this table):
+
+| `assessments.*.state` | Existing `EstimateState`                                           |
+| --------------------- | ------------------------------------------------------------------ |
+| `current`             | `estimated`                                                        |
+| `stale`               | `stale`                                                            |
+| `unassessed`          | `unestimated`                                                      |
+| `conflict`            | `conflicting`                                                      |
+| `invalid`             | `conflicting` (the existing classifier does not separate it)       |
+| `unknown`             | `unknown`                                                          |
+| `disabled`            | no entry: `complexity` is `null` and estimation `status: disabled` |
+
+A paired `stale` is computed with trusted provenance (#215) and may therefore differ from the existing field's staleness in edge cases such as untrusted provenance; the existing field is not changed to match.
+
+Text renders one fixed order, impact first because it is the benefit question: `impact L · complexity S · unlocks at least 2`. Non-current states render as words: `impact unassessed`, `impact stale (was L)`, `impact conflict`, `impact invalid`, `impact unknown`, `impact disabled`. Existing text renderings of complexity (for example `(size unknown)` in compact text) may be replaced by this line, since text is not a schema. Detail views link the newest trusted provenance comment for each metric.
+
+Because `assessments`, `impactEstimation` and `rankedActions` are new properties and no existing field changes name, type, state values or null semantics, the change is additive and no schema version bump is needed. If an implementation finds it must change an existing field's shape, it introduces a new schema version instead. No extra collection: labels and comments already arrive in the snapshot.
 
 ## Easy-win heuristic placement
 
@@ -208,7 +235,7 @@ Injected snapshots, clock, filesystem and `TrustDecision`; no live writes. Asser
 
 - **#245, record and read primitives.** Metric descriptor; impact label helpers and classifier through the shared parameterised functions; `impactGuidance` v1 data; `estimate --metric impact` with all recording rules; `impact-estimate v1` provenance writer/parser; trusted-provenance reader producing the paired states; `impact.enabled` config key; Ticket Doctor impact findings and suggestion extras. Tests: races, changed labels, failed comment, missing permission, retries, cross-metric isolation, trust outcomes. No queue or display changes beyond what Doctor needs.
 - **#246, designer guidance and queue integration.** Render `impactGuidance` in CLI and MCP help from the one definition; `assess-impact` candidates and inspection actions registered with the #248 shared policy; designer NEXT STEPS rendering; `impactEstimation` report object. Tests: role/help parity, absent/conflict/invalid/unknown labels, disabled, output bounds, old cache compatibility. Implementer integration is #259; installed parity is #260.
-- **#247, side-by-side facts and display.** One shared paired-facts reader per snapshot (both metrics plus unlock utility) used by queue and display; text and JSON rendering, provenance links, vocabulary separation from unlock utility. Presentation only; no scoring. Tests: label isolation, omission budgets, fixture/schema parity, L/S, S/L and L/L.
-- **#248, shared blended policy.** Bands 4, 5 (with both cross-role boosts), 6 and 7 as above, on top of the existing bands and keys, with `rankedActions` and reason codes, consumed by #246 and #259. Pure comparator over injected facts; no collection inside it. Tests: the blended scenario suite plus the paired-state edge cases in this document.
+- **#247, side-by-side facts and display.** One shared paired-facts reader per snapshot (both metrics plus unlock utility) used by queue and display; the new `assessments` property on compact and expanded report subjects (CLI JSON and MCP), text rendering, provenance links, vocabulary separation from unlock utility. Existing `complexity` and `estimation` fields stay byte-compatible. Presentation only; no scoring. Tests: label isolation, omission budgets, fixture/schema parity (existing `complexity` entries unchanged, including `conflicting` for invalid labels), L/S, S/L and L/L.
+- **#248, shared blended policy.** Bands 4, 5 (with both cross-role boosts), 6 and 7 as above, on top of the existing bands and keys, with `rankedActions` and reason codes, consumed by #246 and #259. Pure comparator over injected facts (the paired states from `assessments`, never the legacy `EstimateState`); no collection inside it; existing `actions`/`role.next` keep their target-only shape. Tests: the blended scenario suite plus the paired-state edge cases in this document.
 
 #245 lands first. #247 depends on #245. #248 depends on #247 (and the existing #258 contract). #246 depends on #245 and #248.
