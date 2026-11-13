@@ -10,6 +10,10 @@ Owner decision: application code in `src/` and maintained executable research ex
 
 Follow [the TypeScript architecture and migration contract](doc/design/typescript.md) (#91). Source is strict TypeScript, development uses the `tsx` devDependency, and installed consumers run `dist/cli.mjs`. A test enforces the language boundary in `src/`, `scripts/` and `doc/reports/examples/`: any `.js`, `.mjs`, `.cjs`, `.sh`, `.bat`, `.cmd`, `.ps1` or `.py` file there must be listed in `LANGUAGE_EXCEPTIONS` (`src/language-policy.ts`), and nothing in `src/` or `scripts/` may import a listed file. To add one, append an entry naming the exact file with its purpose, integration boundary, runtime requirements, supported platforms and validation, and justify it in the PR. Follow the [current-LTS runtime policy](doc/design/runtime.md) (#108): older-Node compatibility is not a migration requirement. Existing package engines and CI remain implementation facts until that follow-up ships.
 
+## Configuration and identity
+
+Prefer TOML for project-owned configuration. The local root-level `agent-inbox.toml` persists per-agent names and triage_role and must remain Git-ignored/non-versioned. Reuse existing entries and preserve unrelated keys; no service or communications check-in is required. Use config/setup commands rather than edit identity/settings directly. The existing repository JSON settings are a current implementation fact pending their separate TOML conversion; npm manifests and workflow YAML retain their required formats. Follow doc/design/identity.md and doc/design/configuration-formats.md.
+
 ## Architecture and scope
 
 - Run the TypeScript CLI from source with `npm run triage` (tsx); use Vite+ for checks/tests/builds.

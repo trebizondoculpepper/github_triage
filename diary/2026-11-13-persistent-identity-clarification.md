@@ -1,0 +1,5 @@
+# Urgent persistent identity clarification
+
+The owner confirmed retaining/creating root-level agent-inbox.toml as ignored, non-versioned local persistence, one entry per logical agent with name and triage_role (designer/implementer). Existing role and unknown values are preserved. Config uses verified harness/root/entry selection and explicit fallback, without a service/check-in requirement. This supersedes the mistaken interpretation that the local file itself should be retired.
+
+Inspected the reference lookup/detector source without publishing private values or infrastructure. Recommended smol-toml after official metadata/readme comparison and a bounded synthetic round-trip test; documented comment/formatting and type-preservation limits. Parser choice is delegated to implementation. TOML is preferred for project-owned settings; converting the existing shared JSON store is separate and cannot block urgent identity work. No production implementation or live identity/config write was performed.
