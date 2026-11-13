@@ -493,7 +493,7 @@ export function foldDelivery(records: ClassifiedRecord[], historyComplete: boole
         fold.ignored.push(`unverified record by ${r.login}, ignored (${r.why})`);
         continue;
       case "foreign":
-        fold.ignored.push(`copied record by ${r.login}, rejected (${r.why})`);
+        fold.ignored.push(`copied record ${id} by ${r.login}, rejected (${r.why})`);
         continue;
       case "unverified":
         priorUnknown = true;
