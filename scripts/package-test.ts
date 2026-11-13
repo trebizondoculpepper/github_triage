@@ -151,7 +151,7 @@ try {
   try {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
-    const want = ["triage_briefing", "triage_dependencies", "triage_issue"];
+    const want = ["triage_briefing", "triage_dependencies", "triage_events", "triage_issue"];
     if (JSON.stringify(names) !== JSON.stringify(want))
       throw new Error(
         `Installed MCP bin listed ${JSON.stringify(names)}, not ${JSON.stringify(want)}.`,
@@ -171,7 +171,7 @@ try {
   if (!mcpHelp.stdout.startsWith("Usage: github-triage-mcp"))
     throw new Error("Installed MCP bin printed no help.");
   console.log(
-    "ok   installed github-triage-mcp completes a stdio round trip (three read-only tools)",
+    "ok   installed github-triage-mcp completes a stdio round trip (four read-only tools)",
   );
   console.log("Package test passed.");
 } finally {

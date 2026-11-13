@@ -1,5 +1,5 @@
 /** Read-only, paginated gh GraphQL collector. Never invokes a mutation or shell. */
-import { nativeFields, completeNative } from "./dependencies.js";
+import { completeNative, isRateLimit, nativeFields, RateLimitError } from "./dependencies.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { Comment, Issue, Page, PullRequest, Reference, Snapshot } from "./types.js";
@@ -63,6 +63,8 @@ export const ghQueryWith =
       // only errors are NOT_FOUND is a valid answer ("no such issue"): callers see null fields.
       const answer = graphqlAnswer(prop(error, "stdout"));
       if (answer) return answer;
+      const limited = rateLimitFailure(prop(error, "stderr"), prop(error, "stdout"));
+      if (limited) throw limited;
       // Do not echo subprocess arguments, stderr, credentials or private API response bodies.
       throw new Error(
         "GitHub query failed. Check gh auth status, repository access and API rate limits.",
@@ -70,13 +72,41 @@ export const ghQueryWith =
     }
     const parsed: unknown = JSON.parse(stdout);
     const errors = prop(parsed, "errors");
-    if (Array.isArray(errors) && errors.length && !graphqlAnswer(stdout))
+    if (Array.isArray(errors) && errors.length && !graphqlAnswer(stdout)) {
+      const limited = rateLimitFailure("", stdout);
+      if (limited) throw limited;
       throw new Error("GitHub returned incomplete query data; no fresh report saved.");
+    }
     const data = prop(parsed, "data");
     if (!isRecord(data))
       throw new Error("GitHub returned incomplete query data; no fresh report saved.");
     return data;
   };
+const text = (value: unknown): string =>
+  typeof value === "string" ? value : Buffer.isBuffer(value) ? value.toString() : "";
+/**
+ * A sanitized RateLimitError when gh's output reports a GitHub rate limit (HTTP 403/429
+ * text or GraphQL RATE_LIMITED errors), else null. Only a bounded retry-after number and a
+ * parsed reset time survive; nothing else from the output is kept.
+ */
+export function rateLimitFailure(stderr: unknown, stdout: unknown): RateLimitError | null {
+  const output = `${text(stderr)}\n${text(stdout)}`;
+  let graphqlLimited = false;
+  try {
+    const errors = prop(JSON.parse(text(stdout)), "errors");
+    graphqlLimited =
+      Array.isArray(errors) && errors.some((e) => prop(e, "type") === "RATE_LIMITED");
+  } catch {
+    // Not JSON: rely on the text discriminator only.
+  }
+  if (!graphqlLimited && !isRateLimit(output)) return null;
+  const after = /retry-after:?\s*(\d{1,6})\b/i.exec(output);
+  const reset = /x-ratelimit-reset:?\s*(\d{9,11})\b/i.exec(output);
+  return new RateLimitError("GitHub query was rate limited; retry after the reported reset.", {
+    retryAfterSeconds: after ? Number(after[1]) : null,
+    resetAt: reset ? new Date(Number(reset[1]) * 1000).toISOString() : null,
+  });
+}
 /** Uncancellable production GraphQL boundary used by the CLI. */
 export const ghQuery: Query = ghQueryWith();
 /** Data from a GraphQL response whose errors are all NOT_FOUND, else null. */
@@ -234,7 +264,7 @@ const prFields = `${common} headRefOid headRefName baseRefName isDraft mergeable
  closingIssuesReferences(first:100){nodes{number url} ${info}}
  reviewThreads(first:100){nodes{isResolved isOutdated comments(first:1){totalCount nodes{${comment}} ${info}}} ${info}}
  reviews(first:100){nodes{body url author{login} state} ${info}}
- commits(last:1){nodes{commit{statusCheckRollup{state contexts(first:100){nodes{__typename ... on CheckRun{name status conclusion detailsUrl} ... on StatusContext{context state targetUrl}} ${info}}}}}}`;
+ commits(last:1){nodes{commit{statusCheckRollup{state contexts(first:100){nodes{__typename ... on CheckRun{name status conclusion detailsUrl databaseId} ... on StatusContext{context state targetUrl}} ${info}}}}}}`;
 
 /** Cursor pagination also detects a broken/repeating cursor instead of spinning forever. */
 export async function pages<T>(

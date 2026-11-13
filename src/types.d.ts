@@ -19,6 +19,8 @@ export type Check = {
   state?: string;
   detailsUrl?: string | null;
   targetUrl?: string | null;
+  /** CheckRun database id: a stable per-run identity (StatusContexts have none). */
+  databaseId?: number | null;
 };
 export type NativeNode = {
   number: number;

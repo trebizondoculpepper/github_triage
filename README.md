@@ -95,7 +95,9 @@ Briefings and diagnostic commands are read-only. Explicit commands such as `clai
 
 ## MCP server (read-only)
 
-The package also installs `github-triage-mcp`, a stdio MCP server exposing three read-only tools over the same services as the CLI: `triage_briefing`, `triage_issue` and `triage_dependencies`. Each returns readable text plus a versioned envelope whose `result` is the CLI's `--json` output. It never changes GitHub. Contract: [doc/design/mcp.md](doc/design/mcp.md).
+The package also installs `github-triage-mcp`, a stdio MCP server exposing read-only tools over the same services as the CLI: `triage_briefing`, `triage_issue`, `triage_dependencies` and `triage_events`. Each returns readable text plus a versioned envelope; for the first three, `result` is the CLI's `--json` output. It never changes GitHub. Contract: [doc/design/mcp.md](doc/design/mcp.md).
+
+Polling is off by default. `github-triage-mcp --repo owner/name --poll [--poll-interval-minutes N]` (default 30) polls that one repository only while the server runs and records deduplicated events (attention requested, review feedback, verification problems, PR follow-up candidates, newly eligible work) that `triage_events` reads with an opaque cursor. The first complete poll is a silent baseline; failed or incomplete polls never replace it. History holds at most 1,000 events or 24 hours, lives only in that process and is lost on exit; each polling process polls separately. Events are inspection candidates, not wake-ups, claims or approval. Contract: [doc/design/polling-events.md](doc/design/polling-events.md).
 
 Generic stdio configuration (install globally first; nothing registers a host automatically):
 
