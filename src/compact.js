@@ -9,6 +9,8 @@ export const ruleMetadata = new Map([
   ]),
   ["question-candidate", "context"],
   ["attention-label", "decisions"],
+  ["design-decision-needed", "decision-needed"],
+  ["design-documentation-needed", "documentation-needed"],
   ["prerequisites-closed", "dependencies"],
   ["ready-prerequisites-unverified", "dependencies"],
   ["blocker-explanation", "dependencies"],
@@ -104,7 +106,16 @@ export function compactBriefing(snapshot, options, expanded) {
         a.target.localeCompare(b.target),
     );
   const sections = Object.fromEntries(
-    ["review", "available", "decisions", "dependencies", "hygiene", "context"].map((name) => [
+    [
+      "review",
+      "available",
+      "decision-needed",
+      "documentation-needed",
+      "decisions",
+      "dependencies",
+      "hygiene",
+      "context",
+    ].map((name) => [
       name,
       bound(
         groups
@@ -204,7 +215,12 @@ export function compactText(report, maxChars = 10000) {
     }
   };
   add("NEXT STEPS", report.actions);
-  for (const [name, section] of Object.entries(report.sections)) add(name.toUpperCase(), section);
+  const titles = {
+    "decision-needed": "DECISION NEEDED",
+    "documentation-needed": "AGREED, NEEDS DOCUMENTATION",
+  };
+  for (const [name, section] of Object.entries(report.sections))
+    add(titles[name] ?? name.toUpperCase(), section);
   // Warnings are always shown, but bounded so they cannot exhaust the text budget alone;
   // JSON output keeps the full list.
   const warnings = report.completeness.warnings;

@@ -2,6 +2,10 @@
 
 The installed CLI needs Node 20+ and authenticated `gh`. Check the existing session with `gh auth status`; the tool reuses it rather than handling tokens. For source development use Node 22+, `npm ci`, and prefix the examples below with `npm run --silent triage --` in place of `github-triage`.
 
+## Designer groups
+
+Two explicit, agent-maintained markers form separate briefing groups: `design:decision-needed` (DECISION NEEDED: an outstanding question or choice) and `design:documentation-needed` (AGREED, NEEDS DOCUMENTATION: a decision already reached that still has to be recorded). Both may be present for different parts of one ticket. The reason shown is the latest comment that names the marker, with its link; with no such comment the reason is reported as unknown. Nothing is inferred from timestamps or authorship, and neither marker is an approval gate.
+
 ## Find work, then inspect evidence
 
 ```sh
