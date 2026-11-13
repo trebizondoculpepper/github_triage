@@ -6,8 +6,10 @@
  * permitted decisions into one ordered list of offered work following the briefing action
  * groups (doc/design/briefings.md): addressed attention, actionable PR follow-up, own active
  * work, eligible pickup, then optional estimation (doc/design/complexity-estimation.md).
- * Each subject (a ticket together with its linked PR) is offered once, in its first matching
- * group, carrying the reasons of every permitted action; all decisions stay for explanations.
+ * Within the work groups each subject (a ticket together with its linked PR) is offered once,
+ * in its first matching group, carrying the reasons of every permitted work action. Estimation
+ * is a distinct optional queue after all work groups, so a subject may appear once there too.
+ * All decisions stay for explanations.
  *
  * Every scenario declares complete synthetic facts and its expectations as data before any
  * evaluation. Checks compare rule IDs, facts, modality and overrides, never English wording.
@@ -210,11 +212,14 @@ export function evaluate(
     .filter((d) => GROUP[d.action] !== undefined && (d.modality === "must" || d.modality === "may"))
     .sort((x, y) => (GROUP[x.action] ?? 0) - (GROUP[y.action] ?? 0));
   // A ticket record carries its linked PR, so the ticket number identifies the whole subject.
-  const bySubject = new Map<number, OfferedItem>();
+  // Estimation is its own queue (complexity-estimation.md), consolidated separately.
+  const queueOf = (a: Action): string => (a === "estimate" ? "estimation" : "work");
+  const bySubject = new Map<string, OfferedItem>();
   for (const d of permitted) {
-    const first = bySubject.get(d.ticket);
+    const subject = `${queueOf(d.action)}:${d.ticket}`;
+    const first = bySubject.get(subject);
     if (!first) {
-      bySubject.set(d.ticket, { ...d, alsoActions: [] });
+      bySubject.set(subject, { ...d, alsoActions: [] });
       continue;
     }
     first.alsoActions.push(d.action);
@@ -393,10 +398,13 @@ export const SCENARIOS: readonly Scenario[] = Object.freeze([
     tickets: estimationTickets,
     agent: meSizing,
     expect: {
-      offered: ["20:pick_up", "21:estimate"],
-      before: [["20:pick_up", "21:estimate"]],
-      forbidden: ["20:estimate", "21:pick_up", "22:pick_up", "22:estimate"],
-      carries: [{ item: "20:pick_up", alsoActions: ["estimate"], because: ["P7", "R9"] }],
+      offered: ["20:pick_up", "20:estimate", "21:estimate"],
+      before: [
+        ["20:pick_up", "20:estimate"],
+        ["20:pick_up", "21:estimate"],
+      ],
+      forbidden: ["21:pick_up", "22:pick_up", "22:estimate"],
+      carries: [{ item: "20:pick_up", alsoActions: [], because: ["R9"] }],
       explain: [
         { item: "21:estimate", modality: "may", because: ["P7"], facts: ["!estimated"] },
         { item: "21:pick_up", modality: "must_not", because: ["R5"], overrides: ["R9"] },
@@ -588,8 +596,17 @@ export function runScenario(s: Scenario): Outcome {
     const pick = result.plan.filter((d) => d.action === "pick_up").map((d) => d.ticket);
     check(same(pick, e.pickupOrder), `pickup ${j(pick)} != ${j(e.pickupOrder)}`);
   }
-  const subjects = result.plan.map((d) => d.ticket);
-  check(new Set(subjects).size === subjects.length, `subject offered twice in ${j(offered)}`);
+  for (const queue of [false, true]) {
+    const subjects = result.plan
+      .filter((d) => (d.action === "estimate") === queue)
+      .map((d) => d.ticket);
+    check(new Set(subjects).size === subjects.length, `subject offered twice in ${j(offered)}`);
+  }
+  const firstEstimate = result.plan.findIndex((d) => d.action === "estimate");
+  check(
+    firstEstimate < 0 || result.plan.slice(firstEstimate).every((d) => d.action === "estimate"),
+    `estimation not after all work in ${j(offered)}`,
+  );
   for (const c of e.carries ?? []) {
     const d = result.plan.find((d) => key(d) === c.item);
     check(
