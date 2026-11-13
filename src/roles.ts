@@ -10,7 +10,13 @@
  */
 import { isParked, owners } from "./briefing.js";
 import type { Bounded, Briefing } from "./briefing.js";
-import { closingPrEvidence, immediateUnlocks, platformsOf } from "./ranking.js";
+import {
+  closingPrEvidence,
+  compareImpact,
+  immediateUnlocks,
+  impactText,
+  platformsOf,
+} from "./ranking.js";
 import type { Action, Issue, PullRequest, Snapshot } from "./types.js";
 
 /** One row of a role section: the subject and why it is here, in this position. */
@@ -265,17 +271,17 @@ sectionSelectors.set("design-pickup", (context) => {
     .filter((item) => platformGate(item, context) === null)
     .map((item) => ({
       item,
-      unlocks: immediateUnlocks(item, byUrl, { prs, platform }).map((d) => d.number),
+      impact: immediateUnlocks(item, byUrl, { prs, platform }),
     }))
     .sort(
       (a, b) =>
-        b.unlocks.length - a.unlocks.length ||
+        compareImpact(a.impact, b.impact) ||
         Date.parse(a.item.createdAt) - Date.parse(b.item.createdAt) ||
         byNumber(a.item, b.item),
     )
-    .map(({ item, unlocks }) => ({
+    .map(({ item, impact }) => ({
       url: item.url,
-      reason: `Unclaimed design work; immediately unlocks ${unlocks.length}${unlocks.length ? ` (${unlocks.map((n) => `#${n}`).join(", ")})` : ""} otherwise-ready ticket(s).`,
+      reason: `Unclaimed design work; ${impactText(impact)} otherwise-ready ticket(s) immediately.`,
     }));
 });
 // Possible design work that cannot be offered as pickup: the viewer platform is unknown for a

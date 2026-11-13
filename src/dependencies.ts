@@ -60,13 +60,6 @@ export const nativeKnown = <T extends NativeFields>(item: T): item is T & KnownN
   !!item.issueDependenciesSummary && !!item.blockedBy && !!item.blocking;
 export const pickable = (item: NativeFields): boolean =>
   nativeKnown(item) && item.issueDependenciesSummary.blockedBy === 0;
-/** How many open dependants this open ticket is the last open blocker for. */
-export const unblocks = (item: Pick<Issue, "state" | "blocking"> | null | undefined): number =>
-  item?.state === "OPEN"
-    ? (item.blocking?.nodes ?? []).filter(
-        (n) => n.state === "OPEN" && n.issueDependenciesSummary?.blockedBy === 1,
-      ).length
-    : 0;
 export const dependencyDrift = (
   item: Pick<Issue, "body" | "blockedBy">,
   repository: string,
@@ -81,6 +74,10 @@ export interface DependencyFacts {
   known: boolean;
   summary: Issue["issueDependenciesSummary"] | null;
   upstream: NativeNode[];
+  /**
+   * `lastOpenBlocker` is a structural edge fact for the deps diagnostic only. It is not impact:
+   * no ordering uses it; impact is ranking.ts `immediateUnlocks` (#208).
+   */
   downstream: (NativeNode & { lastOpenBlocker: boolean })[];
   drift: Reference[];
   verdict: string;

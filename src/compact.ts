@@ -1,10 +1,10 @@
 /** Compact presentation of the registered findings; contract #698. */
 import { isParked, owners, excerpt } from "./briefing.js";
-import { unblocks } from "./dependencies.js";
 import type { BriefingProcess } from "./process.js";
 import type { Briefing, BriefingOptions, Bounded, CheckOutcome } from "./briefing.js";
 import { estimateLine } from "./estimation.js";
 import type { EstimateEntry } from "./estimation.js";
+import { compareImpact, impactLookup } from "./ranking.js";
 import { roleView } from "./roles.js";
 import type { RoleView } from "./roles.js";
 import type { Action, Issue, PullRequest, Snapshot } from "./types.js";
@@ -128,6 +128,15 @@ export function compactBriefing(
     (defined(item).closingIssuesReferences?.nodes ?? []).some((ref) =>
       isMine(byUrl.get(ref.url) ?? unlabelled),
     );
+  // The same eligibility-filtered impact as the role views and pickup ranking (#208).
+  const openStates = ["OPEN"];
+  const impactOf = impactLookup(
+    snapshot.issues.filter((i) => openStates.includes(i.state)),
+    {
+      prs: snapshot.pullRequests.filter((p) => openStates.includes(p.state)),
+      platform: facts.ranking.platform ?? undefined,
+    },
+  );
   const unlabelled: Pick<Issue, "labels"> = {
     labels: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
   };
@@ -189,7 +198,7 @@ export function compactBriefing(
       (a, b) =>
         tier(a) - tier(b) ||
         topPriority(b.findings) - topPriority(a.findings) ||
-        unblocksOf(byUrl.get(b.target)) - unblocksOf(byUrl.get(a.target)) ||
+        compareImpact(impactOf(a.target), impactOf(b.target)) ||
         a.target.localeCompare(b.target),
     );
   const sectionNames = [
@@ -451,8 +460,6 @@ export function compactText(
   return lines.join("\n") + "\n";
 }
 
-/** Open dependants an item unblocks; 0 for an unknown item, as before. */
-const unblocksOf = (item: Issue | undefined): number => (item ? unblocks(item) : 0);
 /**
  * Narrow a lookup that is defined by construction. A missing value throws a TypeError at
  * the first property access, matching the previous untyped behavior.

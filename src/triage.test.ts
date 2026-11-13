@@ -4083,6 +4083,93 @@ describe("next-action ranking (#45, doc/design/briefings.md acceptance examples)
     const r = brief(snapshot([blocker, unknown], []));
     expect(r.ready.items.map((i) => [i.number, i.unlocks])).toEqual([[36, []]]);
   });
+  it("non-role briefing does not rank a ticket unlocking only unready work above a real unlock (#208)", async () => {
+    // Same rule and priority; the URL tie-break alone would put #60 first.
+    const designOnly = issue(60, ["status:needs-design"]);
+    const realUnlock = issue(61, ["status:needs-design"]);
+    const unready = blockedBy(issue(62, ["status:ready", "status:needs-design"]), 1);
+    const ready = blockedBy(issue(63), 1);
+    blocks(designOnly, [unready]);
+    blocks(realUnlock, [ready]);
+    const data = snapshot([designOnly, realUnlock, unready, ready], []);
+    const expanded = brief(data);
+    const order = numbers(
+      expanded.actions.items
+        .filter((a) => [designOnly.url, realUnlock.url].includes(a.target))
+        .map((a) => a.target),
+    ).filter((n, i, all) => all.indexOf(n) === i);
+    expect(order).toEqual([61, 60]);
+    const r = await compact(data, { limit: 20 });
+    expect(numbers(r.actions.items).filter((n) => n === 60 || n === 61)).toEqual([61, 60]);
+  });
+  it("a truncated blocking list gives unknown impact, never a definite count (#208)", () => {
+    const blocker = issue(64);
+    const ready = blockedBy(issue(65), 1);
+    blocks(blocker, [ready]);
+    blocker.issueDependenciesSummary!.totalBlocking = 150;
+    blocker.blocking!.pageInfo = { hasNextPage: true, endCursor: "c" };
+    const r = brief(snapshot([blocker, ready], []));
+    const item = r.ready.items.find((i) => i.number === 64)!;
+    expect(item.unlocks).toEqual([65]);
+    expect(item.unlocksUnknown).toEqual(["dependant list truncated (1 of 150 seen)"]);
+    expect(item.rankReason).toMatch(
+      /unlocks at least 1 \(#65\); impact unknown: dependant list truncated/,
+    );
+  });
+  it("a cross-repository dependant gives unknown impact (#208)", () => {
+    const blocker = issue(66);
+    const elsewhere = blockedBy(issue(67), 1);
+    blocks(blocker, [elsewhere]);
+    blocker.blocking!.nodes[0] = {
+      ...blocker.blocking!.nodes[0]!,
+      url: "https://github.com/other/place/issues/67",
+      repository: { nameWithOwner: "other/place" },
+    };
+    const r = brief(snapshot([blocker], []));
+    const item = r.ready.items.find((i) => i.number === 66)!;
+    expect(item.unlocks).toEqual([]);
+    expect(item.unlocksUnknown).toEqual(["dependant other/place#67 not in this snapshot"]);
+    expect(item.rankReason).toMatch(
+      /unlocks at least 0; impact unknown: dependant other\/place#67/,
+    );
+    // Unknown never ranks below zero: it ties with a known-zero ticket and falls to age/number.
+    const zero = issue(68);
+    const tied = brief(snapshot([zero, blocker], []));
+    expect(tied.ready.items.map((i) => i.number)).toEqual([66, 68]);
+    // ...and never outranks a known positive count.
+    const positive = issue(69);
+    const unlocked = blockedBy(issue(70), 1);
+    blocks(positive, [unlocked]);
+    const ranked = brief(snapshot([blocker, positive, unlocked], []));
+    expect(ranked.ready.items.map((i) => i.number).slice(0, 2)).toEqual([69, 66]);
+  });
+  it("role and non-role views order the same tickets identically by impact (#208)", async () => {
+    const none = issue(71, ["status:needs-design"]);
+    const two = issue(72, ["status:needs-design"]);
+    const one = issue(73, ["status:needs-design"]);
+    const unready = blockedBy(issue(74, ["status:ready", "status:needs-design"]), 1);
+    const a = blockedBy(issue(75), 1);
+    const b = blockedBy(issue(76), 1);
+    const c = blockedBy(issue(77), 1);
+    blocks(none, [unready]);
+    blocks(two, [a, b]);
+    blocks(one, [c]);
+    const data = snapshot([none, two, one, unready, a, b, c], []);
+    const targets = [none.url, two.url, one.url];
+    const { compactBriefing } = await import("./compact.js");
+    const role = compactBriefing(
+      data,
+      { limit: 20, agent: "reader", role: "designer" },
+      briefing(data, { limit: 1000, agent: "reader" }, new Date(time)),
+    );
+    const roleOrder = numbers(
+      role.role!.sections.find((s) => s.name === "design-pickup")!.items.map((i) => i.url),
+    ).filter((n) => [71, 72, 73].includes(n));
+    const plain = await compact(data, { limit: 20 });
+    const plainOrder = numbers(plain.actions.items.filter((u) => targets.includes(u)));
+    expect(roleOrder).toEqual([72, 73, 71]);
+    expect(plainOrder).toEqual(roleOrder);
+  });
   it("oldest mode orders by creation time alone, keeping urgency and impact visible", () => {
     const oldLow = at(issue(40, ["status:ready", "urgency:low"]), "2026-01-01T00:00:00Z");
     const newHigh = at(issue(41, ["status:ready", "urgency:high"]), "2026-06-01T00:00:00Z");
