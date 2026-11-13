@@ -24,3 +24,7 @@ Deferred by the owner: automatic migration apply/recovery #48, answer-recording 
 ## Common validation
 
 Use injected GitHub, clock, environment and filesystem boundaries. Assert meaningful user outcomes, not implementation mirrors. Verify stable ordering, bounded output, no credential leakage, missing evidence, current-head review freshness, and recovery-command validity. Diagnostics and briefings are read-only. Mutation results enumerate applied/skipped/failed operations; a single user operation does not promise a GitHub transaction. Do not install hooks, publish packages, change live identity files or run migrations while implementing documentation.
+
+## Source language
+
+The owner chose a full [TypeScript migration](typescript.md) in #91. This supersedes earlier plain-JavaScript design preferences, including MCP. Current runtime source remains JavaScript until that focused implementation lands; published bundles remain JavaScript for Node compatibility.

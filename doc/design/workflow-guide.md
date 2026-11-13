@@ -1,6 +1,6 @@
 # Workflow help and compact process guide
 
-Contract for #71. Documentation-first design; no guide command or configuration reader is shipped by this document. The lifecycle and ranking contracts in this directory remain normative. The formal-language research #72–#78 is independent: start with ordinary registered JavaScript policy metadata, not a new rules engine dependency.
+Contract for #71. Documentation-first design; no guide command or configuration reader is shipped by this document. The lifecycle and ranking contracts in this directory remain normative. The formal-language research #72–#78 is independent: start with ordinary registered TypeScript policy metadata, not a new rules engine dependency.
 
 ## Objective and scope
 
