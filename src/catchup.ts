@@ -250,27 +250,40 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
   const questionByUrl = new Map(
     findings.filter((f) => f.rule === "question-candidate").map((f) => [f.target, f]),
   );
-  const attentionRows: CatchUpRow[] = [];
+  // One row per subject. When several findings address it (for example attention:NAME and
+  // design:decision-needed), every substantive reason and required action is kept, de-duplicated,
+  // most specific request first: the design question, then attention labels, then the generic
+  // addressed-attention notice.
+  const specificity = (r: string) =>
+    ({ "design-decision-needed": 0, "attention-label": 1, "addressed-attention": 2 })[r] ?? 3;
+  const bySubject = new Map<string, Action[]>();
   for (const finding of findings) {
-    if (finding.rule === "question-candidate") continue;
-    const item = byUrl.get(finding.target);
-    if (!item) continue;
+    if (finding.rule === "question-candidate" || !byUrl.has(finding.target)) continue;
+    bySubject.set(finding.target, [...(bySubject.get(finding.target) ?? []), finding]);
+  }
+  const unique = <T>(values: T[]) => values.filter((v, i, all) => all.indexOf(v) === i);
+  const attentionRows: CatchUpRow[] = [];
+  for (const [url, group] of bySubject) {
+    const item = byUrl.get(url)!;
+    const ordered = [...group].sort(
+      (a, b) => specificity(a.rule) - specificity(b.rule) || (a.rule < b.rule ? -1 : 1),
+    );
     const kind = kindOf(item);
     const tags = labelsOf(item);
-    const recorded =
+    const isRecorded = (finding: Action) =>
       recordedRules.has(finding.rule) ||
       (finding.rule === "attention-label" && tags.some((t) => recordedLabels.has(t)));
+    const recorded = ordered.some(isRecorded);
+    const cited = ordered.flatMap((f) => f.evidence);
     const asked = questionByUrl.get(item.url);
-    // Only quote a question that the finding itself does not already cite.
-    const question =
-      asked && !asked.evidence.every((e) => finding.evidence.includes(e)) ? asked : null;
+    // Only quote a question that the findings themselves do not already cite.
+    const question = asked && !asked.evidence.every((e) => cited.includes(e)) ? asked : null;
     const blocks = (item.blocking?.nodes ?? []).map((n) => `#${n.number}`);
-    const requestAt =
-      (finding.evidence.length > 1
-        ? item.comments.nodes.find((c) => c.url === finding.evidence.at(-1))?.createdAt
-        : null) ??
-      item.createdAt ??
-      null;
+    const requestCandidates = ordered
+      .filter((f) => f.evidence.length > 1)
+      .map((f) => item.comments.nodes.find((c) => c.url === f.evidence.at(-1))?.createdAt)
+      .filter((v): v is string => Boolean(v));
+    const requestAt = requestCandidates[0] ?? item.createdAt ?? null;
     attentionRows.push({
       id: rowId(kind, item.number, "attention"),
       kind: recorded ? "recorded" : "candidate",
@@ -278,12 +291,10 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
       related: [],
       at: requestAt,
       timing: requestAt ? "observation" : "unknown",
-      description: `${finding.reason}${blocks.length ? ` Blocks ${blocks.join(", ")}.` : ""}${question ? ` Latest question: "${question.reason}"` : ""}`,
-      reasons: [finding.rule],
-      evidence: [...finding.evidence, ...(question?.evidence ?? [])].filter(
-        (v, i, all) => all.indexOf(v) === i,
-      ),
-      next: finding.next,
+      description: `${unique(ordered.map((f) => f.reason)).join(" ")}${blocks.length ? ` Blocks ${blocks.join(", ")}.` : ""}${question ? ` Latest question: "${question.reason}"` : ""}`,
+      reasons: unique(ordered.map((f) => f.rule)),
+      evidence: unique([...cited, ...(question?.evidence ?? [])]),
+      next: unique(ordered.map((f) => f.next)).join(" "),
       uncertainty: recorded ? "reported" : "candidate",
       attribution: orUnknown(labelAttribution(item)),
       detailCommand: detail(kind, item.number),
@@ -633,6 +644,24 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
         "Wait for the checks to finish.",
         pending.map((c) => c.url),
       );
+    const { unknown, complete } = classifyChecks(pr);
+    if (unknown.length || !complete)
+      blocker(
+        pr,
+        "checks-unknown",
+        "unknown-checks",
+        `Verification incomplete: ${[
+          unknown.length
+            ? `unknown outcome for ${unknown.map((c) => `${c.name} (${c.outcome})`).join(", ")}`
+            : "",
+          complete ? "" : "more checks exist than were fetched",
+        ]
+          .filter(Boolean)
+          .join("; ")}.`,
+        "Inspect current head checks. Do not infer approval.",
+        unknown.length ? unknown.map((c) => c.url) : [pr.url],
+        "unknown",
+      );
     if (workflow.conflicts.includes(pr.mergeable))
       blocker(
         pr,
@@ -669,6 +698,24 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
         `Blocked by open ${open.map((n) => `#${n.number}`).join(", ")}.`,
         "Finish or re-plan the native blockers.",
         open.map((n) => n.url),
+      );
+  }
+  // Dependency risks that are not open blockers come from the existing native-dependency rule, so
+  // the inspection wording matches the briefing: a blocker closed as not planned, and unknown
+  // native evidence (absence of an edge is not proof of no blocker).
+  for (const finding of rule("native-dependencies")) {
+    if (finding.rule !== "dependency-not-planned" && finding.rule !== "native-evidence-unknown")
+      continue;
+    const item = byUrl.get(finding.target);
+    if (item && workflow.openStates.includes(item.state))
+      blocker(
+        item,
+        finding.rule,
+        finding.rule,
+        finding.reason,
+        finding.next,
+        finding.evidence,
+        finding.uncertainty,
       );
   }
   for (const stale of rule("stale-claim")) {

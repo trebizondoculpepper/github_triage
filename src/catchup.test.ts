@@ -4,7 +4,7 @@ import { changeSubject, resolveWindow } from "./changes.js";
 import type { ChangeEvidence, EvidenceIssue, EvidencePullRequest } from "./changes.js";
 import { collect } from "./github.js";
 import type { Query } from "./github.js";
-import type { Comment, Issue, Page, PullRequest, Snapshot } from "./types.js";
+import type { Comment, Issue, NativeNode, Page, PullRequest, Snapshot } from "./types.js";
 
 const repo = "example/project";
 const t0 = "2026-11-13T09:00:00.000Z";
@@ -855,5 +855,61 @@ describe("repository catch-up aggregation (#169)", () => {
     const text = catchUpText(report);
     const evidenceLine = text.split("\n").find((l) => l.startsWith("  Evidence:"));
     expect(evidenceLine).toContain(logs);
+  });
+
+  it("keeps the design question when attention and decision-needed share a subject (#194)", () => {
+    const both = issue(80, ["attention:ana", "design:decision-needed"], {
+      comments: page([
+        comment(80, 1, "design:decision-needed — should retries be capped at three?", inside(2)),
+      ]),
+    });
+    const report = catchUp(snap([both], [], evidence([])), {
+      now: clock,
+      limit: 100,
+      agent: "ana",
+    });
+    const rows = report.sections.attention.items.filter((r) => r.subject.number === 80);
+    expect(rows).toHaveLength(1);
+    const row = rows[0]!;
+    expect(row.reasons[0]).toBe("design-decision-needed");
+    expect(row.reasons).toContain("addressed-attention");
+    expect(row.description.indexOf("should retries be capped")).toBeLessThan(
+      row.description.indexOf("Your attention is requested"),
+    );
+    expect(row.next).toContain("Settle the outstanding question");
+    expect(row.next).toContain("post a substantive response");
+    expect(catchUpText(report)).toContain("should retries be capped at three?");
+    expect(catchUpJson(report)).toContain("should retries be capped at three?");
+  });
+
+  it("reports dependency and verification risks that are not open blockers (#194)", () => {
+    const dropped = {
+      number: 90,
+      url: url("issues", 90),
+      title: "Dropped",
+      state: "CLOSED",
+      stateReason: "NOT_PLANNED",
+    } as NativeNode;
+    const orphaned = issue(91, [], {
+      issueDependenciesSummary: { blockedBy: 0, totalBlockedBy: 1, blocking: 0, totalBlocking: 0 },
+      blockedBy: page([dropped]),
+    });
+    const unknownNative = issue(92, [], {
+      issueDependenciesSummary: undefined,
+      blockedBy: undefined,
+    } as Partial<Issue>);
+    const odd = pr(93, [], "MYSTERY");
+    const report = catchUp(snap([orphaned, unknownNative], [odd], evidence([])), {
+      now: clock,
+      limit: 100,
+    });
+    const blockers = report.sections.blockers.items;
+    const notPlanned = blockers.find((r) => r.subject.number === 91);
+    expect(notPlanned).toMatchObject({ kind: "dependency-not-planned" });
+    expect(notPlanned!.next).toContain("Verify whether the dependency still makes sense");
+    expect(notPlanned!.evidence).toContain(url("issues", 90));
+    expect(blockers.find((r) => r.subject.number === 92)?.kind).toBe("native-evidence-unknown");
+    expect(blockers.find((r) => r.subject.number === 93)?.kind).toBe("unknown-checks");
+    expect(catchUpText(report)).toContain("Native blocker closed as not planned");
   });
 });
