@@ -20,6 +20,7 @@ import { doctorStaleHours, ticketDoctor, ticketDoctorText } from "./ticketdoctor
 import { applyPlan, claimText, planClaim, planNeedsHuman } from "./claims.js";
 import { checkForUpdate, installedVersion, optOutEnv, updateAdvisory } from "./updates.js";
 import { defaultStaleHours, teamText, teamView } from "./team.js";
+import { ticketOwnership, ticketOwnershipText } from "./who.js";
 import { migrationPlanText, planMigration } from "./migration.js";
 import { briefing, textReport } from "./briefing.js";
 import { pickupOrders } from "./ranking.js";
@@ -71,6 +72,8 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   needs-human N --agent NAME --designer NAME --why TEXT --question TEXT... [--dry-run]
                         Record questions for a designer and mark the ticket decision-needed
   team [--stale-hours N]  Read-only: each agent's claims, linked PRs, activity and warnings
+  who N [--stale-hours N]  Read-only: who is working on ticket N? Claims, PRs, activity,
+                        handoff evidence and contradictions in one operation
   ticket-doctor [--stale-hours N] [--limit N]  Read-only consistency scan of all open tickets
   --repo owner/name     Repository (default: current gh checkout)
   --json                Versioned structured output (from a checkout: npm run --silent triage)
@@ -481,6 +484,44 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
     });
     await output(values.json ? JSON.stringify(view, null, 2) + "\n" : teamText(view));
     return view.completeness.complete ? 0 : 2;
+  }
+  if (args[0] === "who") {
+    const { values, positionals } = parseArgs({
+      args: args.slice(1),
+      allowPositionals: true,
+      options: {
+        repo: { type: "string" },
+        json: { type: "boolean" },
+        "stale-hours": { type: "string" },
+        cache: { type: "string" },
+        offline: { type: "boolean" },
+      },
+    });
+    if (positionals.length !== 1 || !/^[1-9]\d*$/.test(positionals[0]))
+      throw new Error("Usage: github-triage who N [--json] [--stale-hours N] [--repo owner/name]");
+    if (values.repo && !/^[\w.-]+\/[\w.-]+$/.test(values.repo))
+      throw new Error("--repo must be owner/name.");
+    const staleHours =
+      values["stale-hours"] === undefined ? defaultStaleHours : Number(values["stale-hours"]);
+    if (!Number.isFinite(staleHours) || staleHours <= 0)
+      throw new Error("--stale-hours must be a positive number.");
+    if (values.offline && !values.cache) throw new Error("--offline requires --cache PATH.");
+    const number = Number(positionals[0]);
+    const snapshot = values.offline
+      ? await cachedSnapshot(values.cache ?? "", values.repo)
+      : await runtime.collect(values.repo ?? (await runtime.currentRepository()), {
+          issue: number,
+        });
+    if (!values.offline && values.cache) await atomicJson(values.cache, snapshot);
+    const report = ticketOwnership(snapshot, number, {
+      staleHours,
+      now: runtime.now?.() ?? new Date(),
+      offline: !!values.offline,
+    });
+    await output(
+      values.json ? JSON.stringify(report, null, 2) + "\n" : ticketOwnershipText(report),
+    );
+    return report.completeness.complete ? 0 : 2;
   }
   if (args[0] === "pr") {
     const { values, positionals } = parseArgs({

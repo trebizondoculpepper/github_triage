@@ -35,6 +35,7 @@ import { clauseFor, hedged, listWideHedge, planMigration } from "./migration.js"
 import { applyPlan, planClaim, planNeedsHuman } from "./claims.js";
 import type { ClaimAccepted, ClaimPlan, ClaimRefusal } from "./claims.js";
 import { teamText, teamView } from "./team.js";
+import { ticketOwnership, ticketOwnershipText } from "./who.js";
 import { ticketDoctor, ticketDoctorText } from "./ticketdoctor.js";
 import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
 
@@ -3362,23 +3363,55 @@ describe("next-action ranking (#45, doc/design/briefings.md acceptance examples)
   });
 });
 
-describe("TypeScript source boundary (#91, doc/design/typescript.md)", () => {
-  it("keeps maintained first-party code in src/ and doc/reports/examples/ in TypeScript", async () => {
+describe("TypeScript source boundary (#91, #113, doc/design/typescript.md)", () => {
+  it("allows only allowlisted non-TypeScript files in src/, scripts/ and doc/reports/examples/", async () => {
+    const { LANGUAGE_SCOPE, languageViolations } = await import("./language-policy.js");
     const root = new URL("../", import.meta.url);
     // Generated output and dependencies are runtime artifacts, not handwritten source.
-    // scripts/ may also hold JavaScript or shell helpers (owner decision on #91).
     const skipped = new Set(["node_modules", "dist"]);
-    const found: string[] = [];
+    const files: string[] = [];
     const walk = async (dir: string): Promise<void> => {
       for (const entry of await readdir(new URL(dir, root), { withFileTypes: true })) {
         const path = `${dir}${entry.name}`;
         if (entry.isDirectory()) {
           if (!skipped.has(entry.name)) await walk(`${path}/`);
-        } else if (/\.[cm]?js$/.test(entry.name)) found.push(path);
+        } else files.push(path);
       }
     };
-    for (const dir of ["src/", "doc/reports/examples/"]) await walk(dir);
-    expect(found).toEqual([]);
+    for (const dir of LANGUAGE_SCOPE) await walk(dir);
+    const sources = new Map<string, string>();
+    for (const file of files) {
+      if (/\.tsx?$/.test(file) && (file.startsWith("src/") || file.startsWith("scripts/"))) {
+        sources.set(file, await readFile(new URL(file, root), "utf8"));
+      }
+    }
+    expect(languageViolations(files, sources)).toEqual([]);
+  });
+
+  it("fails unlisted files, stale entries and imports of allowlisted files", async () => {
+    const { languageViolations } = await import("./language-policy.js");
+    const entry = {
+      file: "scripts/helper.sh",
+      purpose: "p",
+      integrationBoundary: "b",
+      runtimeRequirements: "r",
+      supportedPlatforms: "s",
+      validation: "v",
+    };
+    const none = new Map<string, string>();
+    expect(languageViolations(["scripts/helper.sh"], none, [])).toEqual([
+      "scripts/helper.sh: non-TypeScript file is not on the allowlist",
+    ]);
+    expect(languageViolations(["scripts/helper.sh", "src/cli.ts"], none, [entry])).toEqual([]);
+    expect(languageViolations(["src/cli.ts"], none, [entry])).toEqual([
+      "scripts/helper.sh: allowlisted file does not exist",
+    ]);
+    const importing = new Map([["src/cli.ts", 'import x from "../scripts/helper.sh";']]);
+    expect(languageViolations(["scripts/helper.sh", "src/cli.ts"], importing, [entry])).toEqual([
+      "src/cli.ts: imports allowlisted non-TypeScript file scripts/helper.sh",
+    ]);
+    const requiring = new Map([["scripts/a.ts", 'require("./helper.sh")']]);
+    expect(languageViolations(["scripts/helper.sh"], requiring, [entry])).toHaveLength(1);
   });
 });
 
@@ -3421,5 +3454,96 @@ describe("transferred issue inspection when GraphQL fails (#39)", () => {
     );
     // Without --issue the original failure is unchanged.
     await expect(collect("o/x", {}, failing)).rejects.toThrow("GitHub query failed.");
+  });
+});
+
+describe("who is working on a ticket (#61, doc/design/diagnostics.md)", () => {
+  const at = (hoursAgo: number) => new Date(Date.parse(time) - hoursAgo * 3_600_000).toISOString();
+  const note = (body: string, hoursAgo: number, n = 0) => ({
+    body,
+    url: `https://github.com/${repo}/issues/1#c${n}`,
+    author: { login: "shared" },
+    createdAt: at(hoursAgo),
+    updatedAt: at(hoursAgo),
+  });
+  const ticket = (labels: string[], comments: ReturnType<typeof note>[] = [], hoursAgo = 1) => ({
+    ...issue(1, labels),
+    updatedAt: at(hoursAgo),
+    comments: page(comments),
+  });
+  const lookup = (data: Snapshot, staleHours?: number) =>
+    ticketOwnership(data, 1, { now: new Date(time), staleHours });
+  const kinds = (r: ReturnType<typeof lookup>) => r.findings.map((f) => `${f.certainty}:${f.kind}`);
+
+  it("label-only ownership: answers from the agent: label, presence unknown", () => {
+    const r = lookup(snapshot([ticket(["agent:ana"])], []));
+    expect(r).toMatchObject({
+      kind: "ticket-ownership",
+      schemaVersion: 1,
+      recordedOwners: ["ana"],
+    });
+    expect(r.answer).toBe("recorded claim: ana");
+    expect(r.presence).toMatch(/^unknown/);
+    expect(kinds(r)).toEqual([]);
+    expect(r.next).toContain(`github-triage --repo ${repo} --issue 1`);
+    expect(ticketOwnershipText(r)).toContain("Presence: unknown");
+  });
+  it("comment-only reported work is a candidate, not a claim", () => {
+    const r = lookup(snapshot([ticket(["status:ready"], [note("Picked up by dee", 1)])], []));
+    expect(r.recordedOwners).toEqual([]);
+    expect(r.answer).toMatch(/^no recorded claim/);
+    expect(kinds(r)).toEqual(["candidate:comment-only-work"]);
+    expect(r.commentEvidence[0]).toMatchObject({ kind: "reported-work" });
+  });
+  it("released contribution with an open PR: awaiting review is not ownership", () => {
+    const linked = pr();
+    linked.updatedAt = at(0.5);
+    const r = lookup(
+      snapshot(
+        [ticket([], [note("Picked up", 3, 1), note("Released my claim; PR awaits review", 2, 2)])],
+        [linked],
+      ),
+    );
+    expect(r.pullRequests.map((p) => p.number)).toEqual([4]);
+    expect(kinds(r)).toEqual(["candidate:unowned-open-pr"]);
+    expect(r.latestActivity!.source).toBe("PR #4 updated");
+    expect(r.next).toContain(`github-triage pr 4 --repo ${repo}`);
+  });
+  it("multiple owners are definite; a claim after a handoff comment is a candidate contradiction", () => {
+    const r = lookup(
+      snapshot([ticket(["agent:ana", "agent:bo"], [note("Handing off to review", 1)])], []),
+    );
+    expect(r.answer).toBe("conflicting recorded claims: ana, bo");
+    expect(kinds(r)).toEqual(["definite:multiple-owners", "candidate:claim-after-handoff"]);
+  });
+  it("stale activity is a candidate and releases nothing", () => {
+    const r = lookup(snapshot([ticket(["agent:ana"], [], 100)], []));
+    expect(kinds(r)).toEqual(["candidate:stale-activity"]);
+    expect(kinds(lookup(snapshot([ticket(["agent:ana"], [], 100)], []), 200))).toEqual([]);
+  });
+  it("incomplete labels make ownership unknown, never nobody", () => {
+    const t = ticket([]);
+    t.labels = page([], true, "x");
+    const r = lookup(snapshot([t], []));
+    expect(r.recordedOwners).toBeNull();
+    expect(r.answer).toMatch(/^unknown/);
+    expect(r.completeness.complete).toBe(false);
+  });
+  it("runs through the CLI with --issue collection and validates arguments", async () => {
+    let out = "";
+    let options: unknown;
+    const runtime = {
+      collect: async (_r: string, o: unknown) => {
+        options = o;
+        return snapshot([ticket(["agent:ana"])], []);
+      },
+      currentRepository: async () => repo,
+      now: () => new Date(time),
+    };
+    expect(await main(["who", "1", "--json"], async (t) => void (out = t), runtime)).toBe(0);
+    expect(options).toEqual({ issue: 1 });
+    expect(JSON.parse(out).answer).toBe("recorded claim: ana");
+    for (const bad of [["who"], ["who", "x"], ["who", "1", "--stale-hours", "0"]])
+      await expect(main(bad, async () => {}, runtime)).rejects.toThrow();
   });
 });

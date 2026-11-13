@@ -47,6 +47,14 @@ github-triage team --repo owner/repository --json
 
 This read-only view combines recorded claims, explicitly linked PRs, activity and warnings. It does not prove an agent is online, and stale activity does not authorize a takeover. Distinct unresolved/unknown evidence stays visible.
 
+## Who is working on one ticket?
+
+```sh
+github-triage who 61 --repo owner/repository --json
+```
+
+One read-only operation answers from the ticket's `agent:` labels (the only recorded ownership), its open closing PRs and their state, the latest evidenced ticket/PR activity, and ownership comments (claim, handoff, release, done) shown as historical evidence with links. Findings separate definite problems (several owners, a claim on a closed ticket) from candidates (claim label after a handoff comment, comment-only reported work, an open PR with no recorded owner, stale activity). Presence is always unknown. Incomplete labels make the answer unknown, never "nobody". Default stale threshold is the team view's 48 hours (`--stale-hours`); `--cache`/`--offline` work as for `team`. Merged/closed PRs and label history are not examined.
+
 ## Catch up after time away
 
 ```sh
