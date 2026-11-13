@@ -1539,6 +1539,16 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
       false,
     );
   });
+  it("declares every GraphQL variable it uses (the fake does not parse queries)", async () => {
+    let source = "";
+    await planClaim(repo, { number: 7, agent: "kavya" }, async (q, v) => {
+      source = q;
+      return fake({ labels: ["status:ready"] }).query(q, v);
+    });
+    const declared = new Set([...source.matchAll(/\$(\w+):/g)].map((m) => m[1]));
+    const used = new Set([...source.matchAll(/\$(\w+)\b(?!:)/g)].map((m) => m[1]));
+    for (const name of used) expect(declared.has(name), `$${name} is declared`).toBe(true);
+  });
   it("finds existing labels by exact name, and keeps completed writes when the re-check fails", async () => {
     // Exact-name lookup: an existing label is never scheduled for creation.
     const existing = await claim({ labels: ["status:ready"], repoLabels: ["agent:kavya"] });
