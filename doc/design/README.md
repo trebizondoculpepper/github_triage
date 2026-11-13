@@ -42,3 +42,7 @@ The owner accepts a recent Node requirement: [the current Node LTS](runtime.md),
 ## Research stage and budget instructions
 
 [Proportionate research](research-stages.md) separates a roughly one-hour initial plausibility stage from later higher-standard feasibility/repetitive evaluation. The later study must not block the original experiment. A future cheaper-agent experiment budget requires separate agreement.
+
+## Estimation proposal
+
+[Repository-relative estimation and risk](estimation-risk.md) records the agreed default T-shirt/risk guidance and proposed small delivery slices. Native-field integration, estimation queues and easy-wins ranking are not implemented or implicitly approved by that proposal.
