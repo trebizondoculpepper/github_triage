@@ -59,6 +59,11 @@ export interface EstimateEntry {
 
 export interface EstimationReport {
   status: EstimationStatus;
+  /**
+   * Deprecated, always null: native-field storage was retired (#153). Kept so the briefing
+   * output shape stays compatible with schema versions 1 (expanded) and 2 (compact).
+   */
+  fieldId: null;
   /** True when the caller asked to estimate (--estimate): the queue is presented first. */
   requested: boolean;
   guidanceVersion: number;
@@ -124,6 +129,7 @@ export function sizeReport(
   options: PickupContext & { limit: number; requested?: boolean },
 ): EstimationReport {
   const base = {
+    fieldId: null,
     requested: !!options.requested,
     guidanceVersion: complexityGuidance.guidanceVersion,
     findings: input?.findings ?? [],

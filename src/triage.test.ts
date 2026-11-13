@@ -5605,6 +5605,8 @@ describe("estimation queue and briefing visibility from size labels (#122, #152)
     ]);
     expect(code).toBe(0);
     expect(report.estimation).toMatchObject({ status: "available", unknown: 1 });
+    // The deprecated property stays in the shape (always null) so schema versions are unchanged.
+    expect(report.estimation).toHaveProperty("fieldId", null);
     expect(report.estimation.queue.items.map((e: { number: number }) => e.number)).toEqual([3]);
     expect(report.estimation.conflicts.items.map((e: { number: number }) => e.number)).toEqual([2]);
   });
@@ -5635,7 +5637,8 @@ describe("estimation queue and briefing visibility from size labels (#122, #152)
         },
       ],
     });
-    expect(report.estimation).not.toHaveProperty("fieldId");
+    // A stored mapping never leaks into the deprecated, always-null property.
+    expect(report.estimation).toHaveProperty("fieldId", null);
   });
   it("advertises no native-field setup command (#153)", async () => {
     const top: string[] = [];
