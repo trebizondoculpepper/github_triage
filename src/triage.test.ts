@@ -4052,3 +4052,215 @@ describe("config get/set/list/help commands (#117)", () => {
     expect(top.join("")).toContain("config get KEY | set KEY VALUE | list | help [KEY]");
   });
 });
+
+describe("setup complexity (#119)", () => {
+  const root = "/repo";
+  const path = join(root, CONFIG_PATH);
+  const sizes = ["XS", "S", "M", "L", "XL", "XXL"].map((name) => ({ name }));
+  const good = {
+    __typename: "IssueFieldSingleSelect",
+    id: "IF_good",
+    name: "Complexity",
+    dataType: "SINGLE_SELECT",
+    visibility: "ALL",
+    options: sizes,
+  };
+  const wrongOptions = { ...good, id: "IF_opts", name: "Size", options: sizes.slice(0, 3) };
+  const text = {
+    __typename: "IssueFieldText",
+    id: "IF_text",
+    name: "Notes",
+    dataType: "TEXT",
+    visibility: "ALL",
+  };
+  type Answer = { data: unknown; errors: { type?: string; message?: string }[] };
+  const owner = (fields: unknown, extra: Record<string, unknown> = {}): Answer => ({
+    data: {
+      viewer: { login: "owner" },
+      repository: {
+        owner: { __typename: "User", id: "U_1", login: "owner", issueFields: fields, ...extra },
+      },
+    },
+    errors: [],
+  });
+  const list = (...nodes: unknown[]) => ({ pageInfo: { hasNextPage: false }, nodes });
+  function setup(
+    answer: Answer,
+    options: { initial?: string; prompt?: string[]; failWrite?: boolean; created?: Answer } = {},
+  ) {
+    const files = new Map<string, string>(
+      options.initial === undefined ? [] : [[path, options.initial]],
+    );
+    const fs: ConfigFileSystem = {
+      readText: async (file) => files.get(file) ?? null,
+      writeText: async (file, value) => {
+        if (options.failWrite) throw new ConfigError("filesystem", "disk full", "free space");
+        files.set(file, value);
+      },
+      rename: async (from, to) => {
+        files.set(to, files.get(from)!);
+        files.delete(from);
+      },
+      remove: async (file) => void files.delete(file),
+      makeDirectory: async () => undefined,
+    };
+    const git: GitRunner = async (args) =>
+      args[0] === "rev-parse" ? `${root}\n` : "origin\thttps://github.com/owner/name.git (fetch)\n";
+    const mutations: unknown[] = [];
+    const queries: unknown[] = [];
+    const prompts: string[] = [];
+    const replies = [...(options.prompt ?? [])];
+    const out: string[] = [];
+    const call = (...args: string[]) =>
+      main(["setup", "complexity", ...args, "--no-update-check"], async (t) => void out.push(t), {
+        collect: async () => {
+          throw new Error("no GitHub");
+        },
+        currentRepository: async () => {
+          throw new Error("no GitHub");
+        },
+        setup: {
+          fs,
+          git,
+          cwd: root,
+          api: {
+            query: async (_q, v) => (queries.push(v), answer),
+            mutate: async (_q, v) => (
+              mutations.push(v),
+              options.created ?? { data: null, errors: [] }
+            ),
+          },
+          prompt: options.prompt ? async (q) => (prompts.push(q), replies.shift() ?? "") : null,
+        },
+      });
+    return { files, out, call, mutations, queries, prompts, json: () => JSON.parse(out.at(-1)!) };
+  }
+
+  it("skips all remote calls when complexity is explicitly disabled", async () => {
+    const t = setup(owner(list(good)), {
+      initial: '{"schemaVersion":1,"complexity":{"enabled":false,"fieldId":"IF_x"}}\n',
+    });
+    expect(await t.call("--json")).toBe(0);
+    expect(t.json()).toMatchObject({ status: "disabled", mappedFieldId: "IF_x" });
+    expect(t.queries).toEqual([]);
+  });
+  it("reports discovered fields and returns setup-required unattended without hanging", async () => {
+    const t = setup(owner(list(good, wrongOptions, text)));
+    expect(await t.call()).toBe(2);
+    const out = t.out[0]!;
+    expect(out).toContain("compatible   IF_good");
+    expect(out).toMatch(/incompatible IF_opts .*expected XS, S, M, L, XL, XXL/);
+    expect(out).toMatch(/IF_text .*type TEXT/);
+    expect(out).toContain("visible to all of owner's repositories");
+    expect(out).toContain("--select IF_good");
+    expect(t.files.size).toBe(0);
+    expect(t.mutations).toEqual([]);
+  });
+  it("saves an explicitly selected compatible field and is idempotent on retry", async () => {
+    const t = setup(owner(list(good)));
+    expect(await t.call("--select", "IF_good", "--json")).toBe(0);
+    expect(t.json()).toMatchObject({ status: "saved", changed: true, mappedFieldId: "IF_good" });
+    expect(JSON.parse(t.files.get(path)!)).toEqual({
+      schemaVersion: 1,
+      complexity: { fieldId: "IF_good" },
+    });
+    expect(await t.call("--select", "IF_good", "--json")).toBe(0);
+    expect(t.json()).toMatchObject({ changed: false });
+    expect(await t.call()).toBe(0);
+    expect(t.out.at(-1)).toContain("Configured");
+  });
+  it("refuses incompatible or unknown selections without writing", async () => {
+    const t = setup(owner(list(good, wrongOptions)));
+    expect(await t.call("--select", "IF_opts", "--json")).toBe(1);
+    expect(t.json()).toMatchObject({ kind: "complexity-setup-error", code: "incompatible" });
+    await expect(t.call("--select", "IF_nope")).rejects.toThrow("not among");
+    expect(t.files.size).toBe(0);
+  });
+  it("distinguishes forbidden and unsupported APIs and offers no fallback", async () => {
+    const forbidden = setup({ ...owner(null), errors: [{ type: "FORBIDDEN", message: "no" }] });
+    expect(await forbidden.call("--create", "--json")).toBe(2);
+    expect(forbidden.json()).toMatchObject({ status: "setup-required:inaccessible" });
+    expect(forbidden.mutations).toEqual([]);
+    const unsupported = setup({
+      data: null,
+      errors: [{ message: "Field 'issueFields' doesn't exist on type 'User'" }],
+    });
+    expect(await unsupported.call("--json")).toBe(2);
+    expect(unsupported.json()).toMatchObject({ status: "setup-required:unsupported" });
+  });
+  it("creates only on explicit --create, after confirmation on a terminal", async () => {
+    const created = {
+      data: { createIssueField: { issueField: { ...good, id: "IF_new" } } },
+      errors: [],
+    };
+    const declined = setup(owner(list(text)), { prompt: ["n"], created });
+    expect(await declined.call("--create")).toBe(2);
+    expect(declined.prompts[0]).toContain("visible to all of owner's repositories");
+    expect(declined.mutations).toEqual([]);
+    const menu = setup(owner(list(text)), { prompt: ["c", "y"], created });
+    expect(await menu.call()).toBe(0);
+    expect(menu.mutations).toHaveLength(1);
+    expect(menu.mutations[0]).toMatchObject({ ownerId: "U_1", name: "Complexity" });
+    expect(JSON.parse(menu.files.get(path)!).complexity.fieldId).toBe("IF_new");
+    const unattended = setup(owner(list(text)), { created });
+    expect(await unattended.call("--create", "--json")).toBe(0);
+    expect(unattended.json()).toMatchObject({ status: "created", mappedFieldId: "IF_new" });
+  });
+  it("refuses creation without permission, with partial lists or when a field already exists", async () => {
+    const org = setup({
+      data: {
+        viewer: { login: "me" },
+        repository: {
+          owner: {
+            __typename: "Organization",
+            id: "O_1",
+            login: "org",
+            viewerCanAdminister: false,
+            issueFields: list(),
+          },
+        },
+      },
+      errors: [],
+    });
+    expect(await org.call("--create", "--json")).toBe(1);
+    expect(org.json()).toMatchObject({ code: "not-permitted" });
+    const partial = setup(owner({ pageInfo: { hasNextPage: true }, nodes: [] }));
+    expect(await partial.call("--create", "--json")).toBe(1);
+    expect(partial.json()).toMatchObject({ code: "incomplete-discovery" });
+    const exists = setup(owner(list(good)));
+    expect(await exists.call("--create", "--json")).toBe(1);
+    expect(exists.json()).toMatchObject({
+      code: "exists",
+      recovery: "github-triage setup complexity --select IF_good",
+    });
+    for (const t of [org, partial, exists]) expect(t.mutations).toEqual([]);
+  });
+  it("reports the created ID and recovery when the local save fails", async () => {
+    const created = {
+      data: { createIssueField: { issueField: { ...good, id: "IF_new" } } },
+      errors: [],
+    };
+    const t = setup(owner(list()), { failWrite: true, created });
+    expect(await t.call("--create", "--json")).toBe(2);
+    expect(t.json()).toMatchObject({
+      status: "created-not-saved",
+      created: { id: "IF_new" },
+      recovery: "github-triage setup complexity --select IF_new",
+    });
+  });
+  it("flags a mapped field that is missing and verifies the repository target", async () => {
+    const t = setup(owner(list(good)), {
+      initial: '{"schemaVersion":1,"complexity":{"fieldId":"IF_gone"}}\n',
+    });
+    expect(await t.call()).toBe(2);
+    expect(t.out[0]).toContain("IF_gone: missing");
+    await expect(t.call("--repo", "other/repo")).rejects.toThrow("is not other/repo");
+    expect(
+      await (async () => {
+        let s = "";
+        await main(["setup", "--help"], async (x) => void (s = x));
+        return s;
+      })(),
+    ).toContain("--create");
+  });
+});
