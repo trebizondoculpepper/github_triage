@@ -724,15 +724,7 @@ export async function planDeliverables(
     const rec: DeliveryRecord = {
       v: 1,
       op,
-      opId: deliveryOpId({
-        repository,
-        issue: number,
-        op,
-        deliverables,
-        agent,
-        // A stable basis, so a retry against the same fold yields the same opId.
-        issuedAt: `after:${lastApplied?.comment ?? "none"}`,
-      }),
+      opId: "",
       repository,
       issue: number,
       agent,
@@ -741,6 +733,18 @@ export async function planDeliverables(
       ...fields,
       issuedAt,
     };
+    // The opId covers every operation-defining field (the same `definingFields` table that
+    // retry detection uses) plus the fold it was planned against: two different operations never
+    // share an id, while an identical retry against the same fold (whatever its reason text)
+    // yields the same one.
+    rec.opId = deliveryOpId({
+      repository,
+      issue: number,
+      op,
+      deliverables,
+      agent,
+      issuedAt: `after:${lastApplied?.comment ?? "none"};${defining(rec)}`,
+    });
     return rec;
   };
   const accepted = (
@@ -1177,7 +1181,10 @@ export async function applyDeliverables(
   const initial = first ?? (await planDeliverables(repository, request, rt));
   if (!initial.ok) return { ...initial, exitCode: 1 };
   const steps: PlanStep[] = [];
-  const opId = initial.record?.opId;
+  // Identity comes only from what was actually written: the record posted by this run is taken
+  // from the fresh plan at the moment of its write, never from an earlier plan (a re-read may
+  // have replanned it against a newer fold, changing its opId). Resume and verification use it.
+  let posted: { plan: DeliverablesPlan & { ok: true }; record: DeliveryRecord } | null = null;
   let plan: DeliverablesPlan = initial;
   let fresh = !first;
   let later: DeliverablesRefusal | null = null;
@@ -1185,9 +1192,13 @@ export async function applyDeliverables(
   for (let i = 0; i < 4; i++) {
     // Re-read and re-fold before every write; never write on an earlier read.
     // Once this run's record is posted, later steps resume from that record (found by opId).
-    const resume = opId && steps.some((s) => s.step === "record" && s.status === "done");
     if (!fresh)
-      plan = await planDeliverables(repository, request, rt, resume ? { opId } : undefined);
+      plan = await planDeliverables(
+        repository,
+        request,
+        rt,
+        posted ? { opId: posted.record.opId } : undefined,
+      );
     fresh = false;
     const done = steps.some((s) => s.status === "done");
     if (!plan.ok) {
@@ -1208,16 +1219,18 @@ export async function applyDeliverables(
     try {
       await rt.run(step.command);
       step.status = "done";
+      if (step.step === "record" && plan.record) posted = { plan, record: plan.record };
     } catch (error) {
       step.status = "failed";
       step.reason = error instanceof Error ? error.message : undefined;
-      return { ...initial, steps, exitCode: done ? 2 : 1 };
+      return { ...(posted?.plan ?? plan), steps, exitCode: done ? 2 : 1 };
     }
   }
   // Post-write verification: the record must fold as intended.
   let conflict: string | null = null;
   let unverified: string | null = skipped;
-  if (opId && steps.some((s) => s.status === "done")) {
+  const opId = posted?.record.opId;
+  if (opId) {
     try {
       const read = await readIssue(repository, request.number, rt.query);
       const item = read.item?.__typename === "Issue" ? read.item : null;
@@ -1250,7 +1263,7 @@ export async function applyDeliverables(
   }
   if (later && !conflict) return { ...later, steps, conflict, unverified, exitCode: 2 };
   const exitCode = conflict || unverified ? 2 : 0;
-  return { ...initial, steps, conflict, unverified, exitCode };
+  return { ...(posted?.plan ?? initial), steps, conflict, unverified, exitCode };
 }
 
 /** Text rendering for plans, refusals and results. */

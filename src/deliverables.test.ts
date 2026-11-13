@@ -520,6 +520,38 @@ describe("deliverables detach, retarget and handoff", () => {
     expect(result.conflict).toMatch(/^HANDOFF_STALE/);
     expect(posted(state)).toHaveLength(1);
   });
+  it("concurrent handoffs by one agent to different recipients get distinct opIds; the loser is HANDOFF_STALE", async () => {
+    const sub = submitted();
+    const { rt, state } = github({ comments: [sub] });
+    // Both invocations plan against the same fold before either posts.
+    const toCarol = await planDeliverables(repo, request("handoff", { to: "carol" }), rt);
+    const toBob = await planDeliverables(repo, request("handoff", { to: "bob" }), rt);
+    expect(toCarol.ok && toBob.ok && toCarol.record!.opId).not.toBe(toBob.ok && toBob.record!.opId);
+    // Carol's handoff lands just before Bob's is posted.
+    const run = rt.run;
+    let raced = false;
+    rt.run = async (args: string[]) => {
+      if (!raced && args[1] === "comment") {
+        raced = true;
+        await run((toCarol.ok && toCarol.changes[0]!.command) as string[]);
+      }
+      await run(args);
+    };
+    const result = await applyDeliverables(repo, request("handoff", { to: "bob" }), rt, toBob);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.conflict).toMatch(/^HANDOFF_STALE/);
+    expect(
+      posted(state)
+        .filter((r) => r?.op === "handoff")
+        .map((r) => r?.to),
+    ).toEqual(["carol", "bob"]);
+  });
+  it("the same handoff retried with a different reason keeps its opId", async () => {
+    const { rt } = github({ comments: [submitted()] });
+    const a = await planDeliverables(repo, request("handoff", { to: "bob", reason: "one" }), rt);
+    const b = await planDeliverables(repo, request("handoff", { to: "bob", reason: "two" }), rt);
+    expect(a.ok && a.record!.opId).toBe(b.ok && b.record!.opId);
+  });
 });
 
 describe("deliverables membership, attest and legacy recovery", () => {
@@ -816,6 +848,30 @@ describe("deliverables maintainer overrides", () => {
     );
     expect(result.exitCode).toBe(0);
     expect(posted(state).filter((r) => r?.op === "reset")).toHaveLength(1);
+    expect(state.labels).toEqual(["status:ready"]);
+    expect(result.ok && result.steps?.map((s) => s.step)).toEqual(["record", "labels"]);
+  });
+  it("a reset replanned after a membership record arrives before its write resumes by the posted opId", async () => {
+    const { rt, state } = github({
+      comments: [submitted()],
+      prs: [fakePr(5, { state: "CLOSED" })],
+      labels: ["status:awaiting-review"],
+    });
+    const req = request("reset", { agent: "maint", as: "ready" });
+    const first = await planDeliverables(repo, req, rt);
+    // Another writer's membership record lands after the CLI's plan, before the pre-write re-read.
+    state.comments.push(
+      comment(
+        deliveryMarker(rec("membership", { agent: "maint", membership: "open", opId: "other" })),
+        "writer",
+        9500,
+      ),
+    );
+    const result = await applyDeliverables(repo, req, rt, first);
+    expect(result.exitCode).toBe(0);
+    const resets = posted(state).filter((r) => r?.op === "reset");
+    expect(resets).toHaveLength(1);
+    expect(resets[0]!.opId).not.toBe(first.ok && first.record!.opId);
     expect(state.labels).toEqual(["status:ready"]);
     expect(result.ok && result.steps?.map((s) => s.step)).toEqual(["record", "labels"]);
   });
