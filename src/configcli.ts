@@ -257,7 +257,8 @@ export async function runConfig(
         : `${settingText(setting)} — ${write.changed ? `written to ${where.path} (not committed)` : "unchanged"}\n`,
     );
     return 0;
-  } catch (error) {
+  } catch (caught) {
+    const error = filesystemRefusal(caught) ?? caught;
     if (!(error instanceof ConfigError || error instanceof ConfigUsageError)) throw error;
     if (!json) throw new Error(`${error.message}\n${error.recovery}`, { cause: error });
     await output(
@@ -275,4 +276,20 @@ export async function runConfig(
     );
     return 1;
   }
+}
+
+/**
+ * Expected operating-system filesystem failures (permission, missing directory, full disk, …)
+ * become a structured refusal; anything else, including programming errors, still propagates.
+ */
+function filesystemRefusal(error: unknown): ConfigError | null {
+  if (!(error instanceof Error)) return null;
+  const { code, path } = error as NodeJS.ErrnoException;
+  if (typeof code !== "string" || !/^E[A-Z]+$/.test(code)) return null;
+  const where = path ? ` (${path})` : "";
+  return new ConfigError(
+    "filesystem",
+    `Could not access the configuration file${where}: ${code}.`,
+    "Check the file and its directory exist and are readable/writable by you, and that the disk has space; then retry. Nothing was changed.",
+  );
 }

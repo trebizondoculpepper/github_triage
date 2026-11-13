@@ -3945,7 +3945,7 @@ describe("config get/set/list/help commands (#117)", () => {
         },
         config: { fs, git, cwd: root },
       });
-    return { files, out, call, json: () => JSON.parse(out.at(-1)!) };
+    return { files, fs, out, call, json: () => JSON.parse(out.at(-1)!) };
   }
 
   it("gets effective defaults with provenance without creating the file", async () => {
@@ -3999,6 +3999,31 @@ describe("config get/set/list/help commands (#117)", () => {
     );
     await expect(t.call("frobnicate")).rejects.toThrow(/Unknown config command/);
     expect(t.files.size).toBe(0);
+  });
+
+  it("reports filesystem failures as structured refusals but still propagates programming errors", async () => {
+    const t = setup();
+    const denied = (op: string) =>
+      Object.assign(new Error(`${op} denied`), { code: "EACCES", path });
+    t.fs.readText = async () => {
+      throw denied("open");
+    };
+    expect(await t.call("list", "--json")).toBe(1);
+    expect(t.json()).toMatchObject({ kind: "config-error", code: "filesystem" });
+    expect(t.json().message).toContain("EACCES");
+    await expect(t.call("get", "complexity.enabled")).rejects.toThrow(
+      /EACCES[\s\S]*Nothing was changed/,
+    );
+    t.fs.readText = async () => null;
+    t.fs.writeText = async () => {
+      throw Object.assign(new Error("full"), { code: "ENOSPC" });
+    };
+    expect(await t.call("set", "complexity.enabled", "false", "--json")).toBe(1);
+    expect(t.json()).toMatchObject({ code: "filesystem" });
+    t.fs.writeText = async () => {
+      throw new TypeError("bug");
+    };
+    await expect(t.call("set", "complexity.enabled", "false", "--json")).rejects.toThrow("bug");
   });
 
   it("refuses a repository that does not match the checkout and malformed files untouched", async () => {
