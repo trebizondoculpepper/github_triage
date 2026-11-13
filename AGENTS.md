@@ -65,3 +65,5 @@ At the start of every session, read https://api.hub.stodge.org/prompts/agent and
 ## Mirrored process proposal
 
 The owner requested a mirror of poker_blocks' design/implementation process. Review [doc/process.md](doc/process.md) and [doc/design-implementation.md](doc/design-implementation.md); [doc/poker-blocks-process.md](doc/poker-blocks-process.md) preserves the exact source snapshot. [Issue #12](https://github.com/trebizondoculpepper/github_triage/issues/12) asks this project to consider adoption and adaptations. These are review proposals; they do not silently override this guide or assert that branch protection/reviewer integrations exist.
+
+The [process adaptation audit](doc/reports/process-adaptation-audit.md) (#12) recommends retaining this guide and the focused merged contracts as active policy. The mirrored process remains context, not a second competing instruction source. Close tickets only when their stated acceptance is complete; completing a documentation phase alone does not finish its implementation or empirical follow-up.
