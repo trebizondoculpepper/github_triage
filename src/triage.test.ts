@@ -6083,7 +6083,7 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
     linkedOpenPr?: boolean;
     prState?: string | null;
     labelledAt?: string;
-    events: { createdAt: string; label: { name: string } }[];
+    events: { __typename?: string; createdAt: string; label: { name: string } }[];
   };
   /** A mutable fake GitHub: writes through `run` change what later reads see. */
   const live = (initial: Partial<Live> & { labels: string[] }) => {
@@ -6099,6 +6099,10 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
     const addLabel = (name: string) => {
       s.labels.push(name);
       s.events.push({ createdAt: tick(), label: { name } });
+    };
+    const removeLabel = (name: string) => {
+      s.labels = s.labels.filter((l) => l !== name);
+      s.events.push({ __typename: "UnlabeledEvent", createdAt: tick(), label: { name } });
     };
     const writes: string[][] = [];
     const query = async (source: string, variables: Record<string, unknown> = {}) => {
@@ -6141,12 +6145,12 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
       if (args[1] === "edit")
         for (let i = 0; i < args.length; i++) {
           if (args[i] === "--add-label") addLabel(args[i + 1]);
-          if (args[i] === "--remove-label") s.labels = s.labels.filter((l) => l !== args[i + 1]);
+          if (args[i] === "--remove-label") removeLabel(args[i + 1]);
         }
       if (args[1] === "comment")
         s.comments.push({ body: args[args.indexOf("--body") + 1], createdAt: tick() });
     };
-    return { s, query, run, writes, addLabel };
+    return { s, query, run, writes, addLabel, removeLabel };
   };
   const pr = `https://github.com/${repo}/pull/70`;
   const release = (env: ReturnType<typeof live>, extra: Record<string, unknown> = {}) =>
@@ -6319,8 +6323,8 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
       await env.run(args);
     };
     await applyPlan(repo, await release(env), { run: failing, query: env.query });
-    // Simulate a partial label write: our label gone, target not yet added.
-    env.s.labels = ["agent:other"];
+    // The label write failed: our claim label is still there, so the step is unfinished.
+    expect(env.s.labels.sort()).toEqual(["agent:kavya", "agent:other"]);
     const retry = accepted(await release(env));
     expect(retry.changes.map((c) => c.step)).toEqual(["labels"]);
     expect(retry.notes!.join(" ")).toMatch(/Other owners kept: agent:other/);
@@ -6335,7 +6339,6 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
       await env.run(args);
     };
     await applyPlan(repo, await release(env), { run: failing, query: env.query });
-    env.s.labels = [];
     env.addLabel("agent:newcomer");
     expect(await release(env)).toMatchObject({ ok: false, error: "RELEASE_DIVERGED" });
     const ready = live({ labels: ["agent:kavya"] });
@@ -6361,6 +6364,35 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
       ok: false,
       error: "RELEASE_PENDING",
     });
+  });
+  it("never restores labels from a completed handoff after others changed them", async () => {
+    // Codex P2: done with an open PR, PR merged, a maintainer removes the review label.
+    const env = live({ labels: ["agent:kavya"], linkedOpenPr: true });
+    expect((await applyPlan(repo, await release(env, { outcome: "done" }), env)).exitCode).toBe(0);
+    expect(env.s.labels).toEqual(["status:awaiting-review"]);
+    env.s.linkedOpenPr = false;
+    env.removeLabel("status:awaiting-review");
+    const rerun = await release(env, { outcome: "done" });
+    expect(rerun).toMatchObject({ ok: true, noop: true, changes: [] });
+    const before = env.writes.length;
+    expect((await applyPlan(repo, rerun, env)).exitCode).toBe(0);
+    expect(env.writes).toHaveLength(before);
+    expect(env.s.labels).toEqual([]);
+  });
+  it("refuses an unfinished retry when a plan label was removed after the handoff", async () => {
+    const env = live({ labels: ["agent:kavya"] });
+    await applyPlan(repo, await release(env), {
+      run: async (args) => {
+        if (args[1] === "edit") throw new Error("failed");
+        await env.run(args);
+      },
+      query: env.query,
+    });
+    // Someone applied the recorded target, then deliberately took it off again.
+    env.addLabel("status:incomplete");
+    env.removeLabel("status:incomplete");
+    expect(await release(env)).toMatchObject({ ok: false, error: "RELEASE_DIVERGED" });
+    expect(env.s.labels).toContain("agent:kavya");
   });
   it("done: a linked open closing PR awaits review even when the supplied --pr is merged or unknown", async () => {
     for (const prState of ["MERGED", "CLOSED", null]) {

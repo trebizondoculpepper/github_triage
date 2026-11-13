@@ -140,7 +140,9 @@ interface TicketIssue {
   blockedBy: { nodes: { number: number; url: string; state: string }[] };
   closedByPullRequestsReferences: { nodes: { number: number; url: string; state: string }[] };
   comments: { nodes: { body: string; createdAt?: string }[] };
-  timelineItems?: { nodes: { createdAt?: string; label?: { name: string } }[] };
+  timelineItems?: {
+    nodes: { __typename?: string; createdAt?: string; label?: { name: string } }[];
+  };
 }
 type TicketItem = TicketIssue | { __typename: "PullRequest"; number: number; url: string };
 interface TicketResponse {
@@ -263,7 +265,7 @@ async function readTicket(
 ) {
   const [owner, name] = repository.split("/");
   const data = await query(
-    `query($owner:String!,$name:String!,$number:Int!,$label:String!,$question:String!,$decision:String!,$needsDesign:String!,$attention:String!${target ? ",$target:String!" : ""}){repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on PullRequest{number url} ... on Issue{number title url state updatedAt labels(first:100){nodes{name} pageInfo{hasNextPage}} issueDependenciesSummary{blockedBy} blockedBy(first:20){nodes{number url state}} closedByPullRequestsReferences(first:10,includeClosedPrs:false){nodes{number url state}} comments(last:100){nodes{body createdAt}} timelineItems(itemTypes:[LABELED_EVENT],last:50){nodes{... on LabeledEvent{createdAt label{name}}}}}} claims:issues(first:20,states:OPEN,labels:[$label]){nodes{number title url}} ownerLabel:label(name:$label){name} questionLabel:label(name:$question){name} decisionLabel:label(name:$decision){name} needsDesignLabel:label(name:$needsDesign){name} attentionLabel:label(name:$attention){name}${target ? " targetLabel:label(name:$target){name}" : ""}}}`,
+    `query($owner:String!,$name:String!,$number:Int!,$label:String!,$question:String!,$decision:String!,$needsDesign:String!,$attention:String!${target ? ",$target:String!" : ""}){repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on PullRequest{number url} ... on Issue{number title url state updatedAt labels(first:100){nodes{name} pageInfo{hasNextPage}} issueDependenciesSummary{blockedBy} blockedBy(first:20){nodes{number url state}} closedByPullRequestsReferences(first:10,includeClosedPrs:false){nodes{number url state}} comments(last:100){nodes{body createdAt}} timelineItems(itemTypes:[LABELED_EVENT,UNLABELED_EVENT],last:50){nodes{__typename ... on LabeledEvent{createdAt label{name}} ... on UnlabeledEvent{createdAt label{name}}}}}} claims:issues(first:20,states:OPEN,labels:[$label]){nodes{number title url}} ownerLabel:label(name:$label){name} questionLabel:label(name:$question){name} decisionLabel:label(name:$decision){name} needsDesignLabel:label(name:$needsDesign){name} attentionLabel:label(name:$attention){name}${target ? " targetLabel:label(name:$target){name}" : ""}}}`,
     {
       owner,
       name,
@@ -410,7 +412,7 @@ export async function planClaim(
     // This acquisition began when the label was last added; only a claim comment posted since
     // then counts, so an earlier claim's comment (before a release) does not.
     const since = (item.timelineItems?.nodes ?? [])
-      .filter((e) => e.label?.name === mine)
+      .filter((e) => e.__typename !== "UnlabeledEvent" && e.label?.name === mine)
       .map((e) => e.createdAt)
       .sort()
       .at(-1);
@@ -774,7 +776,9 @@ export async function planRelease(
   // The operation identity is the claim being released (when its label was last added). The
   // handoff comment is posted BEFORE any label changes and carries the full label plan, so a
   // retry is authorised only by that durable record of intent, never by label history alone.
-  const labelled = (item.timelineItems?.nodes ?? []).filter((e) => e.label && e.createdAt);
+  const events = (item.timelineItems?.nodes ?? []).filter((e) => e.label && e.createdAt);
+  const removed = (e: (typeof events)[number]): boolean => e.__typename === "UnlabeledEvent";
+  const labelled = events.filter((e) => !removed(e));
   const since =
     labelled
       .filter((e) => e.label!.name === mine)
@@ -792,11 +796,11 @@ export async function planRelease(
     const recorded = { ...facts, outcome: record.outcome, target: record.target };
     const same = (a: string[], b: string[]): boolean =>
       a.length === b.length && a.every((x) => b.includes(x));
-    const complete =
-      (!record.target || label(item, record.target)) &&
-      !record.remove.some((l) => label(item, l)) &&
-      same(others, record.retained);
-    if (complete)
+    // The plan removes the caller's own claim label in the same write that applies the rest, so
+    // while that label is present the label step is demonstrably unfinished. Once it is gone the
+    // step completed, and whatever happened to the labels since (a merged PR's review label
+    // removed by a maintainer, say) belongs to others: never restore labels from the plan.
+    if (!holds)
       return {
         ok: true,
         noop: true,
@@ -807,13 +811,15 @@ export async function planRelease(
     // Anything another party did after the record (a new owner, a readiness label other than
     // the recorded target) means the recorded plan no longer describes the ticket.
     const handoffStates = [...workflow.readiness, claimPolicy.awaitingReview];
-    const later = labelled
-      .filter((e) => e.createdAt! > record.createdAt)
-      .map((e) => e.label!.name)
-      .filter(
-        (n) =>
-          n !== record.target && (n.startsWith(workflow.ownerPrefix) || handoffStates.includes(n)),
-      );
+    // Additions and removals both count; only changes the plan itself makes are expected.
+    const relevant = (n: string): boolean =>
+      n.startsWith(workflow.ownerPrefix) || handoffStates.includes(n);
+    const later = events
+      .filter((e) => e.createdAt! > record.createdAt && relevant(e.label!.name))
+      .filter((e) =>
+        removed(e) ? !record.remove.includes(e.label!.name) : e.label!.name !== record.target,
+      )
+      .map((e) => `${removed(e) ? "-" : "+"}${e.label!.name}`);
     if (later.length || !same(others, record.retained))
       return refuse(
         "RELEASE_DIVERGED",
