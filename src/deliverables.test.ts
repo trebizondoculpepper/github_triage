@@ -739,6 +739,55 @@ describe("deliverables maintainer overrides", () => {
     expect(posted(state)).toHaveLength(1);
     expect(state.labels).toEqual(["status:incomplete"]);
   });
+  it("a recorded reset's label retry re-checks prerequisites: a new claim refuses CLAIM_HELD", async () => {
+    const closed = fakePr(5, { state: "CLOSED" });
+    let fail = true;
+    const { rt, state } = github({
+      comments: [submitted()],
+      prs: [closed],
+      labels: ["status:awaiting-review"],
+      failRun: (args) => args[1] === "edit" && fail,
+    });
+    const req = request("reset", { agent: "maint", as: "ready" });
+    expect((await applyDeliverables(repo, req, rt)).exitCode).toBe(2);
+    fail = false;
+    state.labels.push("agent:bob");
+    const retry = refused(await applyDeliverables(repo, req, rt), "CLAIM_HELD");
+    expect(retry.prerequisite).toMatch(
+      /reset is recorded \(comment \d+\) but its labels were not applied/,
+    );
+    expect(retry.recovery.at(-1)).toMatch(/deliverables 42 reset --agent maint --as ready/);
+    expect(posted(state)).toHaveLength(1);
+    expect(state.writes.filter((w) => w[1] === "edit")).toHaveLength(0);
+    expect(state.labels).toEqual(["status:awaiting-review", "agent:bob"]);
+  });
+  it("a recorded reset's label retry re-checks prerequisites: a reopened PR refuses RESET_HAS_OPEN_PR", async () => {
+    const pr = fakePr(5, { state: "CLOSED" });
+    const linked: { number: number; url: string; state: string }[] = [];
+    let fail = true;
+    const { rt, state } = github({
+      comments: [submitted()],
+      prs: [pr],
+      linked,
+      labels: ["status:awaiting-review"],
+      failRun: (args) => args[1] === "edit" && fail,
+    });
+    const req = request("reset", { agent: "maint", as: "incomplete" });
+    expect((await applyDeliverables(repo, req, rt)).exitCode).toBe(2);
+    fail = false;
+    pr.state = "OPEN";
+    const reopened = refused(await applyDeliverables(repo, req, rt), "RESET_HAS_OPEN_PR");
+    expect(reopened.prerequisite).toMatch(/labels were not applied[\s\S]*re-run the same reset/);
+    pr.state = "CLOSED";
+    linked.push({ number: 8, url: prLink(8), state: "OPEN" });
+    refused(await applyDeliverables(repo, req, rt), "RESET_HAS_OPEN_PR");
+    expect(posted(state)).toHaveLength(1);
+    expect(state.labels).toEqual(["status:awaiting-review"]);
+    linked.length = 0;
+    expect((await applyDeliverables(repo, req, rt)).exitCode).toBe(0);
+    expect(posted(state)).toHaveLength(1);
+    expect(state.labels).toEqual(["status:incomplete"]);
+  });
   it("DELIVERY_DIVERGED: a recorded reset whose labels were changed by others is not re-applied", async () => {
     const closed = fakePr(5, { state: "CLOSED" });
     const reset = rec("reset", {
@@ -819,4 +868,155 @@ describe("deliverables record-state refusals", () => {
       "NOT_AN_ISSUE",
     );
   });
+});
+
+describe("deliverables retry detection compares every defining field", () => {
+  const recorded = (plan: DeliverablesPlan) =>
+    plan.ok && /already recorded/i.test(plan.reason ?? "");
+  const sub = submitted();
+  const twoMembers = post(
+    rec("submit", { deliverables: [member(5), member(6)], membership: "complete" }),
+  );
+  const bad1 = comment("<!-- github-triage:delivery v1 {not json} -->");
+  const bad2 = comment("<!-- github-triage:delivery v1 {also not json} -->");
+  const cases: {
+    op: string;
+    comments: DeliveryComment[];
+    labels?: string[];
+    prs?: FakePr[];
+    same: DeliverablesRequest;
+    differ: [string, DeliverablesRequest][];
+  }[] = [
+    {
+      op: "attach",
+      comments: [
+        post(
+          rec("attach", { responsible: "alice", deliverables: [member(9)], membership: "open" }),
+        ),
+      ],
+      labels: ["agent:alice"],
+      prs: [fakePr(9)],
+      same: request("attach", { prs: [prLink(9)], membership: "open", reason: null }),
+      differ: [
+        [
+          "membership",
+          request("attach", { prs: [prLink(9)], membership: "complete", reason: null }),
+        ],
+        [
+          "target",
+          request("attach", {
+            prs: [prLink(9)],
+            membership: "open",
+            target: { repository: repo, branch: "main" },
+            reason: null,
+          }),
+        ],
+        [
+          "deliverables",
+          request("attach", { prs: [prLink(10)], membership: "open", reason: null }),
+        ],
+        [
+          "agent",
+          request("attach", { agent: "bob", prs: [prLink(9)], membership: "open", reason: null }),
+        ],
+      ],
+    },
+    {
+      op: "detach",
+      comments: [twoMembers, post(rec("detach", { deliverables: [member(5)] }))],
+      same: request("detach", { prs: [prLink(5)] }),
+      differ: [["deliverables", request("detach", { prs: [prLink(6)] })]],
+    },
+    {
+      op: "retarget",
+      comments: [
+        sub,
+        post(
+          rec("retarget", {
+            deliverables: [{ ...member(5), target: { repository: repo, branch: "main" } }],
+          }),
+        ),
+      ],
+      prs: [fakePr(5)],
+      same: request("retarget", { prs: [prLink(5)], target: { repository: repo, branch: "main" } }),
+      differ: [["target", request("retarget", { prs: [prLink(5)] })]],
+    },
+    {
+      op: "handoff",
+      comments: [
+        sub,
+        post(
+          rec("handoff", {
+            deliverables: [member(5)],
+            to: "bob",
+            scope: "deliverable",
+            expectedResponsibilityRecord: String(sub.databaseId),
+          }),
+        ),
+      ],
+      same: request("handoff", { prs: [prLink(5)], to: "bob" }),
+      differ: [
+        ["to", request("handoff", { prs: [prLink(5)], to: "carol" })],
+        ["scope", request("handoff", { to: "bob" })],
+      ],
+    },
+    {
+      op: "membership",
+      comments: [
+        post(rec("submit", { deliverables: [member(5)], membership: "open" })),
+        post(rec("membership", { membership: "complete" })),
+      ],
+      labels: ["agent:alice"],
+      same: request("membership", { membership: "complete" }),
+      differ: [["membership", request("membership", { membership: "open" })]],
+    },
+    {
+      op: "reassign",
+      comments: [sub, post(rec("reassign", { agent: "maint", to: "bob", login: "writer" }))],
+      same: request("reassign", { agent: "maint", to: "bob" }),
+      differ: [["to", request("reassign", { agent: "maint", to: "carol" })]],
+    },
+    {
+      op: "reset",
+      comments: [
+        sub,
+        post(
+          rec("reset", {
+            agent: "maint",
+            login: "writer",
+            plan: { remove: ["status:awaiting-review"], add: ["status:ready"] },
+          }),
+        ),
+      ],
+      labels: ["status:awaiting-review"],
+      prs: [fakePr(5, { state: "CLOSED" })],
+      same: request("reset", { agent: "maint", as: "ready" }),
+      differ: [["as", request("reset", { agent: "maint", as: "incomplete" })]],
+    },
+    {
+      op: "void",
+      comments: [
+        sub,
+        bad1,
+        bad2,
+        post(rec("void", { agent: "maint", voids: String(bad1.databaseId), login: "writer" })),
+      ],
+      same: request("void", { agent: "maint", comment: String(bad1.databaseId) }),
+      differ: [["voids", request("void", { agent: "maint", comment: String(bad2.databaseId) })]],
+    },
+  ];
+  for (const c of cases)
+    it(`${c.op}: an identical request is a retry; a differing defining field is not`, async () => {
+      const setup = { comments: c.comments, labels: c.labels, prs: c.prs };
+      expect(recorded(await planDeliverables(repo, c.same, github(setup).rt))).toBe(true);
+      // Reason text is descriptive, not defining: rewording it is still a retry.
+      expect(
+        recorded(await planDeliverables(repo, { ...c.same, reason: "reworded" }, github(setup).rt)),
+      ).toBe(true);
+      for (const [field, req] of c.differ)
+        expect([field, recorded(await planDeliverables(repo, req, github(setup).rt))]).toEqual([
+          field,
+          false,
+        ]);
+    });
 });

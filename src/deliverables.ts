@@ -359,19 +359,77 @@ export function deliverablesCommand(repository: string, r: DeliverablesRequest):
 }
 const targetText = (t: DeliveryTarget): string => `${t.repository}:${t.branch ?? ""}`;
 
-/** Whether a folded record is the one this request would write (for retry detection). */
-function sameRequest(rec: DeliveryRecord, op: DeliveryOp, r: DeliverablesRequest, keys: string[]) {
-  const recKeys = rec.deliverables.map(deliverableKey).sort();
-  return (
-    rec.op === op &&
-    rec.agent === r.agent &&
-    JSON.stringify(recKeys) === JSON.stringify([...keys].sort()) &&
-    (rec.to ?? null) === r.to &&
-    (rec.voids ?? null) === r.comment &&
-    (r.action !== "membership" || rec.membership === r.membership) &&
-    (rec.reason ?? null) === r.reason
-  );
+/** The label plan a reset `--as` writes, shared by the reset step and retry detection. */
+const resetPlan = (as: DeliverablesRequest["as"]): { remove: string[]; add: string[] } => ({
+  remove: [claimPolicy.awaitingReview],
+  add: [as === "ready" ? workflow.ready : claimPolicy.incomplete],
+});
+
+/**
+ * The fields that define each op: two records with equal values here are the same operation, so
+ * a later identical request is a retry. Every op also compares `op` and `agent`. Deliverables
+ * compare by identity and target.
+ *
+ * Excluded everywhere, because they describe or observe an operation rather than define it:
+ * `reason` and `evidence` (free text; rewording a retry must not post a second record), `opId`
+ * and `issuedAt` (derived per attempt), `login` and `legacyRelease` (read from the authenticated
+ * account and history, not chosen by the request), `responsible` (always the caller),
+ * `expectedResponsibilityRecord` (the fold the record was planned against), `nodeId`/`headOid`
+ * (live provenance that may move between attempts) and the evaluation fields.
+ */
+const definingFields: Record<DeliveryOp, (keyof DeliveryRecord)[]> = {
+  submit: ["deliverables", "membership"],
+  attach: ["deliverables", "membership"],
+  "legacy-attach": ["deliverables", "membership"],
+  "legacy-attest": ["deliverables", "membership"],
+  detach: ["deliverables"],
+  retarget: ["deliverables"],
+  handoff: ["deliverables", "to", "scope"],
+  membership: ["membership"],
+  attest: ["deliverables"],
+  complete: ["deliverables"],
+  reassign: ["to"],
+  reset: ["plan"],
+  void: ["voids"],
+};
+const defining = (rec: Partial<DeliveryRecord> & { op: DeliveryOp }): string =>
+  JSON.stringify([
+    rec.op,
+    rec.agent,
+    ...definingFields[rec.op].map((f) => {
+      const v = rec[f];
+      if (f === "deliverables")
+        return (v as Deliverable[])
+          .map((d) => [deliverableKey(d), d.target.repository.toLowerCase(), d.target.branch])
+          .sort((a, b) => a[0]!.localeCompare(b[0]!));
+      return v ?? null;
+    }),
+  ]);
+/** The defining fields a request would write, in record form (see `definingFields`). */
+function intended(
+  op: DeliveryOp,
+  r: DeliverablesRequest,
+  deliverables: Deliverable[],
+): Partial<DeliveryRecord> & { op: DeliveryOp } {
+  return {
+    op,
+    agent: r.agent,
+    deliverables: op === "legacy-attest" ? [] : deliverables,
+    membership:
+      op === "legacy-attach"
+        ? (r.membership ?? "complete")
+        : op === "legacy-attest"
+          ? "complete"
+          : (r.membership ?? undefined),
+    to: r.to ?? undefined,
+    scope: op === "handoff" ? (deliverables.length ? "deliverable" : "ticket") : undefined,
+    voids: r.comment ?? undefined,
+    plan: op === "reset" ? resetPlan(r.as) : undefined,
+  };
 }
+/** Whether a folded record is the one this request would write (retry detection). */
+const sameRequest = (rec: DeliveryRecord, want: Partial<DeliveryRecord> & { op: DeliveryOp }) =>
+  rec.op === want.op && defining(rec) === defining(want);
 
 /**
  * Plan one `deliverables` command. Reads only; `applyDeliverables` performs the writes.
@@ -416,6 +474,7 @@ export async function planDeliverables(
       [cmd(`pr ${number}`)],
     );
   const labels = item.labels.nodes.map((l) => l.name);
+  const linked = item.closedByPullRequestsReferences;
   const claims = labels
     .filter((l) => l.startsWith(workflow.ownerPrefix))
     .map((l) => l.slice(workflow.ownerPrefix.length));
@@ -654,7 +713,6 @@ export async function planDeliverables(
       target: { repository: checkTarget.repository, branch: r.target?.branch ?? null },
     });
   }
-  const keys = deliverables.map(deliverableKey);
 
   const issuedAt = rt.now().toISOString();
   const draft = (fields: Partial<DeliveryRecord>): DeliveryRecord => {
@@ -731,7 +789,7 @@ export async function planDeliverables(
     retry,
   });
 
-  if (last && sameRequest(last.record, op, r, keys)) {
+  if (last && sameRequest(last.record, intended(op, r, deliverables))) {
     // The record step is done. Only reset has a later step: its recorded label plan.
     if (op === "reset" && last.record.plan) {
       const plan = last.record.plan;
@@ -748,6 +806,17 @@ export async function planDeliverables(
           `A reset is recorded (comment ${lastApplied!.comment}) but the labels now contradict its plan (add ${plan.add.join(", ") || "nothing"}, remove ${plan.remove.join(", ") || "nothing"}); others' changes are never reverted.`,
           [inspect, cmd(`who ${number}`)],
         );
+      // Finishing the plan is a write, so the reset's live prerequisites are checked again: a
+      // claim or open PR that appeared since the record was posted blocks the labels too.
+      const blocked = await resetPrerequisites();
+      if (blocked)
+        return {
+          ...blocked,
+          prerequisite: `A reset is recorded (comment ${lastApplied!.comment}) but its labels were not applied (add ${plan.add.join(", ") || "nothing"}, remove ${plan.remove.join(", ") || "nothing"}), and its prerequisites no longer hold: ${blocked.prerequisite} No further record is posted; resolve this, then re-run the same reset to apply the recorded labels.`,
+          recovery: blocked.recovery.includes(retry)
+            ? blocked.recovery
+            : [...blocked.recovery, retry],
+        };
       return {
         ok: true,
         noop: false,
@@ -948,37 +1017,9 @@ export async function planDeliverables(
       return accepted(draft({ to, login }), `override by ${agent} (${login}): reassigned to ${to}`);
     }
     case "reset": {
-      if (claims.length)
-        return claimHeld(claims, "a maintainer reset never overrides a held claim");
-      const open: string[] = [];
-      const unreadable: string[] = [];
-      for (const p of item.closedByPullRequestsReferences.nodes)
-        if (p.state === "OPEN") open.push(p.url);
-      if (item.closedByPullRequestsReferences.pageInfo?.hasNextPage)
-        unreadable.push("more than 20 linked pull requests");
-      for (const m of fold.members) {
-        if (m.deliverable.kind !== "pr") continue;
-        const url = `https://github.com/${m.deliverable.repository}/pull/${m.deliverable.number}`;
-        const live = await readPr(url, rt.query);
-        if (!live) unreadable.push(url);
-        else if (live.state === "OPEN" && !open.includes(live.url)) open.push(live.url);
-      }
-      if (open.length || unreadable.length)
-        return refuse(
-          "RESET_HAS_OPEN_PR",
-          { ...facts, pullRequests: open },
-          `${open.length ? `Open pull request(s) link or close #${number}: ${open.join(", ")}. ` : ""}${unreadable.length ? `Open-PR state could not be read for: ${unreadable.join(", ")}. ` : ""}A reset would leave the ticket unpickable; reassign instead (the new agent adopts or replaces the PR with claim --rework), or close or unlink the open PRs first, then reset.`,
-          [
-            cmd(`deliverables ${number} reassign --agent ${agent} --to AGENT --reason TEXT`),
-            ...open.map((u) => {
-              const m = prUrl.exec(u);
-              return m ? `gh pr close ${m[2]} --repo ${m[1]} --comment TEXT` : u;
-            }),
-            retry,
-          ],
-        );
-      const add = [r.as === "ready" ? workflow.ready : claimPolicy.incomplete];
-      const remove = [claimPolicy.awaitingReview];
+      const blocked = await resetPrerequisites();
+      if (blocked) return blocked;
+      const { add, remove } = resetPlan(r.as);
       return accepted(
         draft({ login, plan: { remove, add } }),
         `override by ${agent} (${login}): reset to ${r.as}`,
@@ -1000,6 +1041,37 @@ export async function planDeliverables(
         `override by ${agent} (${login}): voided comment ${target}`,
       );
     }
+  }
+
+  /** Reset's live prerequisites (no claim, no open or unreadable linked PR); null when they hold. */
+  async function resetPrerequisites(): Promise<DeliverablesRefusal | null> {
+    if (claims.length) return claimHeld(claims, "a maintainer reset never overrides a held claim");
+    const open: string[] = [];
+    const unreadable: string[] = [];
+    for (const p of linked.nodes) if (p.state === "OPEN") open.push(p.url);
+    if (linked.pageInfo?.hasNextPage) unreadable.push("more than 20 linked pull requests");
+    for (const m of fold.members) {
+      if (m.deliverable.kind !== "pr") continue;
+      const url = `https://github.com/${m.deliverable.repository}/pull/${m.deliverable.number}`;
+      const live = await readPr(url, rt.query);
+      if (!live) unreadable.push(url);
+      else if (live.state === "OPEN" && !open.includes(live.url)) open.push(live.url);
+    }
+    if (open.length || unreadable.length)
+      return refuse(
+        "RESET_HAS_OPEN_PR",
+        { ...facts, pullRequests: open },
+        `${open.length ? `Open pull request(s) link or close #${number}: ${open.join(", ")}. ` : ""}${unreadable.length ? `Open-PR state could not be read for: ${unreadable.join(", ")}. ` : ""}A reset would leave the ticket unpickable; reassign instead (the new agent adopts or replaces the PR with claim --rework), or close or unlink the open PRs first, then reset.`,
+        [
+          cmd(`deliverables ${number} reassign --agent ${agent} --to AGENT --reason TEXT`),
+          ...open.map((u) => {
+            const m = prUrl.exec(u);
+            return m ? `gh pr close ${m[2]} --repo ${m[1]} --comment TEXT` : u;
+          }),
+          retry,
+        ],
+      );
+    return null;
   }
 
   /** Legacy eligibility (doc "Legacy attachment" / "Legacy attestation"); null when eligible. */
