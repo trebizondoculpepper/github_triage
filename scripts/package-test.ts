@@ -101,6 +101,10 @@ try {
     const help = await cli(["--help"]);
     if (!help.stdout.startsWith("Usage:"))
       throw new Error(`Installed bin printed no help in ${cwd}.`);
+    // The bundled complexity guidance must ship inside the packed artifact.
+    const guidance = await cli(["estimate", "--help"]);
+    if (!/XS[\s\S]*XXL/.test(guidance.stdout) || !guidance.stdout.includes("guidance (version"))
+      throw new Error(`Installed bin printed no complexity guidance in ${cwd}.`);
     const invalid = await cli(["--no-such-option"]).then(
       () => null,
       (error: { code?: unknown }) => error,
@@ -125,7 +129,7 @@ try {
     );
   }
   console.log(
-    "ok   global bin works from separate working directories (help, invalid args, smoke)",
+    "ok   global bin works from separate working directories (help, guidance, invalid args, smoke)",
   );
   console.log("Package test passed.");
 } finally {
