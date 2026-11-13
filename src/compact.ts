@@ -272,7 +272,7 @@ export function compactText(report: CompactBriefing, maxChars = 10000): string {
       }
       shown.add(url);
       rows.push(
-        `- #${s.number} ${s.title} ${s.owners.join(", ")}\n  ${s.findings.map((f) => `[${f.uncertainty}] ${f.reason} Next: ${f.next}`).join(" ")}\n  ${url}${s.pullRequest ? `\n  Head ${s.pullRequest.head}; ${s.pullRequest.checks.map((c) => `${c.name}:${c.outcome}`).join(", ")}; ${s.pullRequest.unresolvedThreads} unresolved threads` : ""}\n  ${s.source.chronology}\n  ${s.detailCommand}`,
+        `- #${s.number} ${s.title} ${s.owners.join(", ")}\n  ${s.findings.map((f) => `[${f.uncertainty}] ${f.reason}${markerSource(f)} Next: ${f.next}`).join(" ")}\n  ${url}${s.pullRequest ? `\n  Head ${s.pullRequest.head}; ${s.pullRequest.checks.map((c) => `${c.name}:${c.outcome}`).join(", ")}; ${s.pullRequest.unresolvedThreads} unresolved threads` : ""}\n  ${s.source.chronology}\n  ${s.detailCommand}`,
       );
     }
   };
@@ -315,4 +315,15 @@ function defined<T>(value: T | undefined): T {
   // Narrowly justified: the runtime failure mode for an impossible miss is preserved
   // deliberately rather than invented; callers only pass lookups of known keys.
   return value as T;
+}
+
+/** Designer-marker findings (#40) cite the comment that supplied their reason, beyond the target. */
+const designMarkerRules: ReadonlySet<string> = new Set([
+  "design-decision-needed",
+  "design-documentation-needed",
+]);
+function markerSource(finding: Action): string {
+  if (!designMarkerRules.has(finding.rule)) return "";
+  const source = finding.evidence.slice(1).at(-1);
+  return source ? ` Source: ${source}` : "";
 }

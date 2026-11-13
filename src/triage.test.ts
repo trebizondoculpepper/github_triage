@@ -2480,6 +2480,8 @@ describe("designer groups: decision needed vs agreed-needs-documentation (#40)",
     const text = compactText(compact, 50000);
     expect(text).toContain("DECISION NEEDED (2;");
     expect(text).toContain("AGREED, NEEDS DOCUMENTATION (2;");
+    expect(text).toContain(`which flag name?" Source: ${decide.url}#c1 Next:`);
+    expect(text.match(/Source: /g)).toHaveLength(1);
   });
 });
 
