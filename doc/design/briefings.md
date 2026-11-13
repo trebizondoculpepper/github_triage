@@ -12,6 +12,10 @@ Eligible implementation pickup is open, unclaimed, `status:ready` or `status:inc
 
 `platform:codex`, `platform:claude-code`, `platform:opencode`, `platform:ori` represent explicit restrictions. Multiple platform labels are an allowed-set; the viewer must match one. No platform label means unrestricted. Unknown viewer platform means restricted tickets are inspection context, not confirmed pickup. This does not restrict non-exclusive attention visibility.
 
+## Blended next-action policy
+
+The reviewed replacement policy is [blended-action-queues.md](blended-action-queues.md). On delivery it replaces fixed implementation-before-estimation ordering in both role views; the paragraphs below retain the existing baseline and unrelated eligibility rules. Assessments become first-class ranked actions, with paired impact/complexity facts and cross-role boosts.
+
 ## Implementer: advance implementation
 
 First matching action group: (1) attention explicitly addressed to the viewer, (2) actionable PR follow-up, (3) own active work, (4) eligible pickup. Keep directed attention visible regardless of role or urgency. Group linked ticket/PR work once and retain all relevant reasons.
