@@ -4,7 +4,7 @@ Contract for #25, informed by #19 and identity investigation #69. This is a docu
 
 ## SDK and architecture
 
-Use the official **`@modelcontextprotocol/server` v2** and Zod v4 with plain JavaScript ESM and Node 20+. On 2026-11-13, `npm view @modelcontextprotocol/server version engines dependencies --json` reports 2.4.0, Node >=20, core 2.4.0 and Zod ^4.2.0. The [official tool documentation](https://ts.sdk.modelcontextprotocol.io/v2/servers/tools.html) provides registration and validated input/output schemas; [stdio documentation](https://ts.sdk.modelcontextprotocol.io/v2/serving/stdio.html) provides `serveStdio(factory)` and protocol negotiation. Pin the reviewed dependency selection through the lockfile; recheck API/engines at implementation rather than invent framing or adopt a framework.
+Use the official **`@modelcontextprotocol/server` v2** and Zod v4 with TypeScript source, emitted ESM and Node 20+ (owner language decision #91). On 2026-11-13, `npm view @modelcontextprotocol/server version engines dependencies --json` reports 2.4.0, Node >=20, core 2.4.0 and Zod ^4.2.0. The [official tool documentation](https://ts.sdk.modelcontextprotocol.io/v2/servers/tools.html) provides registration and validated input/output schemas; [stdio documentation](https://ts.sdk.modelcontextprotocol.io/v2/serving/stdio.html) provides `serveStdio(factory)` and protocol negotiation. Pin the reviewed dependency selection through the lockfile; recheck API/engines at implementation rather than invent framing or adopt a framework.
 
 Create a transport-neutral read service around existing collection, dependency and presentation functions, with injected GitHub/clock/project/filesystem boundaries. CLI and MCP call it directly; do not invoke the CLI in a subprocess or parse terminal text. Reuse authenticated `gh` via the existing argument-array runner. No new credential store or token arguments. Keep mutation imports/routes separate and unavailable through this tool registry.
 
@@ -57,7 +57,7 @@ Stdio stdout is protocol only. Logs, startup messages and update notices cannot 
 
 ## Packaging and setup
 
-Ship a second bundled executable **`github-triage-mcp`** at `dist/mcp.mjs` in the same scoped npm package, alongside the existing bin. Update the allowlist/installed-archive test intentionally for the second artifact. Global install remains recommended; hosts launch `github-triage-mcp --project /absolute/project/path`. Source checkout development may run `node src/mcp.js` once implemented. Installation must not register a host or modify live config automatically.
+Ship a second bundled executable **`github-triage-mcp`** at `dist/mcp.mjs` in the same scoped npm package, alongside the existing bin. Update the allowlist/installed-archive test intentionally for the second artifact. Global install remains recommended; hosts launch `github-triage-mcp --project /absolute/project/path`. The source entry point is `src/mcp.ts`; development uses the TypeScript migration’s approved runner or precompilation path, not direct Node 20 execution of TypeScript. Installation must not register a host or modify live config automatically.
 
 Document a generic stdio configuration with command/argument array, plus verified host-specific examples. The executable name is not a separate npm package: do not recommend `npx -y github-triage-mcp`. If documenting temporary npm execution, use the actual scoped package and version with npm exec, validated in the archive test. Every example is marked planned until installed-bin smoke passes.
 
