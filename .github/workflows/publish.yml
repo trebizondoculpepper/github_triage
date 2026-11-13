@@ -60,7 +60,7 @@ jobs:
             || { echo "::error::$SHA is not on main."; exit 1; }
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 26
           registry-url: https://registry.npmjs.org
       - name: npm with trusted publishing support
         run: npm install -g npm@^11.5.1

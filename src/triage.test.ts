@@ -419,7 +419,7 @@ esac
         await writeFile(join(dir, "gh"), fake, { mode: 0o700 });
         const { stdout } = await promisify(execFile)(
           process.execPath,
-          // Source development runs through tsx (doc/design/typescript.md); Node 20 cannot run .ts.
+          // Source development runs through tsx (doc/design/typescript.md).
           ["--import", "tsx", fileURLToPath(new URL("./cli.ts", import.meta.url)), "--json"],
           {
             env: {

@@ -1,6 +1,6 @@
 # Practical usage
 
-The installed CLI needs Node 20+ and authenticated `gh`. Check the existing session with `gh auth status`; the tool reuses it rather than handling tokens. For source development use Node 22+, `npm ci`, and prefix the examples below with `npm run --silent triage --` in place of `github-triage`.
+The installed CLI needs Node 26+ (the current LTS) and authenticated `gh`. Check the existing session with `gh auth status`; the tool reuses it rather than handling tokens. For source development use Node 26+ too, `npm ci`, and prefix the examples below with `npm run --silent triage --` in place of `github-triage`.
 
 ## Manual urgency
 

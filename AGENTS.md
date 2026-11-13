@@ -45,7 +45,7 @@ npx tsx scripts/smoke.ts src/cli.ts           # same smoke against the TypeScrip
 npm run package-test                          # pack, install globally into a temp prefix, smoke
 ```
 
-Without `--repo`, the target repository is resolved by `gh repo view` from the current working directory. The runtime uses only Node built-ins and `gh`; shared GitHub fact types live in `src/types.d.ts`; `tsconfig.json` (strict) covers `src/` and `scripts/`, and `doc/reports/examples/tsconfig.json` covers the rules examples. Tests are in `src/triage.test.ts`; one test fakes `gh` with a POSIX shell script and is skipped on Windows. The CLI supports Node 20+, but the Vite+ tooling needs Node 22+. CI runs the checks, tests, build and smoke tests on Ubuntu, macOS and Windows with Node 20, 22 and 24; the single `verify` job passes only when every matrix job passes, and is the check to require. Line endings are LF everywhere.
+Without `--repo`, the target repository is resolved by `gh repo view` from the current working directory. The runtime uses only Node built-ins and `gh`; shared GitHub fact types live in `src/types.d.ts`; `tsconfig.json` (strict) covers `src/` and `scripts/`, and `doc/reports/examples/tsconfig.json` covers the rules examples. Tests are in `src/triage.test.ts`; one test fakes `gh` with a POSIX shell script and is skipped on Windows. The CLI and tooling target the current Node LTS, Node 26+ (`engines`, doc/design/runtime.md). CI runs the checks, tests, build, smoke tests and package test on Ubuntu, macOS and Windows with Node 26; the single `verify` job passes only when every matrix job passes, and is the check to require. Line endings are LF everywhere.
 
 ## Choosing work
 
