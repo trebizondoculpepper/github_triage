@@ -1,6 +1,6 @@
 # Practical usage
 
-The installed CLI needs Node 20+ and authenticated `gh`. Check the existing session with `gh auth status`; the tool reuses it rather than handling tokens. For source development use Node 22+, `npm ci`, and prefix the examples below with `npm run --silent triage --` in place of `github-triage`.
+The installed CLI needs Node 26+ (the current LTS) and authenticated `gh`. Check the existing session with `gh auth status`; the tool reuses it rather than handling tokens. For source development use Node 26+ too, `npm ci`, and prefix the examples below with `npm run --silent triage --` in place of `github-triage`.
 
 ## Designer groups
 
@@ -64,6 +64,10 @@ Wrong repository: pass --repo. Missing auth: inspect gh auth status. Incomplete 
 ## Version check
 
 When the CLI runs from an npm installation, each invocation (except `--help`) asks npm once for the latest version on its channel (stable installs compare with `latest`, prerelease installs with `next`). The lookup uses a 1.5 s timeout and runs alongside the command, so it does not block triage; if npm has a newer version, one line on stderr names it and the `npm install -g` command (stdout, including `--json`, is unchanged). Downgrades are never suggested. A registry failure is reported as unknown on explicit inspection, never as up to date. Source checkouts, `--offline`, `--no-update-check` and `GITHUB_TRIAGE_NO_UPDATE_CHECK=1` make no network request. `github-triage version` (or `version --json`) shows the installed version and the check's result or the reason it was skipped. Only this package's name is sent to npm. This basic slice checks once per invocation; a daily cache and quieter repeat notices are #65.
+
+## Why is a pull request not progressing?
+
+`github-triage pr N [--json]` reads one pull request live and lists every current blocker at once: the required `verify` check classified as passed, pending, not yet reported, cancelled (incomplete verification; a cancelled job with no recorded run time is likely infrastructure, not a code defect), failed or missing; other failed or cancelled checks; draft state; conflicts or unknown mergeability; requested changes; unresolved review threads (with the finding, who raised it, replies and who spoke last); and whether Codex's latest review covers the current head. It shows each reviewer's latest review and the commit it reviewed, review receipts posted as comments, whether the last `@codex review`/`@coderabbitai review` request has been answered, and the linked issues with their `agent:` owners. Merge-readiness blockers are omitted for merged or closed pull requests. With no blocker it says so and recommends inspecting the diff; it never approves. Output is bounded with omitted counts; exit 2 when evidence is incomplete.
 
 ## Transferred, missing and forbidden issues
 

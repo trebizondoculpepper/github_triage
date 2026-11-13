@@ -28,7 +28,24 @@ Do not start a JavaScript application implementation under `src/`. The helper-sc
 
 Helpers in `scripts/` may use TypeScript, JavaScript, shell, batch files, PowerShell, or Python. Choose a language that fits the task. Record a short justification for a non-TypeScript helper—for example integration with an existing scripting system—and document its runtime dependencies and supported platforms. Avoid unnecessary rewrites of existing TypeScript helpers.
 
-This is an explicit helper-directory exception, not a relaxation of the TypeScript application boundary. Keep shared application/workflow logic in typed modules; a helper should invoke or integrate those services rather than become a parallel JavaScript application. CI's no-handwritten-JavaScript check applies to `src/` and maintained executable research examples, not the intentionally flexible `scripts/` directory.
+This is an explicit helper-directory exception, not a relaxation of the TypeScript application boundary. Keep shared application/workflow logic in typed modules; a helper should invoke or integrate those services rather than become a parallel JavaScript application.
+
+### When a non-TypeScript file is acceptable (#112)
+
+Pure TypeScript is the preferred architecture. A file may use another language only when **no TypeScript code imports it and it holds no workflow logic**. Concretely:
+
+- **Always TypeScript:** everything under `src/`, and any helper imported by `src/` or by tests wherever it lives (for example `scripts/release-version.ts` and `scripts/dispatch.ts`, which are tested library code).
+- **Shell, batch or PowerShell:** thin glue that sequences `git`, `gh` or `npm` without branching logic. A platform-specific helper must not be required on every contributor platform; CI includes Windows.
+- **Plain JavaScript:** only where nothing has been built or installed yet, such as a git hook or a step that runs before `tsx` is installed. This should be rare on the Node 26+ baseline, which runs simple TypeScript directly.
+- **Python:** integration with an existing Python tool or scripting system, not new general-purpose logic.
+- **Declarative/ancillary languages** (for example Datalog): where they express rules more clearly than code. The #74 spike found the current workflow does not need one yet.
+- **Data formats** (JSON, YAML, EDN): validated by the TypeScript code that loads them.
+
+### Guardrails
+
+- Every non-TypeScript file under `src/`, `scripts/` or executable `doc/reports/examples/` appears in one checked-in allowlist with its purpose, integration boundary, runtime requirements, supported platforms and how it is validated. The allowlist names exact files; no directory is exempt wholesale.
+- CI fails on an unlisted `.js`, `.mjs`, `.cjs`, `.sh`, `.bat`, `.cmd`, `.ps1` or `.py` file in those directories, and on any import of an allowlisted file from `src/` or tests. Implementation is tracked in #113; until it lands, the check covers `src/` and the examples only.
+- An exception that gains branching or workflow logic, or a TypeScript importer, moves to TypeScript.
 
 ## Migration scope
 
