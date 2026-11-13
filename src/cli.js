@@ -285,7 +285,9 @@ export async function main(
         ? { ...plan, exitCode: plan.ok ? 0 : 1 }
         : await applyPlan(repository, plan, { run: runtime.ghRun ?? ghRun, query });
     await output(
-      values.json ? JSON.stringify(result, null, 2) + "\n" : claimText(result, values.dryRun),
+      values.json
+        ? JSON.stringify({ schemaVersion: 1, ...result }, null, 2) + "\n"
+        : claimText(result, values.dryRun),
     );
     return result.exitCode;
   }

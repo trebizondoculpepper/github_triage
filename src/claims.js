@@ -14,6 +14,10 @@ import { ghRun } from "./dependencies.js";
 /** Labels these commands use, beyond the briefing's existing policy. */
 export const claimPolicy = {
   owner: (agent) => `${workflow.ownerPrefix}${agent}`,
+  /** An addressed response request (doc/design/briefings.md); never a claim. */
+  attention: (name) => `attention:${name}`,
+  /** Deliberate non-pickup states that a stale ready label must not override. */
+  held: [workflow.blocked, workflow.parked],
   pickable: [workflow.ready, "status:incomplete"],
   needsDesign: "status:needs-design",
   decisionNeeded: "design:decision-needed",
@@ -39,10 +43,10 @@ const marker = (kind, parts) =>
   `<!-- github-triage:${kind}:${createHash("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 16)} -->`;
 
 /** Live read of one ticket plus the agent's open claims. */
-async function readTicket(repository, number, agent, query) {
+async function readTicket(repository, number, agent, query, designer = "") {
   const [owner, name] = repository.split("/");
   const data = await query(
-    `query($owner:String!,$name:String!,$number:Int!,$label:String!,$question:String!,$decision:String!,$needsDesign:String!){repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on PullRequest{number url} ... on Issue{number title url state updatedAt labels(first:100){nodes{name} pageInfo{hasNextPage}} issueDependenciesSummary{blockedBy} blockedBy(first:20){nodes{number url state}} closedByPullRequestsReferences(first:10,includeClosedPrs:false){nodes{number url state}} comments(last:100){nodes{body}}}} claims:issues(first:20,states:OPEN,labels:[$label]){nodes{number title url}} ownerLabel:label(name:$label){name} questionLabel:label(name:$question){name} decisionLabel:label(name:$decision){name} needsDesignLabel:label(name:$needsDesign){name}}}`,
+    `query($owner:String!,$name:String!,$number:Int!,$label:String!,$question:String!,$decision:String!,$needsDesign:String!,$attention:String!){repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on PullRequest{number url} ... on Issue{number title url state updatedAt labels(first:100){nodes{name} pageInfo{hasNextPage}} issueDependenciesSummary{blockedBy} blockedBy(first:20){nodes{number url state}} closedByPullRequestsReferences(first:10,includeClosedPrs:false){nodes{number url state}} comments(last:100){nodes{body}}}} claims:issues(first:20,states:OPEN,labels:[$label]){nodes{number title url}} ownerLabel:label(name:$label){name} questionLabel:label(name:$question){name} decisionLabel:label(name:$decision){name} needsDesignLabel:label(name:$needsDesign){name} attentionLabel:label(name:$attention){name}}}`,
     {
       owner,
       name,
@@ -51,6 +55,7 @@ async function readTicket(repository, number, agent, query) {
       question: claimPolicy.question,
       decision: claimPolicy.decisionNeeded,
       needsDesign: claimPolicy.needsDesign,
+      attention: designer ? claimPolicy.attention(designer) : "",
     },
   );
   const repo = data.repository;
@@ -60,7 +65,13 @@ async function readTicket(repository, number, agent, query) {
     claims: repo.claims?.nodes ?? [],
     // Exact-name lookups, so a repository with many labels cannot hide an existing one.
     repoLabels: new Set(
-      [repo.ownerLabel, repo.questionLabel, repo.decisionLabel, repo.needsDesignLabel]
+      [
+        repo.ownerLabel,
+        repo.questionLabel,
+        repo.decisionLabel,
+        repo.needsDesignLabel,
+        repo.attentionLabel,
+      ]
         .filter(Boolean)
         .map((l) => l.name),
     ),
@@ -92,6 +103,8 @@ export async function planClaim(repository, request, query = ghQuery) {
   const { number, agent, branch = null, platform = null } = request;
   const { item, claims, repoLabels } = await readTicket(repository, number, agent, query);
   const triage = `github-triage --repo ${repository}`;
+  // Subcommands are dispatched on the first argument, so they must precede options.
+  const command = (text) => `github-triage ${text} --repo ${repository}`;
   if (!item)
     return refuse("TICKET_NOT_FOUND", { number }, `#${number} must exist.`, [`${triage} --json`]);
   if (item.__typename !== "Issue")
@@ -131,7 +144,7 @@ export async function planClaim(repository, request, query = ghQuery) {
           (c) =>
             `manual (release is #62, not yet implemented): gh issue edit ${c.number} --repo ${repository} --remove-label ${mine} --add-label status:incomplete   # or status:ready if untouched; then comment why`,
         ),
-        `${triage} claim ${number} --agent ${agent}${branch ? ` --branch ${branch}` : ""}`,
+        command(`claim ${number} --agent ${agent}${branch ? ` --branch ${branch}` : ""}`),
       ],
     );
   const op = marker("claim", [repository, number, agent]);
@@ -179,6 +192,14 @@ export async function planClaim(repository, request, query = ghQuery) {
       "The ticket has an outstanding question or design prerequisite.",
       [`${triage} --issue ${number}`, `${triage} --agent ${agent}`],
     );
+  const held = claimPolicy.held.filter((l) => label(item, l));
+  if (held.length)
+    return refuse(
+      "NOT_READY",
+      facts,
+      `The ticket is ${held.join(" and ")}; resolve that before claiming, even if a ready label remains.`,
+      [`${triage} --issue ${number}`, `${triage} --agent ${agent}`],
+    );
   if (!claimPolicy.pickable.some((l) => label(item, l)))
     return refuse(
       "NOT_READY",
@@ -191,7 +212,7 @@ export async function planClaim(repository, request, query = ghQuery) {
       "EVIDENCE_INCOMPLETE",
       facts,
       "Native blocker evidence is unavailable; readiness is unknown.",
-      [`${triage} deps ${number}`],
+      [command(`deps ${number}`)],
     );
   if (item.issueDependenciesSummary.blockedBy > 0)
     return refuse(
@@ -201,7 +222,7 @@ export async function planClaim(repository, request, query = ghQuery) {
         openBlockers: item.blockedBy.nodes.filter((b) => b.state === "OPEN").map((b) => b.url),
       },
       "Open native blockers must close first.",
-      [`${triage} deps ${number}`, `${triage} --agent ${agent}`],
+      [command(`deps ${number}`), `${triage} --agent ${agent}`],
     );
   const openPrs = item.closedByPullRequestsReferences.nodes.filter((p) => p.state === "OPEN");
   if (openPrs.length)
@@ -219,7 +240,7 @@ export async function planClaim(repository, request, query = ghQuery) {
       "PLATFORM_UNKNOWN",
       { ...facts, platforms: restrictions },
       `The ticket is restricted to ${restrictions.join(", ")}; state your platform with --platform.`,
-      [`${triage} claim ${number} --agent ${agent} --platform ${restrictions[0]}`],
+      [command(`claim ${number} --agent ${agent} --platform ${restrictions[0]}`)],
     );
   if (restrictions.length && !restrictions.includes(platform))
     return refuse(
@@ -281,7 +302,7 @@ export async function planClaim(repository, request, query = ghQuery) {
  */
 export async function planNeedsHuman(repository, request, query = ghQuery) {
   const { number, agent, designer, why, questions } = request;
-  const { item, repoLabels } = await readTicket(repository, number, agent, query);
+  const { item, repoLabels } = await readTicket(repository, number, agent, query, designer);
   const triage = `github-triage --repo ${repository}`;
   if (!item)
     return refuse("TICKET_NOT_FOUND", { number }, `#${number} must exist.`, [`${triage} --json`]);
@@ -304,6 +325,13 @@ export async function planNeedsHuman(repository, request, query = ghQuery) {
     return refuse("TICKET_CLOSED", facts, "Questions are recorded on open tickets.", [
       `gh issue reopen ${number} --repo ${repository}   # manual, only if it should be open`,
     ]);
+  if (item.labels.pageInfo?.hasNextPage)
+    return refuse(
+      "EVIDENCE_INCOMPLETE",
+      facts,
+      "More than 100 labels; the caller's claim and readiness cannot be verified, so nothing is posted.",
+      [`${triage} --issue ${number}`],
+    );
   const mine = claimPolicy.owner(agent);
   const op = marker("needs-human", [repository, number, agent, designer, why, questions]);
   const already = item.comments.nodes.some((c) => c.body.includes(op));
@@ -311,19 +339,21 @@ export async function planNeedsHuman(repository, request, query = ghQuery) {
   const swap = claimPolicy.pickable.filter((l) => label(item, l));
   // Exactly one readiness label: replace ready/incomplete with needs-design; add it when there
   // is none; leave another deliberate state (blocked, parked) alone and report it.
+  const held = claimPolicy.held.filter((l) => label(item, l));
+  // Never add a second readiness state on top of a deliberate blocked/parked one.
   const addNeedsDesign =
-    !label(item, claimPolicy.needsDesign) && (swap.length || !readiness.length);
+    !label(item, claimPolicy.needsDesign) && !held.length && (swap.length || !readiness.length);
+  const attention = claimPolicy.attention(designer);
   const add = [
     claimPolicy.question,
     claimPolicy.decisionNeeded,
+    attention,
     ...(addNeedsDesign ? [claimPolicy.needsDesign] : []),
   ].filter((l) => !label(item, l));
   const remove = [...swap, ...(label(item, mine) ? [mine] : [])];
   const notes = [];
-  if (!addNeedsDesign && !label(item, claimPolicy.needsDesign) && readiness.length)
-    notes.push(
-      `Readiness ${readiness.join(", ")} kept; not replaced with ${claimPolicy.needsDesign}.`,
-    );
+  if (held.length)
+    notes.push(`Readiness ${held.join(", ")} kept; not replaced with ${claimPolicy.needsDesign}.`);
   const changes = [];
   if (!already)
     changes.push({
@@ -405,13 +435,28 @@ export async function applyPlan(repository, plan, { run = ghRun, query = ghQuery
   let conflict = null;
   if (!failed && plan.recheck && done) {
     try {
-      const { item } = await readTicket(repository, plan.facts.number, plan.recheck.agent, query);
-      const others = item
-        ? owners(item).filter((o) => o !== claimPolicy.owner(plan.recheck.agent))
-        : [];
-      // GitHub label edits are not a lock: report a competing claim rather than resolve it.
-      if (others.length)
-        conflict = `Another claim appeared concurrently: ${others.join(", ")}. Coordinate on the ticket; do not remove it.`;
+      const mine = claimPolicy.owner(plan.recheck.agent);
+      const { item, claims } = await readTicket(
+        repository,
+        plan.facts.number,
+        plan.recheck.agent,
+        query,
+      );
+      const others = item ? owners(item).filter((o) => o !== mine) : [];
+      const elsewhere = claims.filter((c) => c.number !== plan.facts.number);
+      // GitHub label edits are not a lock: report conflicts rather than resolve them.
+      const problems = [];
+      if (!item || item.state !== "OPEN" || !owners(item).includes(mine))
+        problems.push(
+          `the claim is no longer recorded on #${plan.facts.number} (open, labelled ${mine})`,
+        );
+      if (others.length) problems.push(`another claim appeared concurrently: ${others.join(", ")}`);
+      if (elsewhere.length)
+        problems.push(
+          `${plan.recheck.agent} now also claims ${elsewhere.map((c) => `#${c.number}`).join(", ")}; one active claim per agent`,
+        );
+      if (problems.length)
+        conflict = `${problems.join("; ")}. Coordinate on the tickets; nothing was removed.`;
     } catch (error) {
       // Keep the completed writes; ownership is merely unverified.
       conflict = `Writes completed, but ownership could not be re-checked (${error.message}). Re-run the claim to verify.`;
@@ -420,6 +465,10 @@ export async function applyPlan(repository, plan, { run = ghRun, query = ghQuery
   const exitCode = failed ? (done ? 2 : 1) : conflict ? 2 : 0;
   return { ...plan, steps, conflict, exitCode };
 }
+
+/** POSIX shell quoting for displayed commands: nothing inside single quotes is expanded. */
+export const shellQuote = (arg) =>
+  /^[\w@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replaceAll("'", `'\\''`)}'`;
 
 /** Text rendering for plans, refusals and results. */
 export function claimText(result, dryRun = false) {
@@ -441,9 +490,7 @@ export function claimText(result, dryRun = false) {
   for (const c of result.steps ?? result.changes)
     lines.push(
       `- ${c.step}${c.status ? `: ${c.status}` : ""}${c.reason ? ` — ${c.reason}` : ""}`,
-      ...(dryRun
-        ? [`    gh ${c.command.map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(" ")}`]
-        : []),
+      ...(dryRun ? [`    gh ${c.command.map(shellQuote).join(" ")}`] : []),
     );
   for (const n of result.notes ?? []) lines.push(`Note: ${n}`);
   if (result.conflict) lines.push(`CONFLICT: ${result.conflict}`);

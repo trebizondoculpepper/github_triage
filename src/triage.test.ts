@@ -1405,9 +1405,10 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
       if (t.failRecheck && reads > 1) throw new Error("GitHub query failed.");
       const has = (name: unknown) =>
         (t.repoLabels ?? []).includes(String(name)) ? { name } : null;
+      // After the first read, simulate the claim having been written (unless overridden).
       const labels =
-        reads > 1 && t.afterWriteOwners
-          ? [...(t.labels ?? []), ...t.afterWriteOwners]
+        reads > 1
+          ? [...(t.labels ?? []), ...(t.afterWriteOwners ?? ["agent:kavya"])]
           : (t.labels ?? []);
       return {
         repository: {
@@ -1444,6 +1445,7 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
           questionLabel: has(variables.question),
           decisionLabel: has(variables.decision),
           needsDesignLabel: has(variables.needsDesign),
+          attentionLabel: has(variables.attention),
         },
       };
     };
@@ -1584,14 +1586,23 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
     expect(env.writes.map((w) => w.slice(0, 2).join(" "))).toEqual([
       "issue comment",
       "label create",
+      "label create",
       "issue edit",
     ]);
     expect(env.writes[0].at(-1)).toMatch(
       /^### Questions for the designer\n\nDesigner: `nicole` · Raised by: `kavya`\n\n\*\*Why:\*\* Contract is ambiguous\.\n\n1\. Which file\?\n2\. Which default\?/,
     );
-    expect(env.writes[1].slice(2, 3)).toEqual(["design:decision-needed"]);
-    const edit = env.writes[2];
-    for (const l of ["question", "design:decision-needed", "status:needs-design"])
+    expect(env.writes.slice(1, 3).map((w) => w[2])).toEqual([
+      "design:decision-needed",
+      "attention:nicole",
+    ]);
+    const edit = env.writes[3];
+    for (const l of [
+      "question",
+      "design:decision-needed",
+      "status:needs-design",
+      "attention:nicole",
+    ])
       expect(edit).toContain(l);
     expect(edit.join(" ")).toContain("--remove-label status:ready");
     expect(edit.join(" ")).toContain("--remove-label agent:kavya");
@@ -1654,5 +1665,92 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
     expect(env.writes).toEqual([]);
     expect(text).toContain("DRY RUN");
     expect(text).toContain("--add-label agent:kavya");
+  });
+});
+
+describe("claim and needs-human review fixes", () => {
+  const base = (labels: string[]) => ({
+    repository: {
+      issueOrPullRequest: {
+        __typename: "Issue",
+        number: 7,
+        title: "T7",
+        url: `https://github.com/${repo}/issues/7`,
+        state: "OPEN",
+        updatedAt: time,
+        labels: page(labels.map((name) => ({ name }))),
+        issueDependenciesSummary: { blockedBy: 0 },
+        blockedBy: page([] as { number: number; url: string; state: string }[]),
+        closedByPullRequestsReferences: page(
+          [] as { number: number; url: string; state: string }[],
+        ),
+        comments: page([] as { body: string }[]),
+      },
+      claims: page([] as { number: number; title?: string; url?: string }[]),
+      ownerLabel: { name: "agent:kavya" },
+      questionLabel: { name: "question" },
+      decisionLabel: { name: "design:decision-needed" },
+      needsDesignLabel: { name: "status:needs-design" },
+      attentionLabel: { name: "attention:nicole" },
+    },
+  });
+  const ask = { number: 7, agent: "kavya", designer: "nicole", why: "w", questions: ["q"] };
+  it("refuses to claim a blocked or parked ticket even when a stale ready label remains", async () => {
+    for (const held of ["status:blocked", "status:parked"]) {
+      const plan = await planClaim(repo, { number: 7, agent: "kavya" }, async () =>
+        base(["status:ready", held]),
+      );
+      expect(plan).toMatchObject({ ok: false, error: "NOT_READY" });
+      expect(plan.prerequisite).toContain(held);
+    }
+  });
+  it("needs-human keeps blocked, drops the stale ready label, and addresses the designer", async () => {
+    const plan = await planNeedsHuman(repo, ask, async () =>
+      base(["status:ready", "status:blocked"]),
+    );
+    const edit = plan.changes!.find((c) => c.step === "labels")!.command.join(" ");
+    expect(edit).toContain("--remove-label status:ready");
+    expect(edit).toContain("--add-label attention:nicole");
+    expect(edit).not.toContain("status:needs-design");
+    expect(plan.notes![0]).toMatch(/status:blocked kept/);
+  });
+  it("needs-human refuses before posting when labels are incomplete", async () => {
+    const data = base(["status:ready"]);
+    data.repository.issueOrPullRequest.labels.pageInfo.hasNextPage = true;
+    expect(await planNeedsHuman(repo, ask, async () => data)).toMatchObject({
+      ok: false,
+      error: "EVIDENCE_INCOMPLETE",
+    });
+  });
+  it("re-check reports a lost claim and a concurrent second claim by the same agent", async () => {
+    const lost = async () => base(["status:ready"]);
+    const r1 = await applyPlan(repo, await planClaim(repo, { number: 7, agent: "kavya" }, lost), {
+      run: async () => {},
+      query: lost,
+    });
+    expect(r1.exitCode).toBe(2);
+    expect(r1.conflict).toMatch(/no longer recorded/);
+    let n = 0;
+    const second = async () => {
+      const d = base(n++ ? ["agent:kavya"] : ["status:ready"]);
+      if (n > 1) d.repository.claims = page([{ number: 7 }, { number: 9 }]);
+      return d;
+    };
+    const r2 = await applyPlan(repo, await planClaim(repo, { number: 7, agent: "kavya" }, second), {
+      run: async () => {},
+      query: second,
+    });
+    expect(r2.exitCode).toBe(2);
+    expect(r2.conflict).toMatch(/now also claims #9/);
+  });
+  it("recovery commands put the subcommand first, and displayed commands are shell-quoted", async () => {
+    const blocked = base(["status:ready"]);
+    blocked.repository.issueOrPullRequest.issueDependenciesSummary.blockedBy = 1;
+    const plan = await planClaim(repo, { number: 7, agent: "kavya" }, async () => blocked);
+    expect(plan.recovery![0]).toBe(`github-triage deps 7 --repo ${repo}`);
+    const { shellQuote } = await import("./claims.js");
+    expect(shellQuote("$(rm -rf x)")).toBe("'$(rm -rf x)'");
+    expect(shellQuote("it's")).toBe("'it'\\''s'");
+    expect(shellQuote("--add-label")).toBe("--add-label");
   });
 });
