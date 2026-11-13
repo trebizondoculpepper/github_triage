@@ -27,7 +27,7 @@ Use injected GitHub, clock, environment and filesystem boundaries. Assert meanin
 
 ## Source language
 
-**Prefer TypeScript and avoid handwritten JavaScript.** Ancillary languages such as Datalog may be added through an intentional architectural decision documenting why they belong in the project. Generated JavaScript for runtime compatibility is a build artifact, not the preferred maintained source.
+**Prefer TypeScript and avoid handwritten JavaScript in application code.** Helpers in `scripts/` may intentionally use JavaScript, shell, batch, PowerShell or Python with justification and runtime/platform requirements documented. Ancillary languages such as Datalog may be added through an intentional architectural decision documenting why they belong in the project. Generated JavaScript for runtime compatibility is a build artifact, not the preferred maintained source.
 
 The owner chose a full [TypeScript migration](typescript.md) in #91. This supersedes earlier plain-JavaScript design preferences, including MCP. Current runtime source remains JavaScript until that focused implementation lands; published bundles remain JavaScript for Node compatibility.
 
@@ -37,4 +37,4 @@ The owner chose a full [TypeScript migration](typescript.md) in #91. This supers
 
 ## Runtime baseline
 
-The owner accepts a recent Node requirement: [Node 26+](runtime.md), tracked in #108. Older-Node compatibility no longer constrains the urgent TypeScript migration. Package engines, current user requirements and CI are updated by implementation; npm/npx does not supply or upgrade Node automatically.
+The owner accepts a recent Node requirement: [the current Node LTS](runtime.md), tracked in #108. Older-Node compatibility no longer constrains the urgent TypeScript migration. Package engines, current user requirements and CI are updated by implementation; npm/npx does not supply or upgrade Node automatically.

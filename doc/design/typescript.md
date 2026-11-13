@@ -1,12 +1,12 @@
 # TypeScript source migration
 
-Owner decision and implementation contract for #91. All maintained first-party application code, scripts and executable examples must use TypeScript. Intentionally chosen ancillary languages, such as Datalog, are allowed where their distinct purpose is documented; they are not a general exemption for handwritten JavaScript. This supersedes previous plain-JavaScript preferences, including those in the MCP research/design. It does not claim the existing JavaScript has already been migrated.
+Owner decision and implementation contract for #91. Application code in `src/` and maintained executable research examples must use TypeScript. Helpers in `scripts/` follow the intentionally flexible scripting policy below. Intentionally chosen ancillary languages, such as Datalog, are allowed where their distinct purpose is documented; they are not a general exemption for handwritten JavaScript. This supersedes previous plain-JavaScript preferences, including those in the MCP research/design. It does not claim the existing JavaScript has already been migrated.
 
 ## Rationale and boundary
 
 Explicit types make collector facts, workflow results, injected services and protocol boundaries easier to change safely. JavaScript's direct Node execution avoided a source compilation step, but this project already has TypeScript, Vite+ checks and a release bundle. Prefer stronger maintained source contracts over preserving that convenience.
 
-Use the [recent Node runtime policy](runtime.md): Node 26+ is the selected baseline and older-Node compatibility is not required. Published artifacts may remain executable JavaScript for simple packaging; consumers must not need a development compiler or project development dependencies. TypeScript is erased at runtime; external GitHub/MCP/configuration data still needs validation. Static types do not prove runtime evidence complete or grant workflow permission.
+Use the [recent Node runtime policy](runtime.md): the current LTS is the runtime target and older-Node compatibility is not required. Published artifacts may remain executable JavaScript for simple packaging; consumers must not need a development compiler or project development dependencies. TypeScript is erased at runtime; external GitHub/MCP/configuration data still needs validation. Static types do not prove runtime evidence complete or grant workflow permission.
 
 ## Expected architectural benefits
 
@@ -18,15 +18,21 @@ The cost is a supported development execution/build path and an initial typing/r
 
 ## Language policy and intentional exceptions
 
-**TypeScript is the preferred language for this project; handwritten JavaScript is best avoided.** All maintained first-party application code, tooling scripts and executable examples must use TypeScript. Ancillary languages such as Datalog are welcome only when we intentionally decide to add them and document their architectural purpose, integration boundary and validation. They are deliberate additions, not an open-ended exemption from the TypeScript preference.
+**TypeScript is the preferred language for this project; handwritten JavaScript is best avoided.** Application code in `src/` and maintained executable research examples must use TypeScript; helper scripts are a documented exception. Ancillary languages such as Datalog are welcome only when we intentionally decide to add them and document their architectural purpose, integration boundary and validation. They are deliberate additions, not an open-ended exemption from the TypeScript preference.
 
-TypeScript is mandatory for maintained first-party general-purpose code, including future MCP code and contributor/release helpers. An ancillary language is allowed when it is intentionally part of the architecture: for example, Datalog rules evaluated by the rules experiment, or declarative configuration/query formats consumed by TypeScript services. Record the purpose and validation boundary in the relevant design. Do not rewrite a deliberately selected rules language into TypeScript merely to satisfy an extension count.
+TypeScript is mandatory for maintained first-party application code, including future MCP services; helpers in `scripts/` use the exception below. An ancillary language is allowed when it is intentionally part of the architecture: for example, Datalog rules evaluated by the rules experiment, or declarative configuration/query formats consumed by TypeScript services. Record the purpose and validation boundary in the relevant design. Do not rewrite a deliberately selected rules language into TypeScript merely to satisfy an extension count.
 
-This exception does not permit starting another JavaScript implementation or keeping scripts in JavaScript for convenience. Generated JavaScript output and third-party dependencies are expected runtime artifacts, not alternative source-language choices. Historical snapshots and literal fixture content preserve provenance; new maintained executable examples follow the TypeScript rule. CI must distinguish these categories explicitly rather than use an unqualified repository-wide extension ban.
+Do not start a JavaScript application implementation under `src/`. The helper-script exception does not move application/workflow logic out of the typed service boundary. Generated JavaScript output and third-party dependencies are expected runtime artifacts, not alternative source-language choices. Historical snapshots and literal fixture content preserve provenance; new maintained executable examples follow the TypeScript rule. CI must distinguish these categories explicitly rather than use an unqualified repository-wide extension ban.
+
+## Flexible helper scripts
+
+Helpers in `scripts/` may use TypeScript, JavaScript, shell, batch files, PowerShell, or Python. Choose a language that fits the task. Record a short justification for a non-TypeScript helper—for example integration with an existing scripting system—and document its runtime dependencies and supported platforms. Avoid unnecessary rewrites of existing TypeScript helpers.
+
+This is an explicit helper-directory exception, not a relaxation of the TypeScript application boundary. Keep shared application/workflow logic in typed modules; a helper should invoke or integrate those services rather than become a parallel JavaScript application. CI's no-handwritten-JavaScript check applies to `src/` and maintained executable research examples, not the intentionally flexible `scripts/` directory.
 
 ## Migration scope
 
-Convert every maintained first-party `.js`, `.mjs` and `.cjs` source under `src/`, `scripts/` and executable `doc/reports/examples/` to `.ts` or `.mts`, including modules added while this work is open. Current main includes briefing, claims, CLI, compact output, dependencies, GitHub collection, migration, team and update modules; contributor scripts cover package verification, release/version selection and smoke checks. Rebase/recheck this inventory before implementation rather than copy an older worktree.
+Convert every maintained first-party `.js`, `.mjs` and `.cjs` source under `src/` and executable `doc/reports/examples/` to `.ts` or `.mts`, including modules added while this work is open. Current main includes briefing, claims, CLI, compact output, dependencies, GitHub collection, migration, team and update modules; contributor scripts cover package verification, release/version selection and smoke checks. Rebase/recheck this inventory before implementation rather than copy an older worktree.
 
 Tests and Vite configuration already use TypeScript. Keep actual ambient declarations in `.d.ts`; ordinary exported application types may live in `.ts` modules. Replace JSDoc-only parameter/return typing with normal TypeScript declarations while preserving useful explanatory comments. Generated bundles, dependency code, historical source snapshots and literal test fixture payloads are not handwritten maintained modules and must not be rewritten as part of this migration.
 
@@ -34,7 +40,7 @@ TypeScript ESM can correctly use `.js` import specifiers that resolve to `.ts` s
 
 ## Type checking and execution
 
-Enable `strict: true` and disable `allowJs` for maintained source. Include scripts and executable examples in type checking, using separate configurations where their environment/dependencies differ. All checks are part of the documented contributor validation; a file outside a tsconfig must not quietly escape verification. Preserve ES module output and target the selected recent runtime; the former Node 20 floor no longer constrains the migration.
+Enable `strict: true` and disable `allowJs` for maintained source. Include TypeScript helpers and executable examples in type checking, using separate configurations where their environment/dependencies differ. Validate helpers written in other languages with the appropriate lint/test or platform smoke checks. All checks are part of the documented contributor validation; a file outside a tsconfig must not quietly escape verification. Preserve ES module output and target the selected recent runtime; the former Node 20 floor no longer constrains the migration.
 
 Use concrete fact/result/service types and explicit injected interfaces. Accept `unknown` at untrusted boundaries, validate/narrow it and preserve unknown-evidence semantics. Avoid blanket `any`, `@ts-nocheck`, broad suppressions, or repeated unchecked assertions to get a green build. A narrowly justified escape must be documented and reviewed. Do not combine this migration with architectural redesign merely to make types easier.
 
@@ -50,7 +56,7 @@ Check live ownership/open source PRs before the rename. Land current work or coo
 
 ## Acceptance and handoff
 
-Run formatting/lint/type checks, the existing test suite, build, smoke tests and exact packed-archive global-install validation. Verify source-development execution and emitted consumer execution separately. Cover supported Node/OS jobs, especially the selected Node 26 baseline running the built CLI, Windows executable/path handling, npm symlinks and helper subprocess paths. Release tests use fake/injected boundaries, never an actual publication or branch promotion.
+Run formatting/lint/type checks, the existing test suite, build, smoke tests and exact packed-archive global-install validation. Verify source-development execution and emitted consumer execution separately. Cover supported Node/OS jobs, especially the selected current LTS running the built CLI, Windows executable/path handling, npm symlinks and helper subprocess paths. Release tests use fake/injected boundaries, never an actual publication or branch promotion.
 
 Verify no maintained handwritten JavaScript module remains in the scoped directories and that every converted file is checked. Record intentionally ancillary-language files and their purpose; enforce the first-party TypeScript boundary without banning those deliberate integrations. Preserve useful archive allowlist assertions while allowing only intentional compiled artifacts. Update package scripts, CI, active architecture/help examples, README and AGENTS instructions to the new commands once implementation ships. Historical research may retain its provenance with a pointer to this superseding decision.
 
