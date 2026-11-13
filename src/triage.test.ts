@@ -2152,6 +2152,28 @@ describe("pr status: why is a PR not progressing (#59)", () => {
     const running = prStatus(repo, pull({ comments: [codexComment(head, "running"), request] }));
     expect(running.reviewRequest!.status).toMatch(/in progress/);
   });
+  it("an automatically started Codex review still running is a blocker without any request", async () => {
+    const { prStatus } = await import("./prstatus.js");
+    const auto = prStatus(repo, pull({ comments: [codexComment(head, "running")] }));
+    expect(auto.reviewRequest).toBeNull();
+    expect(auto.blockers).toEqual([
+      "waiting for Codex's review of the current head to finish (running)",
+    ]);
+    expect(auto.verdict).toMatch(/^Blocked/);
+  });
+  it("text output shows each receipt's summary and source URL", async () => {
+    const { prStatus, prStatusText } = await import("./prstatus.js");
+    const receipt = {
+      author: { login: "coderabbitai" },
+      body: "Actionable comments posted: 2. Please fix the null check.",
+      createdAt: "2026-11-12T11:00:00Z",
+      url: "https://c/receipt",
+    };
+    const text = prStatusText(prStatus(repo, pull({ comments: [receipt] })));
+    expect(text).toContain(
+      "Receipt coderabbitai 2026-11-12T11:00:00Z: Actionable comments posted: 2. Please fix the null check. https://c/receipt",
+    );
+  });
   it("green evidence is only a merge consideration, and closed PRs report only their state", async () => {
     const { prStatus } = await import("./prstatus.js");
     const green = prStatus(

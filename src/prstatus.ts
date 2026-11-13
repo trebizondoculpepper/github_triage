@@ -380,6 +380,9 @@ export function prStatus(
       blockers.push("a review was requested and has had no reaction");
     else if (request?.status.startsWith("review in progress"))
       blockers.push(`waiting for the requested review to finish (${request.status})`);
+    // An automatically started review is still running even when nobody asked for it.
+    else if (codex?.commit_sha === head && codex.status && codex.status !== "completed")
+      blockers.push(`waiting for Codex's review of the current head to finish (${codex.status})`);
   }
 
   // GitHub says merging is blocked but nothing above explains it: report that, never "no blocker".
@@ -509,7 +512,7 @@ export function prStatusText(r: PrStatusReport): string {
     ...(r.reviewRequest ? [`Review request ${r.reviewRequest.at}: ${r.reviewRequest.status}`] : []),
     ...r.receipts.map(
       (x) =>
-        `Receipt ${x.by} ${x.at}${x.codexState?.code_review ? ` (Codex: ${x.codexState.code_review.status} on ${String(x.codexState.code_review.commit_sha).slice(0, 7)}, unresolved findings ${x.codexState.code_review.has_unresolved_findings})` : ""}`,
+        `Receipt ${x.by} ${x.at}${x.codexState?.code_review ? ` (Codex: ${x.codexState.code_review.status} on ${String(x.codexState.code_review.commit_sha).slice(0, 7)}, unresolved findings ${x.codexState.code_review.has_unresolved_findings})` : ""}${x.summary ? `: ${x.summary}` : ""} ${x.url}`,
     ),
     ...r.linkedIssues.map(
       (i) => `Linked #${i.number} ${i.state} owners: ${i.owners.join(", ") || "none"}`,
