@@ -32,6 +32,8 @@ For Ticket Doctor, stale-agent default is **24 hours**, configurable, and explic
 
 Add deterministic correction plans and exact commands to v1, never execution. Examples: stale claim release candidate; ready/open-PR awaiting-review suggestion; merged-PR leftover-claim release; multiple claim dispositions; high/low/remove-both urgency alternatives; missing blocker explanation; cycle path and possible edge removals. Definite mechanics can yield one suggestion; semantic choices remain explicit alternatives. Use only delivered command syntax, with manual/inspection fallback when a mutation is not implemented. No invented auto-repair engine.
 
+Implementation defaults (routine, under this contract): each finding carries `plan` {`facts`, `judgment`, `steps`}, built by `src/doctorplans.ts` from argv builders matching `--help`; step kinds are `command`/`inspect`/`manual` (plain `gh issue edit` for label changes no triage command covers); placeholders are `<UPPER>` tokens; claim commands name only the labelled claimant; unknown findings get inspection steps only. Shape documented in `doc/usage.md`; `schemaVersion` stays 1 (additive). Tests parse every suggested command with the CLI's own argument parsers.
+
 ## Acceptance
 
 Fixtures cover current versus stale SHA, cancelled/no-log CI, multiple blockers, meaningful resolved feedback versus bot noise, incomplete history, duplicate issue/PR rows, comment-only ownership, missing presence, malformed configuration, distinct project and host roles, Git-tracked identity files, stale agent versus human assignment, and correction-command parser validity. Show request/output costs. Each ticket is a separate implementation slice; #67 depends on #66 and #60 reuses #59 without requiring unrelated deferred work.

@@ -118,7 +118,8 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   who N [--stale-hours N]  Read-only: who is working on ticket N? Claims, PRs, activity,
                         handoff evidence and contradictions in one operation
   ticket-doctor [--stale-hours N] [--limit N]  Read-only consistency scan of all open tickets
-                        and repository complexity configuration
+                        and repository complexity configuration, with suggested correction
+                        commands per finding (never run; claim commands only for the claimant)
   doctor [--agent NAME] [--role NAME]  Read-only local configuration checks: Node, gh
                         install/auth, checkout, agent-inbox.toml presence, Git ignore vs
                         tracked, identity and triage role; exact next commands per check

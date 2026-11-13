@@ -12,7 +12,9 @@ import {
   cachedSnapshot,
   checkpointSince,
   depsArgumentsFor,
+  help as cliHelp,
   main,
+  workflowArgumentsFor,
 } from "./cli.js";
 import {
   applyDependencyChange,
@@ -58,6 +60,8 @@ import type { ClaimAccepted, ClaimPlan, ClaimRefusal } from "./claims.js";
 import { teamText, teamView } from "./team.js";
 import { ticketOwnership, ticketOwnershipText } from "./who.js";
 import { ticketDoctor, ticketDoctorText } from "./ticketdoctor.js";
+import { shellQuote } from "./doctorplans.js";
+import type { CorrectionStep } from "./doctorplans.js";
 import { localDoctor, localDoctorExitCode, localDoctorText } from "./localdoctor.js";
 import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
 
@@ -3059,6 +3063,110 @@ describe("Ticket Doctor v1 (#66, doc/design/diagnostics.md)", () => {
     expect(small.omittedTickets).toBe(small.summary.tickets - 2);
     expect(small.tickets.every((x) => x.findings[0].certainty === "definite")).toBe(true);
     expect(ticketDoctorText(small)).toContain("more tickets; raise --limit to see them");
+  });
+  const steps = (r: ReturnType<typeof report>, n: number, kind: string): CorrectionStep[] =>
+    r.tickets.find((x) => x.number === n)?.findings.find((f) => f.kind === kind)?.plan.steps ?? [];
+  /** Fill placeholders with sample values, then parse with the CLI's own argument parsers. */
+  const parses = (s: CorrectionStep): void => {
+    const sample: Record<string, string> = { "<YOUR_AGENT>": "me", "<DESIGNER>": "des" };
+    const argv = s.argv.map((a) => sample[a] ?? a.replace(/<[A-Z_]+>/g, "text"));
+    expect(argv[argv.indexOf("--repo") + 1]).toBe(repo);
+    expect(s.command).toBe(shellQuote(s.argv));
+    expect(s.command).not.toContain("#");
+    if (argv[0] === "gh") {
+      expect(s.kind).toBe("manual");
+      expect(argv.slice(1, 4)).toEqual(["issue", "edit", argv[3]]);
+      return;
+    }
+    expect(argv[0]).toBe("github-triage");
+    const [sub, ...rest] = argv.slice(1);
+    if (sub === "release" || sub === "needs-human" || sub === "claim")
+      expect(() => workflowArgumentsFor(sub, rest)).not.toThrow();
+    else if (sub === "deps") expect(() => depsArgumentsFor(rest)).not.toThrow();
+    else if (sub === "--issue") expect(() => argumentsFor(argv.slice(1))).not.toThrow();
+    else expect(cliHelp).toContain(`  ${sub} `);
+    expect(s.kind).toBe(
+      sub === "release" || sub === "needs-human" || rest[0] === "add" || rest[0] === "remove"
+        ? "command"
+        : "inspect",
+    );
+  };
+  it("v2 (#67): every finding has a plan of valid, deterministic, repo-scoped commands", () => {
+    const r = report();
+    expect(JSON.stringify(report())).toBe(JSON.stringify(r));
+    for (const t of r.tickets)
+      for (const f of t.findings) {
+        expect(f.plan.steps.length).toBeGreaterThan(0);
+        for (const s of f.plan.steps) {
+          parses(s);
+          expect(s.placeholders).toEqual([...new Set(s.argv.join(" ").match(/<[A-Z_]+>/g) ?? [])]);
+          // Claim mutations are addressed only to an agent that holds the claim.
+          if (s.argv[1] === "release") {
+            const agent = s.argv[s.argv.indexOf("--agent") + 1];
+            expect(t.findings.length && s.runBy).toBe(`agent ${agent} only (the claimant)`);
+            expect(
+              build()
+                .issues.find((i) => i.number === t.number)!
+                .labels.nodes.map((l) => l.name),
+            ).toContain(`agent:${agent}`);
+          }
+        }
+      }
+    expect(ticketDoctorText(r)).toContain("judgment required; alternatives:");
+  });
+  it("v2 (#67): alternatives for semantic choices, one suggestion for definite mechanics", () => {
+    const r = report();
+    const urgency = r.tickets.find((x) => x.number === 4)!.findings[0].plan;
+    expect(urgency.judgment).toBe(true);
+    expect(urgency.steps.map((s) => [s.choice, s.command])).toEqual([
+      ["keep-high", `gh issue edit 4 --repo ${repo} --remove-label urgency:low`],
+      ["keep-low", `gh issue edit 4 --repo ${repo} --remove-label urgency:high`],
+      [
+        "remove-both",
+        `gh issue edit 4 --repo ${repo} --remove-label urgency:high --remove-label urgency:low`,
+      ],
+    ]);
+    const openPr = r.tickets.find((x) => x.number === 7)!.findings[0].plan;
+    expect(openPr.judgment).toBe(false);
+    expect(openPr.steps.map((s) => s.command)).toEqual([
+      `github-triage pr 90 --repo ${repo}`,
+      `gh issue edit 7 --repo ${repo} --add-label status:awaiting-review --remove-label status:ready`,
+    ]);
+    const cycle = r.tickets.find((x) => x.number === 11)!.findings[0].plan;
+    expect(cycle.facts).toEqual(["Path (blocked by): #11 -> #12 -> #11"]);
+    expect(cycle.steps.map((s) => s.command)).toEqual([
+      `github-triage deps 11 --tree --repo ${repo}`,
+      `github-triage deps remove 11 --on 12 --note '<WHY>' --repo ${repo}`,
+    ]);
+    expect(cycle.judgment).toBe(true);
+    const owners = steps(r, 6, "multiple-owners").map((s) => s.choice);
+    expect(owners).toEqual([undefined, "ana-releases", "bo-releases"]);
+    const stale = r.tickets
+      .find((x) => x.number === 9)!
+      .findings.find((f) => f.kind === "stale-agent-activity")!.plan;
+    expect(stale.facts[0]).toMatch(/^Last activity .* \(/);
+    expect(stale.steps[0].command).toBe(`github-triage who 9 --repo ${repo}`);
+    expect(
+      stale.steps
+        .slice(1)
+        .every((s) => s.preconditions[0].includes("Inactivity is not permission")),
+    ).toBe(true);
+    expect(steps(r, 8, "blocked-without-reason").map((s) => s.placeholders)).toEqual([
+      [],
+      ["<YOUR_AGENT>", "<DESIGNER>", "<WHY>", "<QUESTION>"],
+      ["<REASON_LABEL>"],
+    ]);
+  });
+  it("v2 (#67): unknown or incomplete evidence only ever gets inspection steps", () => {
+    const old = t(20, ["bug", "status:ready"]) as Partial<Issue>;
+    delete old.blockedBy;
+    const partial = t(21, ["status:ready"]);
+    partial.labels = { ...partial.labels, pageInfo: { hasNextPage: true } } as Issue["labels"];
+    const r = ticketDoctor(snapshot([old as Issue, partial], []), { now: new Date(time) });
+    for (const tk of r.tickets)
+      for (const f of tk.findings.filter((x) => x.certainty === "unknown"))
+        expect(f.plan.steps.every((s) => s.kind === "inspect")).toBe(true);
+    expect(steps(r, 21, "classification-missing").map((s) => s.kind)).toEqual(["inspect"]);
   });
   it("reports missing native evidence as unknown and runs offline from the CLI", async () => {
     const old = t(20, ["bug", "status:ready"]) as Partial<Issue>;
