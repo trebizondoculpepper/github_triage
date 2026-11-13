@@ -172,7 +172,7 @@ closingIssuesReferences(first:10){nodes{number url title state labels(first:50){
 /** Bounds keep the report small; omitted counts are always reported. */
 export const limits = { failures: 5, threads: 8, receipts: 3, excerpt: 240 };
 
-const excerpt = (text: string | null | undefined): string => {
+export const excerpt = (text: string | null | undefined): string => {
   const flat = String(text ?? "")
     .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/<[^>]+>/g, "")
@@ -203,6 +203,17 @@ const reviewerFor: Record<string, string> = {
   codex: "chatgpt-codex-connector",
   coderabbitai: "coderabbitai",
 };
+
+/** Codex's machine-readable review state embedded in a comment body, if any. */
+export function codexMarker(body: string | null | undefined): CodexMarker | null {
+  const m = /codex-review-state:v1 (\{.*?\}) -->/.exec(body ?? "");
+  try {
+    const parsed: unknown = m ? JSON.parse(m[1]) : null;
+    return selected<CodexMarker>(parsed);
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Build the report from a fetched pull request. Pure; `now` is injected.
@@ -270,15 +281,7 @@ export function prStatus(
       at: c.createdAt,
       url: c.url,
       summary: excerpt(c.body).slice(0, 160),
-      codexState: ((): CodexMarker | null => {
-        const m = /codex-review-state:v1 (\{.*?\}) -->/.exec(c.body ?? "");
-        try {
-          const parsed: unknown = m ? JSON.parse(m[1]) : null;
-          return selected<CodexMarker>(parsed);
-        } catch {
-          return null;
-        }
-      })(),
+      codexState: codexMarker(c.body),
     }));
   const codex =
     receipts
