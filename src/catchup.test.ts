@@ -728,6 +728,32 @@ describe("repository catch-up aggregation (#169)", () => {
     expect(report.checkpoint.candidate).toBeNull();
   });
 
+  it("lets fully paginated open evidence resolve a truncated retained history", () => {
+    // An updated open PR with a long discussion: the all-state query kept only its first comment
+    // page (operationsComplete false), but the open snapshot holds every comment.
+    const open = pr(58, [], "SUCCESS", {
+      createdAt: inside(30),
+      updatedAt: inside(1),
+      comments: page([claimOn(58, 10, inside(3))]),
+    });
+    const retained = {
+      ...changeSubject(
+        "pull-request",
+        { ...open, comments: page([], true) } as EvidencePullRequest,
+        window,
+      ),
+      operationsComplete: false,
+    };
+    const report = catchUp(snap([], [open], evidence([retained])), { now: clock, limit: 100 });
+    expect(report.completeness.history).toBe("complete");
+    expect(report.checkpoint.candidate).not.toBeNull();
+    expect(report.sections.progress.items.some((r) => r.subject.number === 58)).toBe(true);
+    // The same truncated record on a subject absent from the open snapshot stays unknown.
+    const closedOnly = catchUp(snap([], [], evidence([retained])), { now: clock, limit: 100 });
+    expect(closedOnly.completeness.history).toBe("incomplete");
+    expect(closedOnly.checkpoint.candidate).toBeNull();
+  });
+
   it("keeps a release marker after a long handoff note through the real collector", async () => {
     const note = "Handoff detail. ".repeat(200);
     const release = comment(

@@ -501,10 +501,11 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
       for (const op of s.operations ?? []) operations.push({ s: subjectRef(s), op });
       // An open subject's comments are fully paginated in the snapshot (truncated reviews are a
       // snapshot warning); a closed subject has only its retained, possibly truncated, evidence.
-      // An open subject's untimed operations are flagged by the loop above; a retained record
-      // that is itself incomplete (unparseable marker, truncated history) is unknown either way.
-      if (s.operationsComplete === false || (s.operationsComplete !== true && !byUrl.has(s.url)))
-        unknownOperations.add(s.url);
+      // An open subject's operations come from its fully paginated snapshot comments, processed
+      // (and checked for untimed records) by the loop above, so a truncated retained copy of the
+      // same history is already resolved there. Only a subject absent from the open snapshot
+      // depends on its retained evidence, whose incompleteness then makes the history unknown.
+      if (!byUrl.has(s.url) && s.operationsComplete !== true) unknownOperations.add(s.url);
     }
   }
   for (const { s, op } of operations) {
