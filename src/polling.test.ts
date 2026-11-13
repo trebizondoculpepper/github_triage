@@ -552,6 +552,22 @@ describe("optional polling and domain events (#32)", () => {
     w.stop();
   });
 
+  it("aborts sibling requests when a shared collection fails", async () => {
+    let sibling: AbortSignal | undefined;
+    // One request fails while its sibling is still paginating under the same signal.
+    const partlyFailing: Collect = async (_repository, options) => {
+      sibling = options?.signal;
+      const paging = new Promise<void>((resolve) =>
+        options?.signal?.addEventListener("abort", () => resolve()),
+      );
+      void paging;
+      throw new Error("one request failed");
+    };
+    const shared = sharedCollect(partlyFailing);
+    await expect(shared(repo, {})).rejects.toThrow("one request failed");
+    expect(sibling?.aborted).toBe(true);
+  });
+
   it("cancels in-flight collection on stop and never polls afterwards", async () => {
     const time = fakeClock();
     const { collect, calls } = scripted([

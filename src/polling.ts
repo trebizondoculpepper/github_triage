@@ -939,9 +939,17 @@ export function sharedCollect(collect: Collect): Collect {
       const created = {
         controller,
         waiters: 0,
-        promise: collect(repository, { signal: controller.signal }).finally(() => {
-          if (inflight.get(repository) === created) inflight.delete(repository);
-        }),
+        promise: collect(repository, { signal: controller.signal })
+          .catch((error: unknown) => {
+            // A failed request rejects the collection while sibling requests may still be
+            // paginating: abort them before the collection is forgotten, so retries never
+            // overlap them and shutdown can stop them.
+            controller.abort();
+            throw error;
+          })
+          .finally(() => {
+            if (inflight.get(repository) === created) inflight.delete(repository);
+          }),
       };
       entry = created;
       inflight.set(repository, created);
