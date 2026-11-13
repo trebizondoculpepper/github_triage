@@ -312,7 +312,7 @@ export async function localDoctor(
             status: "invalid",
             source: "git ls-files exit 0",
             detail: `${IDENTITY_FILE} is tracked by Git. An ignore rule does not untrack it; removing it from the index is a separate, deliberate change.`,
-            next: [`git rm --cached ${IDENTITY_FILE}`],
+            next: [`git rm --cached -- ":/${IDENTITY_FILE}"`],
           }
         : tracked.code === 1
           ? {

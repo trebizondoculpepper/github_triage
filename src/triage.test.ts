@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -6359,9 +6359,38 @@ describe("local configuration doctor (#64)", () => {
     expect(tracked.status["identity.git-ignored"]).toBe("ok");
     expect(tracked.status["identity.git-tracked"]).toBe("invalid");
     expect(tracked.report.checks.find((c) => c.id === "identity.git-tracked")!.next).toEqual([
-      "git rm --cached agent-inbox.toml",
+      'git rm --cached -- ":/agent-inbox.toml"',
     ]);
     expect(localDoctorExitCode(tracked.report)).toBe(1);
+  });
+
+  it("suggests an untracking command that works from a checkout subdirectory", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "triage-test-"));
+    try {
+      const git = (cwd: string, ...args: string[]) =>
+        new Promise<string>((resolve, reject) =>
+          execFile("git", args, { cwd }, (error, stdout) =>
+            error ? reject(error) : resolve(stdout),
+          ),
+        );
+      await git(dir, "init", "-q");
+      await writeFile(join(dir, "agent-inbox.toml"), "x\n");
+      await git(dir, "add", "agent-inbox.toml");
+      const sub = join(dir, "sub");
+      await mkdir(sub);
+      const tracked = await run({ "git ls-files --error-unmatch -- agent-inbox.toml": 0 });
+      const suggested = tracked.report.checks.find((c) => c.id === "identity.git-tracked")!
+        .next[0]!;
+      // Run the suggested command's arguments from the subdirectory, as a user would.
+      const args = suggested
+        .replace(/^git /, "")
+        .split(" ")
+        .map((a) => a.replace(/^"(.*)"$/, "$1"));
+      await git(sub, ...args);
+      expect(await git(dir, "ls-files")).toBe("");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("keeps reporting every check when gh and the checkout are unavailable", async () => {
