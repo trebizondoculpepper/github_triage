@@ -365,6 +365,25 @@ const resetPlan = (as: DeliverablesRequest["as"]): { remove: string[]; add: stri
   add: [as === "ready" ? workflow.ready : claimPolicy.incomplete],
 });
 
+/** The readiness labels a reset chooses between; exactly one is the target of any reset plan. */
+const readinessLabels: readonly string[] = [workflow.ready, claimPolicy.incomplete];
+
+/**
+ * Whether a recorded reset's label plan is still pending, i.e. its single label write has not
+ * happened yet. The plan is applied in one write, and its `add` is always one readiness label, so
+ * an unapplied plan leaves the ticket with no readiness label at all. Accepted states:
+ * - no readiness label is present (neither the planned addition nor any other one);
+ * - the plan's removals may still be present or already absent (they predate the reset).
+ * Every other state is not pending: the planned label present means the write happened (done or
+ * later altered), and any other readiness label means someone changed readiness after the reset
+ * finished, or before it without a record; either way the plan is stale and must not be replayed.
+ */
+export const resetPlanPending = (
+  plan: { add: string[]; remove: string[] },
+  labels: readonly string[],
+): boolean =>
+  !plan.add.some((l) => labels.includes(l)) && !labels.some((l) => readinessLabels.includes(l));
+
 /**
  * The fields that define each op: two records with equal values here are the same operation, so
  * a later identical request is a retry. Every op also compares `op` and `agent`. Deliverables
@@ -860,6 +879,16 @@ export async function planDeliverables(
           facts,
           `${where} but the labels now contradict its plan (${pending}); others' changes are never reverted.`,
           [inspect, cmd(`who ${number}`)],
+        );
+      // Completing the plan is allowed only while it is provably unapplied. Another readiness
+      // label means the reset most likely finished and readiness was changed afterwards without a
+      // delivery record, so replaying the stale plan would leave contradictory labels.
+      if (!resetPlanPending(plan, labels))
+        return refuse(
+          "DELIVERY_DIVERGED",
+          facts,
+          `${where} but its plan (${pending}) is no longer pending: the ticket now carries readiness label(s) ${labels.filter((l) => readinessLabels.includes(l)).join(", ")}, so the reset was most likely applied and readiness changed afterwards without a delivery record. Its stale labels are not re-applied and others' changes are never reverted. Inspect the ticket; if a reset is still wanted, run it again deliberately so it is decided against the current labels.`,
+          [inspect, cmd(`who ${number}`), retry],
         );
       // Finishing the plan is a write, so the reset's live prerequisites are checked again: a
       // claim or open PR that appeared since the record was posted blocks the labels too.

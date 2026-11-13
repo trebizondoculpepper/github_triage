@@ -5,6 +5,7 @@ import {
   deliverablesText,
   planDeliverables,
   readDeliveryComments,
+  resetPlanPending,
 } from "./deliverables.js";
 import type { DeliverablesPlan, DeliverablesRequest, DeliverablesRuntime } from "./deliverables.js";
 import { deliveryMarker, markerTrust, parseDeliveryComment } from "./delivery.js";
@@ -893,6 +894,46 @@ describe("deliverables maintainer overrides", () => {
     expect(posted(state).filter((r) => r?.op === "reset")).toHaveLength(1);
     expect(state.writes.filter((w) => w[1] === "edit")).toHaveLength(0);
     expect(state.labels).toEqual(["status:awaiting-review"]);
+  });
+  it("a completed reset whose readiness was later changed without a record is refused on retry, labels unchanged", async () => {
+    const closed = fakePr(5, { state: "CLOSED" });
+    const { rt, state } = github({
+      comments: [submitted()],
+      prs: [closed],
+      labels: ["status:awaiting-review"],
+    });
+    const req = request("reset", { agent: "maint", as: "ready" });
+    expect((await applyDeliverables(repo, req, rt)).exitCode).toBe(0);
+    expect(state.labels).toEqual(["status:ready"]);
+    state.labels = ["status:incomplete"];
+    const writes = state.writes.length;
+    const retry = await applyDeliverables(repo, req, rt);
+    expect(retry.exitCode).not.toBe(0);
+    refused(await planDeliverables(repo, req, rt), "DELIVERY_DIVERGED");
+    expect(state.labels).toEqual(["status:incomplete"]);
+    expect(state.writes).toHaveLength(writes);
+  });
+  it("an exact reset retry right after success is a no-op with exit 0", async () => {
+    const closed = fakePr(5, { state: "CLOSED" });
+    const { rt, state } = github({
+      comments: [submitted()],
+      prs: [closed],
+      labels: ["status:awaiting-review"],
+    });
+    const req = request("reset", { agent: "maint", as: "ready" });
+    expect((await applyDeliverables(repo, req, rt)).exitCode).toBe(0);
+    const writes = state.writes.length;
+    expect((await applyDeliverables(repo, req, rt)).exitCode).toBe(0);
+    expect(state.writes).toHaveLength(writes);
+    expect(state.labels).toEqual(["status:ready"]);
+  });
+  it("resetPlanPending accepts only states with no readiness label", () => {
+    const plan = { remove: ["status:awaiting-review"], add: ["status:ready"] };
+    expect(resetPlanPending(plan, ["status:awaiting-review"])).toBe(true);
+    expect(resetPlanPending(plan, [])).toBe(true);
+    expect(resetPlanPending(plan, ["status:ready"])).toBe(false);
+    expect(resetPlanPending(plan, ["status:incomplete"])).toBe(false);
+    expect(resetPlanPending(plan, ["status:awaiting-review", "status:incomplete"])).toBe(false);
   });
   it("DELIVERY_DIVERGED: a recorded reset whose labels were changed by others is not re-applied", async () => {
     const closed = fakePr(5, { state: "CLOSED" });
