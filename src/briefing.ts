@@ -6,10 +6,22 @@ import {
   pickable,
   unblocks,
 } from "./dependencies.js";
+import { pickupEligibility, rankPickup, urgencyBand } from "./ranking.js";
+import type { PickupOrder } from "./ranking.js";
 import type { Action, Dependency, Issue, PullRequest, Snapshot } from "./types.js";
 
+export { urgencyBand };
+/** Briefing default for stale-claim signals (doc/design/briefings.md): two days. */
+export const briefingStaleHours = 48;
+
 export const workflow = {
-  readiness: ["status:ready", "status:needs-design", "status:blocked", "status:parked"],
+  readiness: [
+    "status:ready",
+    "status:incomplete",
+    "status:needs-design",
+    "status:blocked",
+    "status:parked",
+  ],
   ready: "status:ready",
   parked: "status:parked",
   blocked: "status:blocked",
@@ -94,6 +106,11 @@ export interface RuleContext {
   issues: Issue[];
   prs: PullRequest[];
   viewer?: string;
+  /** The viewer's explicit platform; unknown when absent, never inferred. */
+  platform?: string;
+  order?: PickupOrder;
+  now?: Date;
+  staleHours?: number;
 }
 export type AnalysisRule = (context: RuleContext) => Action[];
 export const analysisRules = new Map<string, AnalysisRule>();
@@ -136,24 +153,6 @@ analysisRules.set("ownership-and-labels", ({ issues }) =>
     return findings;
   }),
 );
-/**
- * Pickup urgency band: 0 high, 1 unspecified, 2 low. Both labels conflict and count as
- * unspecified until corrected (doc/design/briefings.md, default impact mode).
- */
-export function urgencyBand(issue: Labelled): 0 | 1 | 2 {
-  const high = labels(issue).includes(workflow.urgency.high);
-  const low = labels(issue).includes(workflow.urgency.low);
-  return high && low ? 1 : high ? 0 : low ? 2 : 1;
-}
-const urgencyNote = (issue: Labelled): string => {
-  const high = labels(issue).includes(workflow.urgency.high);
-  const low = labels(issue).includes(workflow.urgency.low);
-  if (high && low)
-    return " Both urgency labels are present: conflicting, so ordered as unspecified.";
-  if (high) return " Manual urgency:high override raises it in pickup order.";
-  if (low) return " Manual urgency:low override lowers it in pickup order.";
-  return "";
-};
 analysisRules.set("urgency-conflict", ({ issues }) =>
   issues
     .filter((issue) => urgencyBand(issue) === 1 && labels(issue).includes(workflow.urgency.high))
@@ -167,25 +166,85 @@ analysisRules.set("urgency-conflict", ({ issues }) =>
       ),
     ),
 );
-analysisRules.set("ready-work", ({ issues }) =>
-  issues
-    .filter(
-      (issue) =>
-        !owners(issue).length &&
-        labels(issue).includes(workflow.ready) &&
-        !labels(issue).includes(workflow.parked) &&
-        pickable(issue),
-    )
-    .map((issue) =>
-      action(
-        "ready-unclaimed",
-        issue,
-        // Within general pickup only: the override stays inside the pickup priority band.
-        40 + (1 - urgencyBand(issue)) * 0.5,
-        `Ready and unclaimed according to current labels.${urgencyNote(issue)}`,
-        "Read full intake and merged design, then recheck ownership before claiming.",
-      ),
+// Eligible implementation pickup, ranked by the shared declarative policy (#45,
+// doc/design/briefings.md). Priority stays inside the pickup band; rank orders within it.
+analysisRules.set("ready-work", ({ issues, prs, platform, order }) => {
+  const ranked = rankPickup(issues, { prs, platform, order });
+  return ranked.map((candidate) =>
+    action(
+      "ready-unclaimed",
+      candidate.issue,
+      40 + (ranked.length - candidate.rank + 1) / (ranked.length + 1),
+      `Eligible pickup according to current labels and native evidence. ${candidate.reason}`,
+      "Read full intake and merged design, then recheck ownership before claiming.",
     ),
+  );
+});
+// Pickup that might be eligible but lacks evidence (for example an unknown viewer platform
+// on a restricted ticket): inspection context, never confirmed pickup. Missing native
+// evidence has its own finding.
+analysisRules.set("pickup-unverified", ({ issues, prs, platform }) =>
+  issues
+    .filter((issue) => nativeKnown(issue))
+    .flatMap((issue) => {
+      const eligibility = pickupEligibility(issue, { prs, platform });
+      return eligibility.status === "unknown"
+        ? [
+            action(
+              "pickup-unverified",
+              issue,
+              30,
+              `Possible pickup, eligibility unknown: ${eligibility.reasons.join("; ")}.`,
+              "Supply the missing evidence before treating it as pickup; do not claim on assumption.",
+              "unknown",
+            ),
+          ]
+        : [];
+    }),
+);
+// Stale claim signal (doc/design/briefings.md): latest ticket comment/update or linked-PR
+// activity older than the threshold. A candidate for inspection; never an automatic release.
+analysisRules.set("stale-claim", ({ issues, prs, now, staleHours = briefingStaleHours }) =>
+  now
+    ? issues
+        .filter((issue) => owners(issue).length)
+        .flatMap((issue) => {
+          const linked = prs.filter((pr) =>
+            pr.closingIssuesReferences.nodes.some((ref) => ref.url === issue.url),
+          );
+          const times = [
+            issue.updatedAt,
+            ...issue.comments.nodes.map((c) => c.updatedAt ?? c.createdAt),
+            ...linked.map((pr) => pr.updatedAt),
+          ].filter((at): at is string => !!at && Number.isFinite(Date.parse(at)));
+          if (!times.length)
+            return [
+              action(
+                "stale-claim",
+                issue,
+                34,
+                `Claimed by ${owners(issue).join(", ")}; activity evidence unknown.`,
+                "Inspect the ticket and linked PRs; ask the owner on the ticket. Never auto-release.",
+                "unknown",
+              ),
+            ];
+          const latest = times.sort().at(-1) ?? "";
+          const hours = (now.getTime() - Date.parse(latest)) / 3_600_000;
+          return hours > staleHours
+            ? [
+                action(
+                  "stale-claim",
+                  issue,
+                  34,
+                  `Claimed by ${owners(issue).join(", ")}; no ticket or linked-PR activity for ${Math.floor(hours)}h (threshold ${staleHours}h, latest ${latest}).`,
+                  "Ask the owner on the ticket whether the claim is still active. Never auto-release.",
+                  "candidate",
+                  [issue.url, ...linked.map((pr) => pr.url)],
+                ),
+              ]
+            : [];
+        })
+    : [],
 );
 analysisRules.set("native-dependencies", ({ snapshot, issues }) =>
   issues.flatMap((issue) => {
@@ -457,6 +516,12 @@ export interface BriefingOptions {
   offline?: boolean;
   issue?: number;
   agent?: string;
+  /** Explicit viewer platform for platform-restricted pickup. */
+  platform?: string;
+  /** Pickup ordering mode; default impact. */
+  order?: PickupOrder;
+  /** Stale-claim threshold in hours; default two days. */
+  staleHours?: number;
 }
 /** A bounded list: the first `limit` items plus how many were left out. */
 export interface Bounded<T> {
@@ -468,7 +533,18 @@ export function briefing(snapshot: Snapshot, options: BriefingOptions, now: Date
   const issues = snapshot.issues.filter(active);
   const prs = snapshot.pullRequests.filter(active);
   const actions = [...analysisRules.values()]
-    .flatMap((handler) => handler({ snapshot, issues, prs, viewer: options.agent }))
+    .flatMap((handler) =>
+      handler({
+        snapshot,
+        issues,
+        prs,
+        viewer: options.agent,
+        platform: options.platform,
+        order: options.order,
+        now,
+        staleHours: options.staleHours,
+      }),
+    )
     .sort(
       (a, b) =>
         b.priority - a.priority ||
@@ -533,19 +609,25 @@ export function briefing(snapshot: Snapshot, options: BriefingOptions, now: Date
     },
     rateLimit: snapshot.rateLimit,
     actions: limit(actions),
+    // Eligible pickup in the selected order (doc/design/briefings.md). Metadata stays visible
+    // under every ordering; only the sort changes.
+    ranking: {
+      order: options.order ?? "impact",
+      platform: options.platform ?? null,
+      staleHours: options.staleHours ?? briefingStaleHours,
+    },
     ready: limit(
-      issues
-        .filter(
-          (issue) =>
-            !owners(issue).length &&
-            labels(issue).includes(workflow.ready) &&
-            !labels(issue).includes(workflow.parked) &&
-            pickable(issue),
-        )
-        // Pickup order: manual urgency band, then most dependants unblocked
-        // (doc/design/briefings.md; doc/issue-dependencies.md).
-        .sort((a, b) => urgencyBand(a) - urgencyBand(b) || unblocks(b) - unblocks(a))
-        .map(context),
+      rankPickup(issues, { prs, platform: options.platform, order: options.order }).map(
+        (candidate) => ({
+          ...context(candidate.issue),
+          rank: candidate.rank,
+          urgency: candidate.urgency,
+          unlocks: candidate.unlocks,
+          incomplete: candidate.incomplete,
+          createdAt: candidate.createdAt,
+          rankReason: candidate.reason,
+        }),
+      ),
     ),
     claimed: limit(issues.filter((issue) => owners(issue).length).map(context)),
     attention: limit(

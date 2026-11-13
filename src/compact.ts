@@ -27,6 +27,8 @@ export const ruleMetadata = new Map<string, RuleGroup>([
   ["blocker-explanation", "dependencies"],
   ["ready-unclaimed", "available"],
   ["urgency-conflict", "hygiene"],
+  ["stale-claim", "hygiene"],
+  ["pickup-unverified", "context"],
   ["addressed-attention", "addressed"],
   ...[
     "native-evidence-unknown",
@@ -142,6 +144,27 @@ export function compactBriefing(
     grouped.set(item.url, findings);
   }
   const groups = [...grouped].map(([target, findings]) => ({ target, findings }));
+  // Implementer action groups (doc/design/briefings.md), first match wins: addressed attention,
+  // actionable PR follow-up (own first), own active work, eligible pickup, then the rest.
+  // Waiting PRs (pending CI only) are not actionable follow-up.
+  const actionable = new Set([
+    "pr-failed-checks",
+    "pr-review-findings",
+    "pr-conflicts",
+    "pr-inspect-merge",
+  ]);
+  const tier = ({ target, findings }: { target: string; findings: Action[] }): number => {
+    const item = byUrl.get(target);
+    if (isAddressed(item)) return 0;
+    if (findings.some((f) => actionable.has(f.rule))) return linkedMine(item) ? 1 : 2;
+    if (item && isMine(item)) return 3;
+    if (findings.some((f) => f.rule === "ready-unclaimed")) return 4;
+    return 5;
+  };
+  // Pickup is ordered by its own ranked finding, so other findings cannot reorder the ranking.
+  const topPriority = (findings: Action[]): number =>
+    findings.find((f) => f.rule === "ready-unclaimed")?.priority ??
+    Math.max(...findings.map((f) => f.priority));
   const next = groups
     .filter(({ target, findings }) => {
       const item = byUrl.get(target);
@@ -157,9 +180,8 @@ export function compactBriefing(
     })
     .sort(
       (a, b) =>
-        Number(isAddressed(byUrl.get(b.target))) - Number(isAddressed(byUrl.get(a.target))) ||
-        Number(linkedMine(byUrl.get(b.target))) - Number(linkedMine(byUrl.get(a.target))) ||
-        b.findings[0].priority - a.findings[0].priority ||
+        tier(a) - tier(b) ||
+        topPriority(b.findings) - topPriority(a.findings) ||
         unblocksOf(byUrl.get(b.target)) - unblocksOf(byUrl.get(a.target)) ||
         a.target.localeCompare(b.target),
     );
@@ -234,6 +256,7 @@ export function compactBriefing(
     freshness: facts.freshness,
     completeness: facts.completeness,
     rateLimit: facts.rateLimit,
+    ranking: facts.ranking,
     metrics: snapshot.metrics ?? null,
     summary: {
       issues: snapshot.issues.filter((i) => i.state === "OPEN").length,
