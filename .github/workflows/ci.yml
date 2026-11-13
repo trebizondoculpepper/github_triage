@@ -44,6 +44,39 @@ jobs:
       - run: npx tsx scripts/smoke.ts src/cli.ts
       - run: npm run package-test
 
+  # FreeBSD TRIAL (owner decision, 2026-11-13): runs the same checks inside a FreeBSD VM on an
+  # Ubuntu host. Deliberately NOT in `verify`'s needs, so a slow or broken VM cannot block merges.
+  # Remove this job if it proves flaky, slow or costly to maintain.
+  freebsd:
+    name: test (freebsd 15.1, node 26) [trial, non-blocking]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test in FreeBSD VM
+        # vmactions/freebsd-vm v1.6.0
+        uses: vmactions/freebsd-vm@811efaaac0668df8bfb8308c3ec997b5ab50037b
+        with:
+          release: "15.1"
+          usesh: true
+          sync: rsync
+          prepare: |
+            pkg install -y git node26 npm-node26
+          run: |
+            set -e
+            node --version
+            npm ci
+            npm run check
+            npm test
+            npm run build
+            node dist/cli.mjs --help
+            npx tsx src/cli.ts --help
+            npm run smoke
+            npx tsx scripts/smoke.ts src/cli.ts
+            npm run package-test
+
   # Single stable check name for branch protection and the triage tool's
   # required "verify" check; passes only if every matrix job passed.
   verify:
