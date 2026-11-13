@@ -20,7 +20,7 @@ Team view lists explicit named-agent claims, linked PR state, latest ticket/PR a
 
 Diagnose intended project, selected harness/server entry, supported local configuration parse/identity/name, triage_role, supported role, Git ignored versus already tracked configuration, and missing runtime/gh access as separate checks. No repairs, login, identity creation, role writes, hooks or Git tracking changes. Return actionable in-band results, especially for hosts discarding stderr. Missing/ambiguous detection is explicit. Reuse the standalone identity resolution contract. Diagnose unavailable or unimplemented local resolution explicitly; no external service is required.
 
-Implementation defaults (routine, under this contract): the command is `doctor`; check IDs, statuses (`ok`/`missing`/`invalid`/`access`/`unsupported`/`unknown`) and exit codes are documented in `doc/usage.md`. Until a TOML parser is approved (#25), the `agent-inbox.toml` entry, name and `triage_role` checks report `unsupported` rather than hand-parsing.
+Implementation defaults: the command is `doctor`; stable check IDs, statuses and exit codes are documented in `doc/usage.md`. The merged baseline's retired identity-file checks must be removed under #64; no parser for another application's configuration is required. Explicit agent/role selection remains supported. Future automatic local identity needs its own standalone contract. Follow [configuration-driven permission checks](doctor-permissions.md) for the separate GitHub field/operation capability slice; basic authentication alone is not proof of those permissions.
 
 ## #66: Ticket Doctor v1
 

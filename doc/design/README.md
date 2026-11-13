@@ -48,3 +48,5 @@ The owner accepts a recent Node requirement: [the current Node LTS](runtime.md),
 [Repository-relative complexity estimation](complexity-estimation.md) records default T-shirt guidance and proposed small delivery slices. Native-field integration and estimation queues are not implemented or implicitly approved. Historical recalibration is later work; risk assessment belongs in a separate change set.
 
 [Repository configuration](repository-configuration.md) defines the proposed repository-only config command boundary, defaults and migration responsibilities.
+
+[Doctor permission checks](doctor-permissions.md) defines minimal, configuration-driven field/access diagnostics: creation permissions matter only after a missing field is confirmed.
