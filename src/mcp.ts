@@ -14,6 +14,14 @@ import * as z from "zod";
 import { collect, currentRepository } from "./github.js";
 import { dependencyReport } from "./dependencies.js";
 import { readBriefing, readDependencies } from "./service.js";
+import {
+  eventsReport,
+  eventsText,
+  pollingDefaults,
+  sharedCollect,
+  systemClock,
+  Watcher,
+} from "./polling.js";
 import type { ReadRuntime } from "./service.js";
 import { installedVersion } from "./updates.js";
 
@@ -23,19 +31,30 @@ export interface McpOptions {
   project?: string;
   repo?: string;
   agent?: string;
+  /** Opt-in proactive polling of the one resolved repository (doc/design/polling-events.md). */
+  poll?: boolean;
+  /** Minutes between completed polls; default 30, minimum 1. */
+  pollIntervalMinutes?: number;
 }
 
 /** Injected boundaries; tests replace every GitHub-facing one. */
 export interface McpRuntime extends ReadRuntime {
   currentRepository: (cwd?: string, signal?: AbortSignal) => Promise<string>;
+  /** The process's watcher when polling is enabled; absent means polling is disabled. */
+  watcher?: Watcher;
 }
 
 export const mcpHelp = `Usage: github-triage-mcp [--project PATH] [--repo owner/name] [--agent NAME]
+                         [--poll [--poll-interval-minutes N]]
 Read-only stdio MCP server for github-triage. Requires authenticated gh and Node 26+.
-Tools: triage_briefing, triage_issue, triage_dependencies. Never changes GitHub.
+Tools: triage_briefing, triage_issue, triage_dependencies, triage_events. Never changes GitHub.
   --project PATH        Local project checkout used to resolve the default repository
   --repo owner/name     Default repository (a tool's repo argument wins)
   --agent NAME          Default agent for focused reads (a tool's agent argument wins)
+  --poll                Opt in: poll the resolved repository while this server runs
+                        and record deduplicated events for triage_events (off by default)
+  --poll-interval-minutes N
+                        Minutes between completed polls (default 30, minimum 1; needs --poll)
   --help                Show usage
 Stdout carries only the MCP protocol; diagnostics go to stderr.
 `;
@@ -51,9 +70,16 @@ export function mcpArguments(args: string[]): McpOptions & { help?: boolean } {
       project: { type: "string" },
       repo: { type: "string" },
       agent: { type: "string" },
+      poll: { type: "boolean" },
+      "poll-interval-minutes": { type: "string" },
       help: { type: "boolean" },
     },
   });
+  const interval = values["poll-interval-minutes"];
+  if (interval !== undefined && !values.poll)
+    throw new Error("--poll-interval-minutes requires --poll.");
+  if (interval !== undefined && (!/^\d+$/.test(interval) || Number(interval) < 1))
+    throw new Error("--poll-interval-minutes must be a whole number of minutes, at least 1.");
   if (values.repo !== undefined && !repoPattern.test(values.repo))
     throw new Error("--repo must be owner/name.");
   if (values.agent !== undefined && !agentPattern.test(values.agent))
@@ -63,6 +89,13 @@ export function mcpArguments(args: string[]): McpOptions & { help?: boolean } {
     project: values.project === undefined ? undefined : resolve(values.project),
     repo: values.repo,
     agent: values.agent,
+    ...(values.poll
+      ? {
+          poll: true,
+          pollIntervalMinutes:
+            interval === undefined ? pollingDefaults.intervalMinutes : Number(interval),
+        }
+      : {}),
   };
 }
 
@@ -84,6 +117,10 @@ export const briefingInput = z.strictObject({
   maxChars,
 });
 export const issueInput = z.strictObject({ number, repo, agent, maxChars });
+export const eventsInput = z.strictObject({
+  cursor: z.string().min(1).max(200).optional(),
+  limit: z.number().int().min(1).max(100).default(20),
+});
 export const dependenciesInput = z.strictObject({
   number,
   repo,
@@ -94,7 +131,7 @@ const identitySource = z.enum(["tool", "startup", "unresolved"]);
 /** Versioned MCP envelope; `result` is the unchanged versioned CLI JSON. */
 export const envelope = z.object({
   schemaVersion: z.literal(1),
-  kind: z.enum(["briefing", "issue", "dependencies"]),
+  kind: z.enum(["briefing", "issue", "dependencies", "events"]),
   status: z.enum(["complete", "incomplete", "error"]),
   selection: z.object({
     repository: z.string().nullable(),
@@ -413,6 +450,45 @@ export function createServer(
       }),
   );
 
+  server.registerTool(
+    "triage_events",
+    {
+      title: "Triage events",
+      description:
+        "Deduplicated events detected by this server's optional poller (--poll) for its watched repository, after an optional cursor. Read-only and nondestructive; events are inspection candidates, never approval. Reports disabled status when polling is off.",
+      inputSchema: eventsInput,
+      outputSchema: envelope,
+      annotations,
+    },
+    async (args, ctx) => {
+      const watcher = runtime.watcher ?? null;
+      const report = eventsReport(watcher, args.cursor, args.limit);
+      const repository = watcher?.repository ?? null;
+      const structured: Envelope = {
+        schemaVersion: 1,
+        kind: "events",
+        status: ctx.mcpReq.signal.aborted ? "error" : report.complete ? "complete" : "incomplete",
+        selection: {
+          repository,
+          agent: options.agent ?? null,
+          identitySource: options.agent ? "startup" : "unresolved",
+        },
+        result: ctx.mcpReq.signal.aborted
+          ? null
+          : redactPaths(plain(report), localPaths(options.project)),
+        error: ctx.mcpReq.signal.aborted
+          ? { code: "cancelled", message: failures.cancelled }
+          : null,
+      };
+      return toolResult(
+        structured,
+        structured.error
+          ? `Error (cancelled): ${failures.cancelled}\n`
+          : redactPaths(eventsText(report), localPaths(options.project)),
+      );
+    },
+  );
+
   return server;
 }
 
@@ -462,9 +538,32 @@ if (isEntryPoint(process.argv[1])) {
     else {
       const { version } = await installedVersion();
       const runtime = defaultRuntime(options);
-      serveStdio(() => createServer(options, runtime, version ?? "0.0.0"), {
+      if (options.poll) {
+        // Polling watches exactly one explicitly resolved repository, never arbitrary targets.
+        const repository = options.repo ?? (await runtime.currentRepository(options.project));
+        if (!repoPattern.test(repository)) throw new Error("--poll needs a resolvable --repo.");
+        runtime.collect = sharedCollect(runtime.collect);
+        runtime.watcher = new Watcher(
+          { repository, intervalMinutes: options.pollIntervalMinutes },
+          { collect: runtime.collect, clock: systemClock },
+        );
+      }
+      const watcher = runtime.watcher;
+      const handle = serveStdio(() => createServer(options, runtime, version ?? "0.0.0"), {
         onerror: (error) => process.stderr.write(`github-triage-mcp: ${error.message}\n`),
       });
+      if (watcher) {
+        // Only this process owns the timer: EOF, disconnect or a signal stops it for good.
+        const shutdown = () => watcher.stop();
+        process.stdin.once("end", shutdown);
+        process.stdin.once("close", shutdown);
+        for (const signal of ["SIGINT", "SIGTERM"] as const)
+          process.once(signal, () => {
+            shutdown();
+            void handle.close().finally(() => process.exit(0));
+          });
+        watcher.start();
+      }
     }
   } catch (error) {
     process.stderr.write(
