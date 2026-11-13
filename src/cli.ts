@@ -30,6 +30,8 @@ import { runConfig } from "./configcli.js";
 import type { ConfigRuntime } from "./configcli.js";
 import { runSetup, terminalPrompt } from "./complexitysetup.js";
 import type { SetupRuntime } from "./complexitysetup.js";
+import { diagnoseComplexityConfig } from "./complexitydoctor.js";
+import type { ComplexityDoctorRuntime } from "./complexitydoctor.js";
 import type { GhRun } from "./dependencies.js";
 import type { Query } from "./github.js";
 import type { Snapshot } from "./types.js";
@@ -67,6 +69,8 @@ export interface Runtime {
   config?: ConfigRuntime;
   /** Filesystem, git, GitHub field API and prompt for `setup complexity`. */
   setup?: SetupRuntime;
+  /** Filesystem, git and GitHub field API for Ticket Doctor's configuration checks. */
+  doctor?: ComplexityDoctorRuntime;
 }
 
 type Output = (text: string) => Promise<void>;
@@ -85,6 +89,7 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   who N [--stale-hours N]  Read-only: who is working on ticket N? Claims, PRs, activity,
                         handoff evidence and contradictions in one operation
   ticket-doctor [--stale-hours N] [--limit N]  Read-only consistency scan of all open tickets
+                        and repository complexity configuration
   config get KEY | set KEY VALUE | list | help [KEY]  Repository settings in
                         .github/triage.json of this checkout (config help)
   setup complexity [--select ID | --create]  Discover native issue fields and map one
@@ -454,6 +459,13 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
       now: runtime.now?.() ?? new Date(),
       offline: !!values.offline,
     });
+    report.configuration = {
+      complexity: await diagnoseComplexityConfig(
+        snapshot.repository,
+        { offline: !!values.offline },
+        runtime.doctor,
+      ),
+    };
     await output(values.json ? JSON.stringify(report, null, 2) + "\n" : ticketDoctorText(report));
     return report.completeness.complete ? 0 : 2;
   }

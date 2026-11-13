@@ -39,6 +39,7 @@ import {
 import { briefing, dependencyDone, textReport } from "./briefing.js";
 import { complexityGuidance } from "./complexity.js";
 import { classifyField } from "./complexitysetup.js";
+import { complexityConfigText, diagnoseComplexityConfig } from "./complexitydoctor.js";
 import {
   collect,
   declaredDependencies,
@@ -2544,6 +2545,11 @@ describe("Ticket Doctor v1 (#66, doc/design/diagnostics.md)", () => {
         },
         currentRepository: async () => repo,
         now: () => new Date(time),
+        doctor: {
+          git: async () => {
+            throw new Error("no checkout");
+          },
+        },
       };
       expect(
         await main(
@@ -4287,5 +4293,142 @@ describe("setup complexity (#119)", () => {
         return s;
       })(),
     ).toContain("--create");
+  });
+});
+
+describe("Ticket Doctor: complexity configuration (#120)", () => {
+  const root = "/repo";
+  const path = join(root, CONFIG_PATH);
+  const sizes = ["XS", "S", "M", "L", "XL", "XXL"].map((name) => ({ name }));
+  const good = {
+    __typename: "IssueFieldSingleSelect",
+    id: "IF_good",
+    name: "Complexity",
+    dataType: "SINGLE_SELECT",
+    visibility: "ALL",
+    options: sizes,
+  };
+  const bad = { ...good, id: "IF_bad", name: "Size", options: sizes.slice(0, 2) };
+  const owner = (fields: unknown, errors: { type?: string; message?: string }[] = []) => ({
+    data: {
+      viewer: { login: "owner" },
+      repository: {
+        owner: { __typename: "User", id: "U_1", login: "owner", issueFields: fields },
+      },
+    },
+    errors,
+  });
+  const list = (...nodes: unknown[]) => ({ pageInfo: { hasNextPage: false }, nodes });
+  function run(
+    config: string | null,
+    answer: unknown,
+    options: { offline?: boolean; checkout?: boolean } = {},
+  ) {
+    const writes: string[] = [];
+    const queries: unknown[] = [];
+    const fs: ConfigFileSystem = {
+      readText: async (file) => (file === path ? config : null),
+      writeText: async (file) => void writes.push(file),
+      rename: async (file) => void writes.push(file),
+      remove: async (file) => void writes.push(file),
+      makeDirectory: async (file) => void writes.push(file),
+    };
+    const git: GitRunner = async (args) => {
+      if (options.checkout === false) throw new Error("not a repository");
+      return args[0] === "rev-parse"
+        ? `${root}\n`
+        : "origin\thttps://github.com/owner/name.git (fetch)\n";
+    };
+    const mutations: unknown[] = [];
+    const api = {
+      query: async (_q: string, v: Record<string, string>) => {
+        queries.push(v);
+        if (answer instanceof Error) throw answer;
+        return answer as { data: unknown; errors: [] };
+      },
+      mutate: async (_q: string, v: Record<string, string>) => {
+        mutations.push(v);
+        return { data: null, errors: [] };
+      },
+    };
+    return diagnoseComplexityConfig(
+      "owner/name",
+      { offline: options.offline },
+      { fs, git, cwd: root, api },
+    ).then((r) => ({ r, writes, queries, mutations }));
+  }
+  const mapped = (id: string) => `{"schemaVersion":1,"complexity":{"fieldId":"${id}"}}\n`;
+
+  it("suppresses findings and makes no remote call when disabled", async () => {
+    const { r, queries } = await run(
+      '{"schemaVersion":1,"complexity":{"enabled":false,"fieldId":"IF_gone"}}\n',
+      owner(list()),
+    );
+    expect(r).toMatchObject({ status: "disabled", findings: [], fieldId: "IF_gone" });
+    expect(queries).toEqual([]);
+  });
+  it("reports an unmapped field with the exact setup command", async () => {
+    const { r } = await run(null, owner(list(good, bad)));
+    expect(r.status).toBe("unconfigured");
+    expect(r.findings[0]).toMatchObject({
+      rule: "complexity-field-unmapped",
+      next: [
+        "github-triage setup complexity --select IF_good",
+        "github-triage config set complexity.enabled false",
+      ],
+    });
+  });
+  it("accepts a compatible mapping with no findings", async () => {
+    const { r } = await run(mapped("IF_good"), owner(list(good)));
+    expect(r).toMatchObject({ status: "configured-compatible", verified: true, findings: [] });
+  });
+  it("distinguishes incompatible from missing", async () => {
+    const incompatible = (await run(mapped("IF_bad"), owner(list(good, bad)))).r;
+    expect(incompatible.status).toBe("incompatible");
+    expect(incompatible.findings[0]!.detail).toContain("expected XS, S, M, L, XL, XXL");
+    const missing = (await run(mapped("IF_gone"), owner(list(good)))).r;
+    expect(missing.status).toBe("missing");
+    expect(missing.findings[0]!.next[0]).toBe("github-triage setup complexity --select IF_good");
+  });
+  it("reports FORBIDDEN as inaccessible, not absent", async () => {
+    const { r } = await run(mapped("IF_good"), owner(null, [{ type: "FORBIDDEN", message: "no" }]));
+    expect(r.status).toBe("inaccessible");
+    expect(r.findings[0]).toMatchObject({ certainty: "unknown" });
+    expect(r.findings[0]!.detail).toContain("Absent is not the same as unavailable");
+  });
+  it("reports an API without issue fields as unsupported", async () => {
+    const { r } = await run(null, {
+      data: null,
+      errors: [{ message: "Field 'issueFields' doesn't exist on type 'User'" }],
+    });
+    expect(r.status).toBe("unsupported");
+  });
+  it("treats missing evidence as unknown, never healthy", async () => {
+    const offline = (await run(mapped("IF_good"), owner(list(good)), { offline: true })).r;
+    expect(offline).toMatchObject({ status: "unknown", verified: false });
+    expect(offline.findings[0]!.rule).toBe("complexity-field-unverified");
+    const failed = (await run(mapped("IF_good"), new Error("network"))).r;
+    expect(failed.status).toBe("unknown");
+    const partial = (
+      await run(mapped("IF_x"), owner({ pageInfo: { hasNextPage: true }, nodes: [good] }))
+    ).r;
+    expect(partial.status).toBe("unknown");
+    const noCheckout = (await run(null, owner(list(good)), { checkout: false })).r;
+    expect(noCheckout).toMatchObject({
+      status: "unknown",
+      findings: [{ rule: "config-unavailable" }],
+    });
+  });
+  it("reports malformed configuration with recovery and never writes", async () => {
+    const { r, writes, mutations } = await run("{not json", owner(list(good)));
+    expect(r.findings[0]).toMatchObject({ rule: "config-invalid", certainty: "definite" });
+    expect(writes).toEqual([]);
+    expect(mutations).toEqual([]);
+  });
+  it("renders the configuration section in Ticket Doctor text", async () => {
+    const { r } = await run(mapped("IF_gone"), owner(list(good)));
+    const lines = complexityConfigText(r).join("\n");
+    expect(lines).toContain("complexity missing");
+    expect(lines).toContain("next: github-triage setup complexity --select IF_good");
   });
 });

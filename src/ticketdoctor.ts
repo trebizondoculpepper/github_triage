@@ -8,6 +8,8 @@
 import { owners, workflow } from "./briefing.js";
 import { dependencyDrift, nativeKnown } from "./dependencies.js";
 import { teamView } from "./team.js";
+import { complexityConfigText } from "./complexitydoctor.js";
+import type { ComplexityConfigReport } from "./complexitydoctor.js";
 import type { Issue, Snapshot } from "./types.js";
 
 /** Ticket Doctor's own staleness default: 24 hours, separate from the briefing's two days. */
@@ -54,6 +56,8 @@ export interface TicketDoctorReport {
   omittedTickets: number;
   completeness: { complete: boolean; warnings: string[] };
   guidance: string;
+  /** Repository-level configuration diagnosis (#120); additive, absent when not evaluated. */
+  configuration?: { complexity: ComplexityConfigReport };
 }
 
 /**
@@ -356,6 +360,7 @@ export function ticketDoctorText(r: TicketDoctorReport): string {
     lines.push("", `#${t.number} ${t.title} ${t.url}`);
     for (const f of t.findings) lines.push(`  [${f.certainty}] ${f.kind}: ${f.detail}`);
   }
+  if (r.configuration) lines.push("", ...complexityConfigText(r.configuration.complexity));
   if (r.omittedTickets)
     lines.push("", `…${r.omittedTickets} more tickets; raise --limit to see them.`);
   for (const w of r.completeness.warnings) lines.push(`INCOMPLETE: ${w}`);
