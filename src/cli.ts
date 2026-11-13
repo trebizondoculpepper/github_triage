@@ -43,6 +43,8 @@ import type { EstimationRuntime } from "./estimation.js";
 import type { EstimateRuntime } from "./estimate.js";
 import { diagnoseComplexityConfig } from "./complexitydoctor.js";
 import type { ComplexityDoctorRuntime } from "./complexitydoctor.js";
+import { localDoctor, localDoctorExitCode, localDoctorText } from "./localdoctor.js";
+import type { LocalDoctorRuntime } from "./localdoctor.js";
 import type { GhRun } from "./dependencies.js";
 import type { Query } from "./github.js";
 import type { Snapshot } from "./types.js";
@@ -84,6 +86,8 @@ export interface Runtime {
   estimate?: EstimateRuntime;
   /** Filesystem, git and GitHub field API for Ticket Doctor's configuration checks. */
   doctor?: ComplexityDoctorRuntime;
+  /** Working directory, filesystem and process probe for `doctor` (#64). */
+  localDoctor?: LocalDoctorRuntime;
   /** Filesystem, git and GitHub field API for the briefing's estimation queue (#122). */
   estimation?: EstimationRuntime;
 }
@@ -114,6 +118,9 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
                         handoff evidence and contradictions in one operation
   ticket-doctor [--stale-hours N] [--limit N]  Read-only consistency scan of all open tickets
                         and repository complexity configuration
+  doctor [--agent NAME] [--role NAME]  Read-only local configuration checks: Node, gh
+                        install/auth, checkout, agent-inbox.toml presence, Git ignore vs
+                        tracked, identity and triage role; exact next commands per check
   config get KEY | set KEY VALUE | list | help [KEY]  Repository settings in
                         .github/triage.json of this checkout (config help)
   setup complexity [--select ID | --create]  Discover native issue fields and map one
@@ -525,6 +532,25 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
       prompt: runtime.setup ? null : terminalPrompt(),
       ...runtime.setup,
     });
+  if (args[0] === "doctor") {
+    const { values } = parseArgs({
+      args: args.slice(1),
+      options: {
+        repo: { type: "string" },
+        json: { type: "boolean" },
+        agent: { type: "string" },
+        role: { type: "string" },
+      },
+    });
+    if (values.repo && !/^[\w.-]+\/[\w.-]+$/.test(values.repo))
+      throw new Error("--repo must be owner/name.");
+    const report = await localDoctor(
+      { repo: values.repo, agent: values.agent, role: values.role },
+      runtime.localDoctor,
+    );
+    await output(values.json ? JSON.stringify(report, null, 2) + "\n" : localDoctorText(report));
+    return localDoctorExitCode(report);
+  }
   if (args[0] === "ticket-doctor") {
     const { values } = parseArgs({
       args: args.slice(1),

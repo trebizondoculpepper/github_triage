@@ -20,6 +20,8 @@ Team view lists explicit named-agent claims, linked PR state, latest ticket/PR a
 
 Diagnose intended project, selected harness/server entry, TOML parse/identity/name, triage_role, supported role, Git ignored versus already tracked configuration, and missing runtime/gh access as separate checks. No repairs, login, identity creation, role writes, hooks or Git tracking changes. Return actionable in-band results, especially for hosts discarding stderr. Missing/ambiguous detection is explicit. Reuse identity resolution; compatibility blockers in identity.md remain real limitations. Can diagnose unavailable configuration without requiring the Agent Inbox service.
 
+Implementation defaults (routine, under this contract): the command is `doctor`; check IDs, statuses (`ok`/`missing`/`invalid`/`access`/`unsupported`/`unknown`) and exit codes are documented in `doc/usage.md`. Until a TOML parser is approved (#25), the `agent-inbox.toml` entry, name and `triage_role` checks report `unsupported` rather than hand-parsing.
+
 ## #66: Ticket Doctor v1
 
 Scan all open project tickets for missing/conflicting classification/readiness, conflicting urgency/design evidence, multiple claims/owners, leftover claim after handoff, stale agent activity, ready/open-PR mismatch, dependency cycles/drift/missing explanations, and unresolved identity references. Group by ticket, label definite versus candidate versus unknown, and bound output with omitted counts. Prioritize cheap structured checks; do not require perfect coverage of all prose.
