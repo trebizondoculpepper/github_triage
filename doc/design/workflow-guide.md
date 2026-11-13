@@ -29,9 +29,11 @@ When installed behavior has not yet caught up with a merged contract, clearly di
 
 Ordinary briefings include the compact guide by default in text and a structured `process` object in JSON. Use a maximum **900 Unicode code points** for guide text including its pointer; aim below the limit rather than padding to 600. Preserve actionable findings and their evidence before optional guide expansion. Under a smaller global output budget, emit only the pointer and report guide omission explicitly. Never truncate inside a command or silently drop a condition that changes its meaning.
 
-When disabled, emit a one-line pointer with policy version instead of the guide body. `--guide` enables and `--no-guide` disables for one invocation. Conflicting flags are an argument error with exact valid alternatives. Full `process` and `--help` output remain available regardless of recurring-guide settings. No automatic checkpoint/version suppression in this first slice: a project can opt out explicitly; smarter suppression is a future refinement.
+When disabled, emit a one-line pointer with policy version instead of the guide body. The opt-out is therefore not silent: that pointer, any configuration diagnostics and, when enabled, the omission notice are a required footer whose space is reserved before evidence rows are allocated, so text output never exceeds `--max-chars` beyond the irreducible header and footer. `--guide` enables and `--no-guide` disables for one invocation. Conflicting flags are an argument error with exact valid alternatives. Full `process` and `--help` output remain available regardless of recurring-guide settings. No automatic checkpoint/version suppression in this first slice: a project can opt out explicitly; smarter suppression is a future refinement.
 
 ## Minimal project configuration
+
+Implementation note (#71): the repository configuration service from #114/#116 landed after this contract, so the setting is the registered `processGuide` boolean key in `.github/triage.json`, set with `github-triage config set processGuide false`, rather than a separate `.github-triage.json`. Semantics below are unchanged; unknown keys in that shared file are refused by the service, so the briefing falls back to the default with a diagnostic rather than a warning.
 
 Use a committed `.github-triage.json` at the invoking Git project's worktree root:
 

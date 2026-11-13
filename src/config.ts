@@ -53,6 +53,14 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
     description:
       "Identifier of the native GitHub field that records complexity. Unset until explicitly selected.",
   },
+  {
+    key: "processGuide",
+    type: "boolean",
+    nullable: false,
+    defaultValue: true,
+    description:
+      "Whether briefings include the compact workflow guide (#71). false keeps a one-line pointer; --guide/--no-guide override per run and `github-triage process` always shows the full guide.",
+  },
 ];
 
 /** Upgrade a document from `from` to `from + 1`. Must be pure. */
