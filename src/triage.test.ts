@@ -6739,6 +6739,12 @@ describe("role-shaped briefings (#1, doc/design/briefings.md)", () => {
       role: "designer",
     });
     expect(d.role!.sections.find((s) => s.name === "design-pickup")?.items ?? []).toEqual([]);
+    // ...but it stays visible as inspection, with the evidence reason, not generic context.
+    const designInspect = section(d, "design-pickup-inspect");
+    expect(numbers(designInspect.items)).toEqual([171]);
+    expect(designInspect.items[0]!.reason).toMatch(/open closing PR cannot be ruled out/);
+    expect(designInspect.items[0]!.reason).toMatch(/closing references truncated on open PR #4/);
+    expect(numbers(d.role!.next)).not.toContain(171);
   });
   it("proves no open closing PR from the issue's complete reverse link despite truncation (#162)", async () => {
     const truncated = { ...pr(), closingIssuesReferences: page([], true, "next") };
