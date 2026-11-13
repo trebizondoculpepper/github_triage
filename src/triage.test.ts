@@ -1392,7 +1392,8 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
     labels?: string[];
     blockedBy?: number;
     openPrs?: number[];
-    comments?: string[];
+    comments?: (string | { body: string; createdAt: string })[];
+    labelledAt?: string;
     claims?: number[];
     repoLabels?: string[];
     afterWriteOwners?: string[];
@@ -1436,7 +1437,14 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
                         state: "OPEN",
                       })),
                     ),
-                    comments: page((t.comments ?? []).map((body) => ({ body }))),
+                    comments: page(
+                      (t.comments ?? []).map((c) => (typeof c === "string" ? { body: c } : c)),
+                    ),
+                    timelineItems: page(
+                      t.labelledAt
+                        ? [{ createdAt: t.labelledAt, label: { name: "agent:kavya" } }]
+                        : [],
+                    ),
                   },
           claims: page(
             (t.claims ?? []).map((n) => ({ number: n, title: `Ticket ${n}`, url: issue(n).url })),
@@ -1453,6 +1461,7 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
     const run = async (args: string[]) => void writes.push(args);
     return { query, run, writes };
   };
+  const at = (hoursAgo: number) => new Date(Date.parse(time) - hoursAgo * 3_600_000).toISOString();
   const claim = (t: Ticket, extra = {}) =>
     planClaim(repo, { number: 7, agent: "kavya", ...extra }, fake(t).query);
 
@@ -1479,21 +1488,34 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
     ]);
     expect(env.writes[2].at(-1)).toMatch(/branch `issue-7`[\s\S]*<!-- github-triage:claim:/);
   });
-  it("does not repeat the claim comment on retry, and is a no-op when already claimed", async () => {
+  it("comments on every new acquisition, and on retry repairs only a missing comment", async () => {
     const first = await claim({ labels: ["status:ready"], repoLabels: ["agent:kavya"] });
     const comment = first.changes!.find((c) => c.step === "comment")!.command.at(-1)!;
     const marker = comment.match(/<!-- github-triage:claim:[0-9a-f]+ -->/)![0];
-    const retry = await claim({
+    // Released and claimed again later: the old comment must not suppress the new one.
+    const again = await claim({
       labels: ["status:ready"],
       repoLabels: ["agent:kavya"],
       comments: [marker],
     });
-    expect(retry.changes!.map((c) => c.step)).toEqual(["labels"]);
-    const mine = await claim({ labels: ["agent:kavya"], claims: [7], comments: [marker] });
-    expect(mine).toMatchObject({ ok: true, noop: true, changes: [] });
-    // Labelled but the comment failed earlier: retry only the missing comment.
+    expect(again.changes!.map((c) => c.step)).toEqual(["labels", "comment"]);
+    // Labelled now, comment posted after the label was added: complete.
+    const done = await claim({
+      labels: ["agent:kavya"],
+      claims: [7],
+      comments: [{ body: marker, createdAt: at(1) }],
+      labelledAt: at(2),
+    });
+    expect(done).toMatchObject({ ok: true, noop: true, changes: [] });
+    // Labelled now, but the only claim comment predates this labelling: post it again.
+    const stale = await claim({
+      labels: ["agent:kavya"],
+      claims: [7],
+      comments: [{ body: marker, createdAt: at(5) }],
+      labelledAt: at(2),
+    });
+    expect(stale.changes!.map((c) => c.step)).toEqual(["comment"]);
     const repair = await claim({ labels: ["agent:kavya"], claims: [7] });
-    expect(repair).toMatchObject({ ok: true, noop: false });
     expect(repair.changes!.map((c) => c.step)).toEqual(["comment"]);
   });
   it("refuses with stable error IDs, facts and recovery commands", async () => {

@@ -46,7 +46,7 @@ const marker = (kind, parts) =>
 async function readTicket(repository, number, agent, query, designer = "") {
   const [owner, name] = repository.split("/");
   const data = await query(
-    `query($owner:String!,$name:String!,$number:Int!,$label:String!,$question:String!,$decision:String!,$needsDesign:String!,$attention:String!){repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on PullRequest{number url} ... on Issue{number title url state updatedAt labels(first:100){nodes{name} pageInfo{hasNextPage}} issueDependenciesSummary{blockedBy} blockedBy(first:20){nodes{number url state}} closedByPullRequestsReferences(first:10,includeClosedPrs:false){nodes{number url state}} comments(last:100){nodes{body}}}} claims:issues(first:20,states:OPEN,labels:[$label]){nodes{number title url}} ownerLabel:label(name:$label){name} questionLabel:label(name:$question){name} decisionLabel:label(name:$decision){name} needsDesignLabel:label(name:$needsDesign){name} attentionLabel:label(name:$attention){name}}}`,
+    `query($owner:String!,$name:String!,$number:Int!,$label:String!,$question:String!,$decision:String!,$needsDesign:String!,$attention:String!){repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on PullRequest{number url} ... on Issue{number title url state updatedAt labels(first:100){nodes{name} pageInfo{hasNextPage}} issueDependenciesSummary{blockedBy} blockedBy(first:20){nodes{number url state}} closedByPullRequestsReferences(first:10,includeClosedPrs:false){nodes{number url state}} comments(last:100){nodes{body createdAt}} timelineItems(itemTypes:[LABELED_EVENT],last:50){nodes{... on LabeledEvent{createdAt label{name}}}}}} claims:issues(first:20,states:OPEN,labels:[$label]){nodes{number title url}} ownerLabel:label(name:$label){name} questionLabel:label(name:$question){name} decisionLabel:label(name:$decision){name} needsDesignLabel:label(name:$needsDesign){name} attentionLabel:label(name:$attention){name}}}`,
     {
       owner,
       name,
@@ -163,7 +163,16 @@ export async function planClaim(repository, request, query = ghQuery) {
   if (label(item, mine)) {
     // Complete only when the explanatory comment exists too: a run whose comment failed is
     // repaired by retrying just that step.
-    const commented = item.comments.nodes.some((c) => c.body.includes(op));
+    // This acquisition began when the label was last added; only a claim comment posted since
+    // then counts, so an earlier claim's comment (before a release) does not.
+    const since = (item.timelineItems?.nodes ?? [])
+      .filter((e) => e.label?.name === mine)
+      .map((e) => e.createdAt)
+      .sort()
+      .at(-1);
+    const commented = item.comments.nodes.some(
+      (c) => c.body.includes(op) && (!since || !c.createdAt || c.createdAt >= since),
+    );
     return {
       ok: true,
       noop: commented,
@@ -250,7 +259,8 @@ export async function planClaim(repository, request, query = ghQuery) {
       [`${triage} --agent ${agent}`],
     );
   const remove = claimPolicy.pickable.filter((l) => label(item, l));
-  const already = item.comments.nodes.some((c) => c.body.includes(op));
+  // A fresh acquisition (label absent) always explains itself; retries of this acquisition are
+  // handled above, where the label is already present.
   const changes = [];
   if (!repoLabels.has(mine))
     changes.push({
@@ -280,19 +290,19 @@ export async function planClaim(repository, request, query = ghQuery) {
       ...remove.flatMap((l) => ["--remove-label", l]),
     ],
   });
-  if (!already)
-    changes.push({
-      step: "comment",
-      command: [
-        "issue",
-        "comment",
-        String(number),
-        "--repo",
-        repository,
-        "--body",
-        `Claimed by \`${agent}\`${branch ? ` on branch \`${branch}\`` : ""} with \`github-triage claim\`. Removed: ${remove.map((l) => `\`${l}\``).join(", ")}.\n\n${op}`,
-      ],
-    });
+  // Always post the claim comment for a new acquisition.
+  changes.push({
+    step: "comment",
+    command: [
+      "issue",
+      "comment",
+      String(number),
+      "--repo",
+      repository,
+      "--body",
+      `Claimed by \`${agent}\`${branch ? ` on branch \`${branch}\`` : ""} with \`github-triage claim\`. Removed: ${remove.map((l) => `\`${l}\``).join(", ")}.\n\n${op}`,
+    ],
+  });
   return { ok: true, noop: false, facts, changes, recheck: { agent } };
 }
 
