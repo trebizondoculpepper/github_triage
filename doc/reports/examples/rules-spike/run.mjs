@@ -110,9 +110,13 @@ for (const [name, tickets, agent, want] of scenarios) {
     mustNot: project(r, "must_not"),
     inspect: project(r, "inspect"),
   });
-  assert.deepEqual(norm(dl), norm(js), `evaluators disagree: ${name}`);
+  assert.deepEqual(norm(dl), norm(js), `evaluators disagree: ${String(name)}`);
   for (const k of Object.keys(want))
-    assert.deepEqual(norm(js)[k], k === "pickup" ? want[k] : [...want[k]].sort(), `${name}: ${k}`);
+    assert.deepEqual(
+      norm(js)[k],
+      k === "pickup" ? want[k] : [...want[k]].sort(),
+      `${String(name)}: ${k}`,
+    );
 }
 console.log(`${scenarios.length} scenarios: JS and DataScript agree and match expectations.\n`);
 
