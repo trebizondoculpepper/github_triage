@@ -5171,7 +5171,8 @@ describe("estimation queue and briefing visibility (#122)", () => {
 describe("read-only MCP adapter (#25)", async () => {
   const { Client } = await import("@modelcontextprotocol/client");
   const { InMemoryTransport } = await import("@modelcontextprotocol/server");
-  const { createServer, envelope, mcpArguments, redactPaths } = await import("./mcp.js");
+  const { createServer, envelope, mcpArguments, redactLocalText, redactPaths } =
+    await import("./mcp.js");
   const { IssueUnavailable } = await import("./github.js");
   type Runtime = import("./mcp.js").McpRuntime;
   type Options = import("./mcp.js").McpOptions;
@@ -5460,25 +5461,70 @@ describe("read-only MCP adapter (#25)", async () => {
     }
   });
 
-  it("redacts absolute local paths without touching URLs or repository names", () => {
+  it("redacts absolute paths in local diagnostics without touching URLs or repository names", () => {
+    expect(
+      [
+        "The checkout at /srv/work/x is not owner/name (remotes: o/r).",
+        "Restore C:\\Users\\bob\\proj\\.github\\triage.json from Git.",
+        "See https://github.com/owner/name/issues/2 and ~/secret/file",
+      ].map(redactLocalText),
+    ).toEqual([
+      "The checkout at <local checkout> is not owner/name (remotes: o/r).",
+      "Restore <local checkout> from Git.",
+      "See https://github.com/owner/name/issues/2 and <local checkout>",
+    ]);
+  });
+
+  it("redacts only verified local directories everywhere, at path boundaries", () => {
     expect(
       redactPaths(
         {
-          a: ["The checkout at /srv/work/x is not owner/name (remotes: o/r)."],
-          b: "Restore C:\\Users\\bob\\proj\\.github\\triage.json from Git.",
-          c: "See https://github.com/owner/name/issues/2 and ~/secret/file",
-          d: "Mine: /opt/me/repo/src",
+          a: "Mine: /opt/me/repo/src and /opt/me/repo.",
+          b: "Not mine: /opt/me/repository, /api/v1/users, /srv/work/x",
+          c: ["Win: c:/Users/Bob/proj\\src", "D:\\Users\\Bob\\proj"],
           n: 3,
         },
-        ["/opt/me/repo"],
+        ["/opt/me/repo", "C:\\Users\\Bob\\proj"],
       ),
     ).toEqual({
-      a: ["The checkout at <local checkout> is not owner/name (remotes: o/r)."],
-      b: "Restore <local checkout> from Git.",
-      c: "See https://github.com/owner/name/issues/2 and <local checkout>",
-      d: "Mine: <local checkout>/src",
+      a: "Mine: <local checkout>/src and <local checkout>.",
+      b: "Not mine: /opt/me/repository, /api/v1/users, /srv/work/x",
+      c: ["Win: <local checkout>\\src", "D:\\Users\\Bob\\proj"],
       n: 3,
     });
+  });
+
+  it("keeps GitHub-authored paths verbatim and still redacts the home directory", async () => {
+    const { homedir } = await import("node:os");
+    const authored = "Call /api/v1/users; see [contract](/doc/design/mcp.md).";
+    const home = `${homedir()}/private/notes.md`;
+    const evidence = {
+      ...issue(1),
+      title: "Fix /api/v1/users",
+      body: `${authored}\\nLocal: ${home}`,
+      comments: page([
+        { author: { login: "ana" }, body: authored, createdAt: time, url: `${issue().url}#c1` },
+      ]),
+    } as unknown as Issue;
+    const client = await connect(
+      fake({ collect: async (repository: string) => ({ ...snapshot([evidence]), repository }) }),
+      { repo },
+    );
+    for (const [name, args] of [
+      ["triage_issue", { number: 1 }],
+      ["triage_briefing", {}],
+    ] as const) {
+      const result = await client.callTool({ name, arguments: args });
+      const all = JSON.stringify(result.structuredContent) + text(result);
+      expect(all, name).not.toContain(homedir());
+      if (name === "triage_issue") {
+        const detail = JSON.stringify(structured(result).result);
+        expect(detail).toContain(JSON.stringify(authored).slice(1, -1));
+        expect(detail).toContain("Fix /api/v1/users");
+        expect(detail).toContain("<local checkout>/private/notes.md");
+      }
+    }
+    await client.close();
   });
 
   it("validates startup arguments", () => {

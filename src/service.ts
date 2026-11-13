@@ -39,12 +39,26 @@ export async function presentBriefing(
   options: PresentOptions,
   estimationRuntime?: EstimationRuntime,
   now: Date = new Date(),
+  redactDiagnostic?: (text: string) => string,
 ): Promise<PresentedBriefing> {
-  const estimation = await collectEstimationInput(
+  const collected = await collectEstimationInput(
     snapshot.repository,
     { offline: !!options.offline },
     estimationRuntime,
   );
+  // Locally generated configuration diagnostics may name local directories; a remote front end
+  // rewrites only these strings, never GitHub-authored evidence. The CLI passes no rewriter.
+  const estimation = redactDiagnostic
+    ? {
+        ...collected,
+        unavailable: collected.unavailable && redactDiagnostic(collected.unavailable),
+        findings: collected.findings.map((finding) => ({
+          ...finding,
+          detail: redactDiagnostic(finding.detail),
+          next: finding.next.map(redactDiagnostic),
+        })),
+      }
+    : collected;
   const expanded = briefing(
     snapshot,
     options.full
@@ -72,6 +86,8 @@ export interface ReadRuntime {
   estimation?: EstimationRuntime;
   /** Clock for freshness ages; defaults to the system clock. */
   now?: () => Date;
+  /** Rewrites locally generated diagnostics (not GitHub evidence) for remote consumers. */
+  redactDiagnostic?: (text: string) => string;
 }
 
 /** Live read request for a briefing or one issue's intake. */
@@ -123,6 +139,7 @@ export async function readBriefing(
     },
     runtime.estimation,
     runtime.now?.(),
+    runtime.redactDiagnostic,
   );
   return { kind: "report", ...presented };
 }
