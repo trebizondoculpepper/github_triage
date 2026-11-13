@@ -566,3 +566,63 @@ describe("delivery fold scenarios (#189)", () => {
     expect(f.members.map((m) => m.deliverable.target.branch)).toEqual(["release", null]);
   });
 });
+
+describe("delivery ordering evidence (PRRT_kwDOVsRJzc63TEp3)", () => {
+  const submitThenHandoff = () => {
+    const submit = post(record("submit", { agent: "alice", deliverables: [pr(5)] }));
+    const handoff = post(
+      record("handoff", {
+        agent: "alice",
+        to: "bob",
+        scope: "ticket",
+        expectedResponsibilityRecord: String(submit.databaseId),
+      }),
+    );
+    return { submit, handoff };
+  };
+  const expectUnknown = (f: Awaited<ReturnType<typeof fold>>, pattern: RegExp) => {
+    expect(f.recordsUnknown).toBe(true);
+    expect(f.refusal).toBe("EVIDENCE_INCOMPLETE");
+    expect(f.unknownBecause.join("\n")).toMatch(pattern);
+  };
+
+  it("a handoff with no creation time is unknown, not sorted before its submit", async () => {
+    const { submit, handoff } = submitThenHandoff();
+    const undated = { ...handoff, createdAt: undefined } as unknown as DeliveryComment;
+    const f = await fold([submit, undated]);
+    expectUnknown(f, /no creation time/);
+    expect(f.ticketResponsible).not.toBe("bob");
+    expect(f.rejected).toEqual([]);
+  });
+
+  it("an unparseable creation time is unknown, not guessed", async () => {
+    const { submit, handoff } = submitThenHandoff();
+    const f = await fold([submit, { ...handoff, createdAt: "yesterday-ish" }]);
+    expectUnknown(f, /is not a timestamp/);
+  });
+
+  it("equal creation times with a missing comment id are unknown, not tie-broken by default", async () => {
+    const { submit, handoff } = submitThenHandoff();
+    const noId = {
+      ...handoff,
+      createdAt: submit.createdAt,
+      databaseId: undefined,
+    } as unknown as DeliveryComment;
+    const f = await fold([submit, noId]);
+    expectUnknown(f, /no numeric id/);
+  });
+
+  it("a recognised record with no author is unverified, never attributed to a default", async () => {
+    const f = await fold([{ ...post(record("attach", { deliverables: [pr(5)] })), author: null }]);
+    expect(f.recordsUnknown).toBe(true);
+    expect(f.refusal).toBe("MARKER_UNVERIFIED");
+    expect(f.members).toEqual([]);
+  });
+
+  it("ordering gaps on a non-writer's record are ignored and do not block", async () => {
+    const f = await fold([
+      { ...post(record("attach", { deliverables: [pr(5)] }), "reader"), createdAt: "" },
+    ]);
+    expect(f.recordsUnknown).toBe(false);
+  });
+});

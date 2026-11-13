@@ -75,8 +75,12 @@ export interface DeliveryRecord {
   issuedAt: string;
 }
 
-/** A comment as read from GitHub, with its stable numeric id for ordering and `void`. */
-export type DeliveryComment = Comment & { databaseId: number; url?: string };
+/**
+ * A comment as read from GitHub, with its stable numeric id for ordering and `void`. The
+ * collector must supply `createdAt` and `databaseId`; both are still checked at runtime, and a
+ * recognised record lacking either is unordered evidence, never given a default.
+ */
+export type DeliveryComment = Comment & { databaseId: number; createdAt: string; url?: string };
 
 /** The injected authority boundary (#212 rule in production, replaceable by #205). */
 export type TrustDecision = (comment: Comment) => Promise<Authority>;
@@ -276,6 +280,8 @@ export type ClassifiedRecord = { comment: DeliveryComment; login: string } & (
   | { status: "unverified"; why: string }
   /** Established as lacking authority: listed and excluded, never unknown. */
   | { status: "ignored"; why: string }
+  /** No usable ordering evidence (creation time or comment id): makes the fold unknown. */
+  | { status: "unordered"; why: string }
   /** Trusted and valid, but bound to another repository or issue (copied record). */
   | { status: "foreign"; why: string }
 );
@@ -286,8 +292,23 @@ export interface IssueBinding {
   issue: number;
 }
 
-const byCommentOrder = (a: DeliveryComment, b: DeliveryComment): number =>
-  (a.createdAt ?? "").localeCompare(b.createdAt ?? "") || a.databaseId - b.databaseId;
+/** Why a comment cannot be placed in stable order, or null when it can. Nothing is defaulted. */
+const orderingProblem = (c: DeliveryComment): string | null => {
+  if (typeof c.createdAt !== "string" || c.createdAt.length === 0)
+    return "comment has no creation time, so its order is unknown";
+  if (Number.isNaN(Date.parse(c.createdAt)))
+    return `comment creation time ${JSON.stringify(c.createdAt)} is not a timestamp, so its order is unknown`;
+  if (!isPositiveInt(c.databaseId))
+    return "comment has no numeric id to break timestamp ties, so its order is unknown";
+  return null;
+};
+/** Comments with ordering evidence, by creation time then id; the rest keep input order, last. */
+const byCommentOrder = (a: DeliveryComment, b: DeliveryComment): number => {
+  const aOk = orderingProblem(a) === null;
+  const bOk = orderingProblem(b) === null;
+  if (!aOk || !bOk) return aOk === bOk ? 0 : aOk ? -1 : 1;
+  return Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.databaseId - b.databaseId;
+};
 
 /**
  * Classifies every recognized delivery record in stable comment order (creation time, then
@@ -303,14 +324,30 @@ export async function classifyDeliveryRecords(
   for (const comment of [...comments].sort(byCommentOrder)) {
     const parsed = parseDeliveryComment(comment.body);
     if (parsed.kind === "none") continue;
-    const login = comment.author?.login ?? "(unknown account)";
+    const login = comment.author?.login;
+    if (!isString(login)) {
+      // No author is no authority evidence; the record is unverified, never attributed to a default.
+      out.push({
+        comment,
+        login: "(author not established)",
+        status: "unverified",
+        why: "comment author could not be established",
+      });
+      continue;
+    }
     const authority = await trust(comment);
+    if (authority.status === "untrusted") {
+      out.push({ comment, login, status: "ignored", why: authority.why });
+      continue;
+    }
     if (authority.status === "unknown") {
       out.push({ comment, login, status: "unverified", why: authority.why });
       continue;
     }
-    if (authority.status === "untrusted") {
-      out.push({ comment, login, status: "ignored", why: authority.why });
+    // A trusted record that cannot be placed in order cannot be folded: no default position.
+    const unordered = orderingProblem(comment);
+    if (unordered) {
+      out.push({ comment, login, status: "unordered", why: unordered });
       continue;
     }
     if (parsed.kind === "malformed")
@@ -382,7 +419,8 @@ export interface DeliveryFold {
   malformed: { comment: string; login: string; why: string }[];
 }
 
-const commentId = (c: DeliveryComment): string => String(c.databaseId);
+const commentId = (c: DeliveryComment): string =>
+  isPositiveInt(c.databaseId) ? String(c.databaseId) : `(no id${c.url ? `, ${c.url}` : ""})`;
 
 /**
  * Folds classified records in order into the current required set (doc/design/
@@ -462,6 +500,13 @@ export function foldDelivery(records: ClassifiedRecord[], historyComplete: boole
         unknown(
           `delivery record ${id} by ${r.login} could not be verified (${r.why})`,
           "MARKER_UNVERIFIED",
+        );
+        continue;
+      case "unordered":
+        priorUnknown = true;
+        unknown(
+          `delivery record ${id} by ${r.login} cannot be ordered (${r.why})`,
+          "EVIDENCE_INCOMPLETE",
         );
         continue;
       case "unsupported":
