@@ -147,6 +147,8 @@ export type PrStatusReport = {
     omitted: number;
   };
   receipts: Receipt[];
+  /** Earlier receipts dropped by the presentation limit. */
+  omittedReceipts: number;
   reviewRequest: { at: string; url: string; status: string } | null;
   linkedIssues: {
     number: number;
@@ -168,7 +170,7 @@ comments(last:100){nodes{author{login} body createdAt url} pageInfo{hasPreviousP
 closingIssuesReferences(first:10){nodes{number url title state labels(first:50){nodes{name}}} pageInfo{hasNextPage}}}}}`;
 
 /** Bounds keep the report small; omitted counts are always reported. */
-export const limits = { failures: 5, threads: 8, excerpt: 240 };
+export const limits = { failures: 5, threads: 8, receipts: 3, excerpt: 240 };
 
 const excerpt = (text: string | null | undefined): string => {
   const flat = String(text ?? "")
@@ -361,6 +363,22 @@ export function prStatus(
     if (pr.mergeable === "CONFLICTING") blockers.push("merge conflicts with the base branch");
     else if (pr.mergeable === "UNKNOWN")
       blockers.push("mergeability unknown (GitHub still computing)");
+    // A merge state outside the registered current states (workflow.currentMergeStates, as used
+    // by the pr-merge-state rule) blocks merging. BLOCKED is explained below; DIRTY and DRAFT
+    // are already reported as conflicts and draft.
+    const state = pr.mergeStateStatus;
+    if (
+      !workflow.currentMergeStates.includes(state) &&
+      state !== "BLOCKED" &&
+      !(state === "DIRTY" && pr.mergeable === "CONFLICTING") &&
+      !(state === "DRAFT" && pr.isDraft) &&
+      !(state === "UNKNOWN" && pr.mergeable === "UNKNOWN")
+    )
+      blockers.push(
+        state === "BEHIND"
+          ? `branch is behind ${pr.baseRefName}: update it before merging`
+          : `merge state ${state} is not current: merging is not possible yet`,
+      );
     if (pr.reviewDecision === "CHANGES_REQUESTED") blockers.push("changes requested");
     if (pr.reviewDecision === "REVIEW_REQUIRED")
       blockers.push("a required approving review is missing");
@@ -453,7 +471,8 @@ export function prStatus(
       unresolved: threads.slice(0, limits.threads),
       omitted: Math.max(0, threads.length - limits.threads),
     },
-    receipts: receipts.slice(-3),
+    receipts: receipts.slice(-limits.receipts),
+    omittedReceipts: Math.max(0, receipts.length - limits.receipts),
     reviewRequest: request,
     linkedIssues,
     blockers,
@@ -514,6 +533,7 @@ export function prStatusText(r: PrStatusReport): string {
       (x) =>
         `Receipt ${x.by} ${x.at}${x.codexState?.code_review ? ` (Codex: ${x.codexState.code_review.status} on ${String(x.codexState.code_review.commit_sha).slice(0, 7)}, unresolved findings ${x.codexState.code_review.has_unresolved_findings})` : ""}${x.summary ? `: ${x.summary}` : ""} ${x.url}`,
     ),
+    ...(r.omittedReceipts ? [`  …${r.omittedReceipts} earlier receipt(s) omitted`] : []),
     ...r.linkedIssues.map(
       (i) => `Linked #${i.number} ${i.state} owners: ${i.owners.join(", ") || "none"}`,
     ),

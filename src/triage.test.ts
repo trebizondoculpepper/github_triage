@@ -2903,6 +2903,27 @@ describe("pr status: required approvals, verify success and review scoping", () 
       /concluded skipped.*must succeed/,
     );
   });
+  it("blocks a branch whose merge state is outside the registered current states", async () => {
+    const { prStatus } = await import("./prstatus.js");
+    const behind = prStatus(repo, make({ mergeState: "BEHIND" }));
+    expect(behind.blockers).toContain("branch is behind main: update it before merging");
+    expect(behind.verdict).toMatch(/^Blocked/);
+    expect(prStatus(repo, make({ mergeState: "UNSTABLE" })).blockers).toEqual([]);
+  });
+  it("reports receipts omitted by the presentation limit in JSON and text", async () => {
+    const { prStatus, prStatusText } = await import("./prstatus.js");
+    const bot = (i: number) => ({
+      author: { login: "codecov[bot]" },
+      body: `coverage ${i}`,
+      createdAt: `2026-11-12T1${i}:00:00Z`,
+      url: `c${i}`,
+    });
+    const r = prStatus(repo, make({ comments: [1, 2, 3, 4, 5].map(bot) }));
+    expect(r.receipts.map((x: { url: string }) => x.url)).toEqual(["c3", "c4", "c5"]);
+    expect(r.omittedReceipts).toBe(2);
+    expect(prStatusText(r)).toContain("…2 earlier receipt(s) omitted");
+    expect(prStatus(repo, make()).omittedReceipts).toBe(0);
+  });
   it("does not let a Codex marker answer a CodeRabbit request, and accepts a current formal Codex review", async () => {
     const { prStatus } = await import("./prstatus.js");
     const rabbit = {
