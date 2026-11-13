@@ -1,6 +1,6 @@
 # npm distribution and releases
 
-Status: packaging and trusted publishing are implemented; initial prereleases have been published. **The owner changed release policy in #79: publication must be explicit.** The contract below replaces automatic prereleases on every main build. Until #79 implementation merges, the existing workflow still publishes on main pushes when `NPM_PUBLISH=true`; this documentation does not disable it. Do not describe the new commands as shipped yet.
+Status: packaging and trusted publishing are implemented, and since #79 **publication is explicit only**: pushes to `main` or `release` never publish. `npm run make-prerelease` publishes a prerelease on `next`; `npm run release` publishes an official version on `latest`. Both dispatch `.github/workflows/publish.yml` with a channel and a full commit SHA, and the workflow validates the request before building anything. Publishing also requires the repository variable `NPM_PUBLISH=true`.
 
 ## Purpose and package
 
@@ -15,13 +15,13 @@ Use `@next` to opt into prereleases and `@VERSION` to pin a version. Publish the
 
 ## Explicit operations: target contract for #79
 
-| Request                  | Contributor command  | Source / publication                                                                                                                    |
-| ------------------------ | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| Build or merge main      | Ordinary CI          | Verify only; no npm publication, release tag, or consumed publication version                                                           |
-| Make a prerelease        | `npm run prerelease` | Explicit dispatch for a selected origin/main commit; npm `next` only                                                                    |
-| Make an official release | `npm run release`    | Fast-forward `release` to selected origin/main commit, then explicit dispatch; stable npm `latest`, matching Git tag and GitHub release |
+| Request                  | Contributor command       | Source / publication                                                                                                                    |
+| ------------------------ | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Build or merge main      | Ordinary CI               | Verify only; no npm publication, release tag, or consumed publication version                                                           |
+| Make a prerelease        | `npm run make-prerelease` | Explicit dispatch for a selected origin/main commit; npm `next` only                                                                    |
+| Make an official release | `npm run release`         | Fast-forward `release` to selected origin/main commit, then explicit dispatch; stable npm `latest`, matching Git tag and GitHub release |
 
-These are maintainer checkout commands, not installed `github-triage` subcommands. `npm run prerelease` is new; `npm run release` changes from push-triggered publication to explicit dispatch. Both support `-- --help` with their process, prerequisites, target channel, retry behavior and failure recovery. No new production command or workflow is introduced by this docs PR.
+These are maintainer checkout commands, not installed `github-triage` subcommands. The prerelease command is `npm run make-prerelease`, not `npm run prerelease`: npm automatically runs a script named `pre<name>` before `<name>`, so a `prerelease` script would publish a prerelease every time `npm run release` ran (#79). `npm run make-prerelease` is new; `npm run release` changes from push-triggered publication to explicit dispatch. Both support `-- --help` with their process, prerequisites, target channel, retry behavior and failure recovery. No new production command or workflow is introduced by this docs PR.
 
 The publish workflow accepts only `workflow_dispatch`, with required channel choice `next` or `latest` and an expected full source SHA. No `push`, PR, scheduled, or CI-completion event publishes. Main and release branch pushes alone cannot publish. Changing `NPM_PUBLISH` remains setup control, not a release request.
 

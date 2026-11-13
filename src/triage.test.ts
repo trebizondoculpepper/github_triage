@@ -27,6 +27,7 @@ import { collect, declaredDependencies, graphqlAnswer, pages, type Query } from 
 import { clauseFor, hedged, listWideHedge, planMigration } from "./migration.js";
 import { applyPlan, planClaim, planNeedsHuman } from "./claims.js";
 import { teamText, teamView } from "./team.js";
+import { ticketDoctor, ticketDoctorText } from "./ticketdoctor.js";
 import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
 
 const repo = "example/project";
@@ -2390,6 +2391,298 @@ describe("pr status: truncation and requested-reviewer matching", () => {
     expect(prStatus(repo, base({ comments: [rabbit, answer] })).reviewRequest!.status).toBe(
       "a reviewer has posted since the request",
     );
+  });
+});
+
+describe("Ticket Doctor v1 (#66, doc/design/diagnostics.md)", () => {
+  const at = (hoursAgo: number) => new Date(Date.parse(time) - hoursAgo * 3_600_000).toISOString();
+  const t = (n: number, labels: string[], extra: Partial<Issue> = {}): Issue => ({
+    ...issue(n, labels),
+    updatedAt: at(1),
+    ...extra,
+  });
+  const blockedBy = (urls: string[]) => ({
+    issueDependenciesSummary: {
+      blockedBy: urls.length,
+      totalBlockedBy: urls.length,
+      blocking: 0,
+      totalBlocking: 0,
+    },
+    blockedBy: page(
+      urls.map((url) => ({
+        ...issue(Number(url.split("/").pop())),
+        url,
+        repository: { nameWithOwner: repo },
+        issueDependenciesSummary: {
+          blockedBy: 0,
+          totalBlockedBy: 0,
+          blocking: 0,
+          totalBlocking: 0,
+        },
+      })),
+    ),
+  });
+  const build = () => {
+    const prOpen = pr();
+    prOpen.number = 90;
+    prOpen.state = "OPEN";
+    prOpen.closingIssuesReferences = page([{ number: 7, url: issue(7).url }]);
+    return snapshot(
+      [
+        t(1, ["bug", "status:ready"]), // clean
+        t(2, ["enhancement"]), // unclaimed, no readiness
+        t(3, ["bug", "status:ready", "status:parked"]), // two readiness labels
+        t(4, ["status:ready", "urgency:high", "urgency:low"]), // urgency conflict, no classification
+        t(5, ["bug", "status:ready", "question"]), // design conflict
+        t(6, ["bug", "agent:ana", "agent:bo"]), // two owners
+        t(7, ["bug", "status:ready"]), // open PR
+        t(8, ["bug", "status:blocked"]), // blocked without reason
+        t(9, ["bug", "agent:ana", "status:ready"], { updatedAt: at(30) }), // leftover + stale (24h)
+        t(10, ["bug", "status:ready"], { body: "Depends on #1." }), // drift
+        t(11, ["bug", "status:ready"], blockedBy([issue(12).url]) as Partial<Issue>),
+        t(12, ["bug", "status:ready"], blockedBy([issue(11).url]) as Partial<Issue>), // cycle 11<->12
+      ],
+      [prOpen],
+    );
+  };
+  const report = (options = {}) => ticketDoctor(build(), { now: new Date(time), ...options });
+  const kinds = (r: ReturnType<typeof report>, n: number) =>
+    r.tickets.find((x) => x.number === n)?.findings.map((f) => `${f.certainty}:${f.kind}`) ?? [];
+  it("finds each structured inconsistency with its certainty, and leaves clean tickets out", () => {
+    const r = report();
+    expect(kinds(r, 1)).toEqual([]);
+    expect(kinds(r, 2)).toEqual(["definite:readiness-missing"]);
+    expect(kinds(r, 3)).toEqual(["definite:readiness-conflict"]);
+    expect(kinds(r, 4)).toEqual(["definite:urgency-conflict", "candidate:classification-missing"]);
+    expect(kinds(r, 5)).toEqual(["definite:design-conflict"]);
+    expect(kinds(r, 6)).toEqual(["definite:multiple-owners", "definite:agent-multiple-claims"]);
+    expect(kinds(r, 7)).toEqual(["definite:ready-with-open-pr"]);
+    expect(kinds(r, 8)).toEqual(["definite:blocked-without-reason"]);
+    expect(kinds(r, 9)).toEqual([
+      "definite:agent-multiple-claims",
+      "candidate:leftover-readiness",
+      "candidate:stale-agent-activity",
+    ]);
+    expect(kinds(r, 10)).toEqual(["candidate:dependency-drift"]);
+    expect(kinds(r, 11)).toEqual(["definite:dependency-cycle"]);
+    expect(kinds(r, 12)).toEqual(["definite:dependency-cycle"]);
+  });
+  it("uses its own 24h staleness default, configurable, and bounds output with omitted counts", () => {
+    expect(kinds(report({ staleHours: 48 }), 9)).not.toContain("candidate:stale-agent-activity");
+    const small = report({ limit: 2 });
+    expect(small.tickets).toHaveLength(2);
+    expect(small.omittedTickets).toBe(small.summary.tickets - 2);
+    expect(small.tickets.every((x) => x.findings[0].certainty === "definite")).toBe(true);
+    expect(ticketDoctorText(small)).toContain("more tickets; raise --limit to see them");
+  });
+  it("reports missing native evidence as unknown and runs offline from the CLI", async () => {
+    const old = t(20, ["bug", "status:ready"]) as Partial<Issue>;
+    delete old.blockedBy;
+    const r = ticketDoctor(snapshot([old as Issue], []), { now: new Date(time) });
+    expect(kinds(r, 20)).toEqual(["unknown:dependency-evidence-unknown"]);
+    expect(r.completeness.complete).toBe(false);
+    const dir = await mkdtemp(join(tmpdir(), "triage-doctor-"));
+    try {
+      const cache = join(dir, "cache.json");
+      await atomicJson(cache, build());
+      let out = "";
+      const runtime = {
+        collect: async () => {
+          throw new Error("offline only");
+        },
+        currentRepository: async () => repo,
+        now: () => new Date(time),
+      };
+      expect(
+        await main(
+          ["ticket-doctor", "--offline", "--cache", cache, "--json"],
+          async (x) => void (out = x),
+          runtime,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(out)).toMatchObject({
+        kind: "ticket-doctor",
+        schemaVersion: 1,
+        scanned: 12,
+        freshness: { offline: true },
+      });
+      let text = "";
+      await main(
+        ["ticket-doctor", "--offline", "--cache", cache],
+        async (x) => void (text = x),
+        runtime,
+      );
+      expect(text.split("\n")[0]).toMatch(/OFFLINE cache fetched .*not verified live/);
+      for (const bad of [
+        ["ticket-doctor", "--limit", "0"],
+        ["ticket-doctor", "--stale-hours", "-1"],
+        ["ticket-doctor", "--offline"],
+      ])
+        await expect(main(bad, async () => {}, runtime)).rejects.toThrow();
+    } finally {
+      await rm(dir, { recursive: true });
+    }
+  });
+});
+
+describe("Ticket Doctor review fixes", () => {
+  it("reports every ticket on overlapping blocker cycles", async () => {
+    const { blockerCycles } = await import("./ticketdoctor.js");
+    // Blocked-by edges 1 -> 2, 1 -> 3, 2 -> 1, 3 -> 2: tickets 1, 2 and 3 are all on a cycle.
+    const edges = new Map([
+      ["1", ["2", "3"]],
+      ["2", ["1"]],
+      ["3", ["2"]],
+      ["4", ["1"]],
+    ]);
+    expect(blockerCycles(edges)).toEqual([["1", "2", "3"]]);
+    expect(blockerCycles(new Map([["5", ["5"]]]))).toEqual([["5"]]);
+  });
+  it("flags conflicting classification and awaiting-review without a PR; keeps absence unknown with partial labels", () => {
+    const partialLabels = (names: string[]) => ({
+      nodes: names.map((name) => ({ name })),
+      pageInfo: { hasNextPage: true, endCursor: "x" },
+    });
+    const r = ticketDoctor(
+      snapshot(
+        [
+          issue(30, ["bug", "enhancement", "status:ready"]),
+          issue(32, ["bug", "status:awaiting-review", "agent:y"]),
+          { ...issue(33, ["status:blocked"]), labels: partialLabels(["status:blocked"]) } as Issue,
+          issue(34, ["bug", "status:ready"]),
+        ],
+        [],
+      ),
+      { now: new Date(time) },
+    );
+    const k = (n: number) =>
+      r.tickets.find((t) => t.number === n)?.findings.map((f) => `${f.certainty}:${f.kind}`) ?? [];
+    expect(k(30)).toEqual(["candidate:classification-conflict"]);
+    expect(k(32)).toEqual(["candidate:awaiting-review-without-pr"]);
+    expect(k(33)).toEqual([
+      "unknown:labels-incomplete",
+      "unknown:classification-missing",
+      "unknown:blocked-without-reason",
+    ]);
+    expect(k(34)).toEqual([]);
+    expect(r.completeness.complete).toBe(false);
+  });
+  it("does not flag ready tickets with open native blockers (ready when blockers close)", () => {
+    const blocked = issue(35, ["bug", "status:ready"]);
+    blocked.issueDependenciesSummary!.blockedBy = 1;
+    blocked.issueDependenciesSummary!.totalBlockedBy = 1;
+    blocked.blockedBy = page([
+      {
+        ...issue(36),
+        repository: { nameWithOwner: repo },
+        issueDependenciesSummary: {
+          blockedBy: 0,
+          totalBlockedBy: 0,
+          blocking: 0,
+          totalBlocking: 0,
+        },
+      },
+    ]);
+    expect(ticketDoctor(snapshot([blocked], []), { now: new Date(time) }).tickets).toEqual([]);
+  });
+});
+
+describe("explicit publication helpers (#79)", () => {
+  const A = "a".repeat(40);
+  const B = "b".repeat(40);
+  type Fake = {
+    main?: string;
+    release?: string | null;
+    ancestor?: (x: string, y: string) => boolean;
+    dispatchFails?: boolean;
+  };
+  const fakeRunner = (f: Fake) => {
+    const calls: string[] = [];
+    const run = (cmd: string, args: string[]) => {
+      calls.push(`${cmd} ${args.join(" ")}`);
+      if (cmd === "git" && args[0] === "rev-parse")
+        return args[1] === "origin/main" ? (f.main ?? A) : (f.release ?? "");
+      if (cmd === "git" && args[0] === "ls-remote")
+        return f.release ? `${f.release}\trefs/heads/release` : "";
+      if (cmd === "git" && args[0] === "merge-base") {
+        if (!(f.ancestor ?? (() => true))(args[2], args[3])) throw new Error("not ancestor");
+        return "";
+      }
+      if (cmd === "gh" && f.dispatchFails) throw new Error("dispatch failed");
+      return "";
+    };
+    return { run, calls };
+  };
+  it("make-prerelease resolves main once and dispatches channel=next on main with that SHA", async () => {
+    const { makePrerelease } = await import("../scripts/dispatch.mjs");
+    const f = fakeRunner({ main: A });
+    makePrerelease({}, f.run);
+    expect(f.calls).toEqual([
+      "git fetch --no-tags origin main",
+      "git rev-parse origin/main",
+      `gh workflow run publish.yml --ref main -f channel=next -f sha=${A}`,
+    ]);
+  });
+  it("release fast-forwards release, then dispatches channel=latest on release; never forces", async () => {
+    const { release } = await import("../scripts/dispatch.mjs");
+    const f = fakeRunner({ main: A, release: B });
+    const lines = release({}, f.run);
+    expect(f.calls.filter((c) => c.startsWith("git push") || c.startsWith("gh"))).toEqual([
+      `git push origin ${A}:refs/heads/release`,
+      `gh workflow run publish.yml --ref release -f channel=latest -f sha=${A}`,
+    ]);
+    expect(f.calls.some((c) => c.includes("--force"))).toBe(false);
+    expect(lines[0]).toMatch(/publishes nothing/);
+    const already = fakeRunner({ main: A, release: A });
+    release({}, already.run);
+    expect(already.calls.some((c) => c.startsWith("git push"))).toBe(false);
+  });
+  it("refuses to rewrite release history", async () => {
+    const { release } = await import("../scripts/dispatch.mjs");
+    const f = fakeRunner({ main: A, release: B, ancestor: (x) => x !== B });
+    expect(() => release({}, f.run)).toThrow(/refusing to rewrite release history/);
+    expect(f.calls.some((c) => c.startsWith("git push") || c.startsWith("gh"))).toBe(false);
+  });
+  it("reports a failed dispatch with a retry for the same SHA, and retries never re-resolve main", async () => {
+    const { release, makePrerelease } = await import("../scripts/dispatch.mjs");
+    const f = fakeRunner({ main: A, release: B, dispatchFails: true });
+    expect(() => release({}, f.run)).toThrow(
+      new RegExp(`Promoted ${A}.*npm run release -- --sha ${A}`),
+    );
+    const retry = fakeRunner({ main: B, release: A });
+    makePrerelease({ sha: A }, retry.run);
+    expect(retry.calls).toEqual([
+      "git fetch --no-tags origin main",
+      `git merge-base --is-ancestor ${A} origin/main`,
+      `gh workflow run publish.yml --ref main -f channel=next -f sha=${A}`,
+    ]);
+    const offMain = fakeRunner({ ancestor: () => false });
+    expect(() => makePrerelease({ sha: A }, offMain.run)).toThrow(/not on origin\/main/);
+  });
+  it("validates arguments", async () => {
+    const { parseArgs } = await import("../scripts/dispatch.mjs");
+    expect(parseArgs([])).toEqual({});
+    expect(parseArgs(["--help"])).toEqual({ help: true });
+    expect(parseArgs(["--sha", A])).toEqual({ sha: A });
+    for (const bad of [["--sha", "abc"], ["--sha"], ["--sha", A, "x"], ["--force"]])
+      expect(() => parseArgs(bad)).toThrow();
+  });
+  it("the Publish workflow runs only on explicit dispatch and validates before building", async () => {
+    const workflow = await readFile(
+      new URL("../.github/workflows/publish.yml", import.meta.url),
+      "utf8",
+    );
+    expect(workflow).not.toMatch(/^\s*push:/m);
+    expect(workflow).toMatch(/^\s*workflow_dispatch:/m);
+    const validate = workflow.indexOf("Validate the request");
+    expect(validate).toBeGreaterThan(0);
+    expect(validate).toBeLessThan(workflow.indexOf("npm ci"));
+    expect(workflow).toContain('"$GITHUB_SHA" != "$SHA"');
+    expect(workflow).toContain("next:main|latest:release");
+    // A queued request re-checks the live branch head right before publishing.
+    const live = workflow.indexOf('git ls-remote origin "refs/heads/$GITHUB_REF_NAME"');
+    expect(live).toBeGreaterThan(0);
+    expect(live).toBeLessThan(workflow.indexOf("npm publish --provenance"));
   });
 });
 
