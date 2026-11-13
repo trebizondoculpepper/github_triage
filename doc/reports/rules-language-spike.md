@@ -1,10 +1,10 @@
 # Rules language feasibility spike (#74)
 
-Spike completed 2026-11-13, following the plan in [rules-language-engines.md](rules-language-engines.md) (#73). No runtime code, package dependency, configuration or live workflow changed. The spike lives in [examples/rules-spike/](examples/rules-spike/); DataScript is installed only for the run (`npm install --ignore-scripts --no-save datascript@1.8.1`, then `node doc/reports/examples/rules-spike/run.mjs`).
+Spike completed 2026-11-13, following the plan in [rules-language-engines.md](rules-language-engines.md) (#73). No runtime code, package dependency, configuration or live workflow changed. The spike lives in [examples/rules-spike/](examples/rules-spike/); DataScript was installed in an isolated scratch directory for the independent verification below; it is not a project runtime dependency. The existing JavaScript wrappers predate the owner’s TypeScript decision and are included in migration #91; intentionally ancillary Datalog clauses may remain.
 
 ## Recommendation
 
-**Simplify: adopt the rule-records layer, reject DataScript for now.** Rules as small data records over a registered fact table give the benefits the owner asked for (one source compiled to English, explicit must/may/must-not, explained overrides, static conflict diagnostics) evaluated by plain registered JavaScript. DataScript produced identical decisions on every scenario, but only after declaring every array-backed attribute `:db.cardinality/many`: without that schema it silently kept only the last label, owner or platform and allowed pickup the JS evaluator forbade (found in review; the multi-valued scenario now guards it). It also added a second clause language, an EPL-licensed dependency and roughly 16x the evaluation time, while every rule the workflow needs is a conjunction of named facts that JS evaluates trivially. Revisit a Datalog engine only if #75 needs recursive or join-heavy rules (for example, transitive dependency reasoning inside rules), which none of the twelve scenarios required.
+**Simplify: adopt the rule-records layer, reject DataScript for now.** Rules as small data records over a registered fact table give the benefits the owner asked for (one source compiled to English, explicit must/may/must-not, explained overrides, static conflict diagnostics) evaluated by plain registered JavaScript. DataScript produced identical decisions on every scenario, but only after declaring every array-backed attribute `:db.cardinality/many`: without that schema it silently kept only the last label, owner or platform and allowed pickup the JS evaluator forbade (found in review; the multi-valued scenario now guards it). It also added a second clause language, an EPL-licensed dependency and a slower end-to-end evaluator invocation in this experiment, including datom/database construction, while the selected rules in this narrow slice are conjunctions of named facts that the registered evaluator can handle directly. This does not measure isolated query-engine overhead or establish that every production workflow rule has this form. Revisit a Datalog engine only if #75 needs recursive or join-heavy rules (for example, transitive dependency reasoning inside rules), which the selected scenarios did not require.
 
 ## What was built
 
@@ -17,21 +17,44 @@ Spike completed 2026-11-13, following the plan in [rules-language-engines.md](ru
 
 ## Scenarios
 
-Both evaluators agree, and match the expected outcome, on all thirteen scenarios (the twelve below plus a multi-valued parity check): plain ready ticket; unknown blocker evidence (inspect, not eligible); partial labels (inspect); explicit attention (must respond, must not implement or pick up); own open PR (must follow up, not pick up); another agent's claim; incomplete before unstarted; platform restriction; unknown viewer platform (inspect); native blocker despite `status:ready`; impact before age; outstanding design decision. Missing evidence never becomes eligibility: R9 requires `not evidenceUnknown`, and R10 turns it into an inspect action.
+Both evaluators agree, and match the expected outcome, on all thirteen scenarios (the twelve below plus a multi-valued parity check): plain ready ticket; unknown blocker evidence (inspect, not eligible); partial labels (inspect); attention plus an outstanding question (must respond; the question forbids implementation/pickup); own open PR (must follow up, not pick up); another agent's claim; incomplete before unstarted; platform restriction; unknown viewer platform (inspect); native blocker despite `status:ready`; impact before age; outstanding design decision. In the modeled blocker/label evidence, unknown never becomes eligibility: R9 requires `not evidenceUnknown`, and R10 turns it into an inspect action. Attention alone is not a pickup prohibition: the multi-value fixture’s ready ticket 20 both requests a response and remains eligible. Attention does not reserve work; the separate question/design prerequisite caused the prohibition in the earlier fixture.
 
 ## Against the owner's five criteria
 
 | Criterion                  | Rule records + JS                                                          | Rule records + DataScript                                                 |
 | -------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| Correctness                | All 13 scenarios                                                           | Identical on all 13 (needs a cardinality schema) and 500 tickets          |
+| Correctness                | All 13 selected scenarios, not full workflow acceptance                    | Identical on all 13 (needs a cardinality schema) and 500 tickets          |
 | Common-source explanations | English guide, reasons and override explanations compiled from the records | Same (the layer, not the engine, provides them)                           |
 | Easy changes               | Add or edit a record; new facts need one JS test                           | Same, plus an EDN clause per fact that must stay equivalent to the JS one |
-| Practical cost             | No dependency; 500 tickets × 11 rules: median 0.56 ms                      | 468 KB EPL dependency; cold import ~17 ms; median 9.7 ms                  |
+| Practical cost             | No dependency; independent measurement below                               | 468 KB EPL dependency; end-to-end measurement below                       |
 | Better maintenance         | One language (JS) for facts                                                | Two clause languages to keep in step; EPL notice obligations              |
 
-Measured on macOS arm64, Node 26.7.0; a local synthetic benchmark, not GitHub latency. Node 20 was not available on this machine for a second run; #73 already confirmed DataScript imports on Node 20.
+### Independent verification and measurement limits
+
+Re-ran the unchanged spike on 2026-11-13 in a scratch directory with DataScript 1.8.1 on macOS arm64. Both Node versions passed all thirteen scenario assertions and the 500-ticket parity assertion. Each measured row uses the existing harness: five warm-ups, fifty timed invocations, 500 synthetic tickets and eleven rules.
+
+| Node    | Registered evaluator median / p95 | DataScript median / p95 |
+| ------- | --------------------------------- | ----------------------- |
+| 26.7.0  | 0.60 / 0.76 ms                    | 9.74 / 12.10 ms         |
+| 20.20.2 | 0.47 / 0.74 ms                    | 10.66 / 12.36 ms        |
+
+These are total evaluator-invocation times. `evaluateDataScript` constructs datoms, a connection/database and queries on each invocation; `evaluateJs` directly evaluates records against the provided objects. The comparison is useful for this implementation choice, not an isolated query benchmark or general DataScript performance claim. Imports occur before the timing loop; cold-import latency is not measured and the earlier unsupported cold-import figure is removed. No GitHub collection or agent adherence is measured.
+
+Reproduce from the repository root in a POSIX shell (downloads only into scratch/tool caches):
+
+```sh
+rules_scratch=$(mktemp -d)
+cp doc/reports/examples/rules-spike/rules.mjs doc/reports/examples/rules-spike/run.mjs "$rules_scratch/"
+npm install --prefix "$rules_scratch" --ignore-scripts --no-save datascript@1.8.1
+node "$rules_scratch/run.mjs"
+npm exec --yes --package=node@20.20.2 -- node "$rules_scratch/run.mjs"
+```
+
+The first node command uses the locally installed version; record it with the output. Absolute timing varies by machine/load. Reproduction paths must be updated when #91 converts the wrappers to TypeScript; that migration must preserve these assertions rather than silently change the experiment.
 
 ## Limits and what #75 must decide
+
+This spike does **not** establish full conformance to the merged briefing/lifecycle contract. It does not model urgency bands, explicit oldest/newest ordering, cross-ticket one-active-claim enforcement, open/closed ticket state, or completeness of ownership/PR evidence. It checks only the stated blocker/label completeness model, selected pickup rules and simplified default ordering. Those missing cases remain requirements to evaluate before production adoption; passing thirteen selected scenarios is not proof that all five owner criteria are satisfied across the entire workflow.
 
 - The fact table is the policy surface: facts are code, rules are data. Projects overriding rules would edit records only; adding facts remains a reviewed code change.
 - The contradiction check is pairwise and syntactic. It catches identical-condition conflicts and unknown or impossible rules, not every overlapping case; run-time `must_not` precedence plus visible overrides covers the rest.
