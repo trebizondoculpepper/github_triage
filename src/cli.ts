@@ -15,6 +15,7 @@ import {
   planDependencyChange,
 } from "./dependencies.js";
 import { compactBriefing, compactText } from "./compact.js";
+import { prStatusText, pullRequestStatus } from "./prstatus.js";
 import { doctorStaleHours, ticketDoctor, ticketDoctorText } from "./ticketdoctor.js";
 import { applyPlan, claimText, planClaim, planNeedsHuman } from "./claims.js";
 import { checkForUpdate, installedVersion, optOutEnv, updateAdvisory } from "./updates.js";
@@ -63,6 +64,7 @@ export const help = `Usage: github-triage [options]
 Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   deps N [--tree]       Read native upstream/downstream dependencies (deps --help)
   deps add|remove N --on M --note WHY [--dry-run]  Change native dependencies
+  pr N                  Why is pull request N not progressing? Every blocker at once
   claim N --agent NAME [--branch B] [--platform P] [--dry-run]  Claim an eligible ticket
   needs-human N --agent NAME --designer NAME --why TEXT --question TEXT... [--dry-run]
                         Record questions for a designer and mark the ticket decision-needed
@@ -455,6 +457,25 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
     });
     await output(values.json ? JSON.stringify(view, null, 2) + "\n" : teamText(view));
     return view.completeness.complete ? 0 : 2;
+  }
+  if (args[0] === "pr") {
+    const { values, positionals } = parseArgs({
+      args: args.slice(1),
+      allowPositionals: true,
+      options: { repo: { type: "string" }, json: { type: "boolean" } },
+    });
+    if (positionals.length !== 1 || !/^[1-9]\d*$/.test(positionals[0]))
+      throw new Error("Usage: github-triage pr N [--json] [--repo owner/name]");
+    if (values.repo && !/^[\w.-]+\/[\w.-]+$/.test(values.repo))
+      throw new Error("--repo must be owner/name.");
+    const repository = values.repo ?? (await runtime.currentRepository());
+    const report = await pullRequestStatus(
+      repository,
+      Number(positionals[0]),
+      runtime.query ?? ghQuery,
+    );
+    await output(values.json ? JSON.stringify(report, null, 2) + "\n" : prStatusText(report));
+    return report.completeness.complete ? 0 : 2;
   }
   if (args[0] === "deps") {
     const values = depsArgumentsFor(args.slice(1));
