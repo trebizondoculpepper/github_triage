@@ -318,8 +318,6 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
 
   // ---- Completed / disposed (history). Group a merged PR with the issue it natively closed.
   const subjects = evidence?.subjects ?? [];
-  const subjectKey = (kind: string, number: number) => `${kind}#${number}`;
-  const subjectMap = new Map(subjects.map((s) => [subjectKey(s.kind, s.number), s]));
   const subjectRef = (s: ChangeSubject): SubjectRef => ref(s, s.kind);
   const attributionFor = (s: ChangeSubject) => {
     const current = byUrl.get(s.url);
@@ -355,15 +353,21 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
   );
   for (const s of ordered) {
     const done = disposition(s);
-    if (!done || grouped.has(subjectKey(s.kind, s.number))) continue;
+    if (!done || grouped.has(s.url)) continue;
     const related: CatchUpRow["related"] = [];
     const reasons = [`${done.text} at ${done.at}.`];
     const evidenceLinks = [s.url];
     if (s.kind === "pull-request" && done.type === "merged")
       for (const link of s.links.filter((l) => l.relation === "closes")) {
-        const linked = subjectMap.get(subjectKey("issue", link.number));
+        // Match by full URL: a cross-repository link may share a local issue's number. The issue
+        // must link back to this exact PR as closed-by, not merely carry its number.
+        const linked = subjects.find((x) => x.kind === "issue" && x.url === link.url);
         const linkedDone = linked ? disposition(linked) : null;
-        if (!linked || !linkedDone || linked.links.every((l) => l.number !== s.number)) {
+        if (
+          !linked ||
+          !linkedDone ||
+          !linked.links.some((l) => l.relation === "closed-by" && l.url === s.url)
+        ) {
           // The link is native, but the issue's own completion is not in the evidence.
           related.push({
             kind: "issue",
@@ -374,7 +378,7 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
           });
           continue;
         }
-        grouped.add(subjectKey("issue", linked.number));
+        grouped.add(linked.url);
         related.push({ ...subjectRef(linked), relation: "closes" });
         reasons.push(`#${linked.number}: ${linkedDone.text} at ${linkedDone.at}.`);
         evidenceLinks.push(linked.url);
@@ -734,6 +738,13 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
       .map((c) => `${c.source}: ${c.omission ?? "incomplete"}`),
   ];
   const complete = historyStatus === "complete" && !openWorkIncomplete;
+  // A baseline has no history by design, not by failure: its current collection and source
+  // coverage being complete makes it a complete report that may seed a checkpoint at T0.
+  const baselineComplete =
+    historyStatus === "baseline" &&
+    !openWorkIncomplete &&
+    !!evidence?.complete &&
+    evidence.coverage.every((c) => c.complete);
   return {
     schemaVersion: CATCHUP_SCHEMA_VERSION,
     kind: "repository-briefing" as const,
@@ -788,7 +799,7 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
     checkpoint: {
       policy:
         "A complete live report may advance an explicitly requested checkpoint to the window end only after successful delivery; this report does not advance it.",
-      candidate: complete && window ? window.through : null,
+      candidate: (complete || baselineComplete) && window ? window.through : null,
     },
   };
 }
@@ -846,11 +857,8 @@ export function catchUpText(
       : `Changes: history ${report.completeness.history.toUpperCase()}; counts below are not a complete account.`,
     `Now: ${s.attention} attention; ${s.blockers} blocker(s); ${s.waiting} waiting; ${s.activeContributions} active contribution(s).`,
     `Scope: issues and PRs only (no releases, npm publication, deployments or diffs). Agent names are reported attribution, not authenticated; GitHub logins are not agents.`,
-    ...report.completeness.warnings.slice(0, 5).map((x) => `INCOMPLETE: ${x}`),
-    ...(report.completeness.warnings.length > 5
-      ? [`INCOMPLETE: ${report.completeness.warnings.length - 5} more warning(s); use --json.`]
-      : []),
   ];
+  const warnings = report.completeness.warnings;
   const omitted = Object.entries(report.omissions).filter(([, n]) => n > 0);
   const footer = [
     omitted.length
@@ -902,8 +910,21 @@ export function catchUpText(
       }
     } else body.push(...section.items.map(row));
   }
-  const lines = [...head];
+  // The header is budgeted too: warnings collapse to one completeness notice with a count, whose
+  // first-warning excerpt shrinks to fit; the full list stays in --json.
   const reserve = footer.join("\n").length + budgetNotice.length + 4;
+  const fit = (text: string, room: number) =>
+    text.length <= room ? text : room > 1 ? `${text.slice(0, room - 1)}…` : "";
+  const essential = head.join("\n").length;
+  if (warnings.length) {
+    const prefix = `INCOMPLETE: ${warnings.length} collection warning(s)`;
+    const suffix = "; see --json.";
+    const room = maxChars - reserve - essential - prefix.length - suffix.length - 12;
+    const first = fit(warnings[0]!, Math.min(200, room));
+    head.push(`${prefix}${first ? ` (first: ${first})` : ""}${suffix}`);
+  }
+  const lines = head.map((line) => fit(line, maxChars - reserve));
+  while (lines.join("\n").length + reserve > maxChars && lines.length > 1) lines.pop();
   let truncated = false;
   for (const line of body) {
     if (lines.join("\n").length + line.length + 1 + reserve > maxChars) {

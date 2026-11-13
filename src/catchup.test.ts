@@ -411,4 +411,87 @@ describe("repository catch-up aggregation (#169)", () => {
       catchUp(current(), { now: clock, limit: 100 }).sections.progress.total,
     );
   });
+
+  it("keeps the whole text, header and footer included, within every allowed budget", () => {
+    const long = (n: number) => `Collection warning ${n}: ${"x".repeat(900)}`;
+    for (const count of [0, 1, 5, 40])
+      for (const budget of [1000, 1200, 2500, 10000, 40000]) {
+        const warnings = Array.from({ length: count }, (_, n) => long(n));
+        const data = snap(current().issues, current().pullRequests, evidence(subjects), warnings);
+        const report = catchUp(data, { now: clock, limit: 100 });
+        const text = catchUpText(report, budget);
+        expect(text.length, `${count} warnings at ${budget}`).toBeLessThanOrEqual(budget);
+        expect(text).toContain("Window ");
+        expect(text).toContain("Scope: ");
+        expect(text).toMatch(/Omitted rows|No rows omitted/);
+        if (count)
+          expect(text).toContain(`INCOMPLETE: ${report.completeness.warnings.length} collection`);
+      }
+  });
+
+  it("offers a checkpoint candidate for a complete baseline only", () => {
+    const baseline = resolveWindow({ checkpoint: { through: null } }, clock);
+    const data = current();
+    data.changeEvidence = { ...evidence([]), window: baseline };
+    expect(catchUp(data, { now: clock }).checkpoint.candidate).toBe(baseline.through);
+
+    data.changeEvidence = { ...evidence([], false), window: baseline };
+    expect(catchUp(data, { now: clock }).checkpoint.candidate).toBeNull();
+    const failed = snap(current().issues, [], { ...evidence([]), window: baseline }, ["truncated"]);
+    expect(catchUp(failed, { now: clock }).checkpoint.candidate).toBeNull();
+  });
+
+  it("groups a merged PR only with the exact issue that links back to it", () => {
+    const other = "https://github.com/other/repo/issues/10";
+    const crossPr = changeSubject(
+      "pull-request",
+      {
+        ...pr(20, []),
+        closingIssuesReferences: page([{ number: 10, url: other }]),
+        state: "MERGED",
+        mergedAt: inside(2),
+        closedAt: inside(2),
+        updatedAt: inside(1),
+      } as EvidencePullRequest,
+      window,
+    );
+    // Local #10 links back to PR #20 by number, but the PR closes other/repo#10.
+    let report = catchUp(snap([], [], evidence([crossPr, completedIssue])), {
+      now: clock,
+      limit: 100,
+    });
+    const rows = report.sections.completed.items;
+    expect(rows.map((r) => r.subject.number).sort()).toEqual([10, 20]);
+    expect(rows.find((r) => r.subject.number === 20)!.related).toMatchObject([{ url: other }]);
+
+    // Issue #10 is completed and only carries a dependency link numbered 20, not closed-by.
+    const dependent = changeSubject(
+      "issue",
+      {
+        ...issue(10),
+        state: "CLOSED",
+        stateReason: "COMPLETED",
+        closedAt: inside(2),
+        updatedAt: inside(2),
+        blocking: page([
+          {
+            number: 20,
+            title: "x",
+            url: url("issues", 20),
+            state: "OPEN",
+            repository: { nameWithOwner: repo },
+            issueDependenciesSummary: {
+              blockedBy: 0,
+              totalBlockedBy: 0,
+              blocking: 0,
+              totalBlocking: 0,
+            },
+          },
+        ]),
+      } as EvidenceIssue,
+      window,
+    );
+    report = catchUp(snap([], [], evidence([mergedPr, dependent])), { now: clock, limit: 100 });
+    expect(report.sections.completed.items.map((r) => r.subject.number).sort()).toEqual([10, 20]);
+  });
 });
