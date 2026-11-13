@@ -23,3 +23,5 @@ Do not confuse three things: designer-assessed benefit; implementation complexit
 5. #248: a small, explainable ordinal easy-win heuristic within existing priorities.
 
 Queue and display may proceed independently after recording/reader primitives. The heuristic waits for reviewed rules and paired facts. Preserve attention, urgency, finish-before-start, eligibility and explicit age-only ordering. Incomparable pairs and unknowns need deterministic documented fallback, not false precision. Do not hold the existing simple ranking release for complete backlog coverage, these enhancements, historical recalibration or a production formal-rule engine. Later formal rules should consume the same facts.
+
+The detailed interface contract produced by #244 is [impact-estimation.md](impact-estimation.md).
