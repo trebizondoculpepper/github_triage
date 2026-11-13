@@ -10,7 +10,7 @@
  */
 import { isParked, owners } from "./briefing.js";
 import type { Bounded, Briefing } from "./briefing.js";
-import { immediateUnlocks, openClosingPrs } from "./ranking.js";
+import { immediateUnlocks, openClosingPrs, platformsOf } from "./ranking.js";
 import type { Action, Issue, PullRequest, Snapshot } from "./types.js";
 
 /** One row of a role section: the subject and why it is here, in this position. */
@@ -30,6 +30,11 @@ export interface RoleContext {
   isMine: (item: Issue) => boolean;
   /** Owned by the viewer directly or through a linked closing issue. */
   linkedMine: (item: Issue) => boolean;
+  /**
+   * Every subject the non-role compact briefing would show, with its reason. A role reorders
+   * and groups these; any it does not place is shown in the bounded OTHER CONTEXT section.
+   */
+  baseline: ReadonlyMap<string, string>;
 }
 export type SectionSelector = (context: RoleContext) => RoleRow[];
 export interface RoleSection {
@@ -40,6 +45,8 @@ export interface RoleSection {
   budget: number;
   /** Background awareness, not a next step. */
   background?: boolean;
+  /** Never cut by the row budget (directed attention is always shown). */
+  unbounded?: boolean;
 }
 export interface RolePolicy {
   question: string;
@@ -50,6 +57,7 @@ const labelsOf = (item: Issue): string[] => item.labels.nodes.map(({ name }) => 
 const open = (item: Issue): boolean => item.state === "OPEN";
 const openIssues = ({ snapshot }: RoleContext): Issue[] => snapshot.issues.filter(open);
 const openPrs = ({ snapshot }: RoleContext): PullRequest[] => snapshot.pullRequests.filter(open);
+const urlNumber = (url: string): number => Number(url.split("/").pop());
 const byNumber = (a: Issue, b: Issue): number => a.number - b.number;
 const ruleRows = (context: RoleContext, rules: string[]): RoleRow[] =>
   [...context.findings]
@@ -77,6 +85,39 @@ export const designPolicy = {
   changesRequested: "CHANGES_REQUESTED",
   /** Change-request reviews at which an implementation PR may need design input. */
   repeatedReviewCycles: 2,
+};
+
+/**
+ * Shared foreground policy, the same as the non-role compact action filter: parked work is
+ * never a next step unless explicitly addressed. Applied centrally to every foreground
+ * section, so no selector can bypass it.
+ */
+const nextStepAllowed = (item: Issue, context: RoleContext): boolean =>
+  context.isAddressed(item) || !isParked(item);
+/**
+ * Shared platform policy (pickupPolicy / pickupEligibility): an explicit restriction the
+ * viewer does not match excludes the ticket; an unknown viewer platform makes it inspection
+ * only. Returns null when unrestricted or matched.
+ */
+const platformGate = (item: Issue, context: RoleContext): "mismatch" | "unknown" | null => {
+  const platforms = platformsOf(item);
+  if (!platforms.length) return null;
+  const viewer = context.facts.ranking.platform ?? undefined;
+  if (!viewer) return "unknown";
+  return platforms.includes(viewer) ? null : "mismatch";
+};
+/** Unclaimed, unparked, undecided pending-design tickets without an open closing PR. */
+const designCandidates = (context: RoleContext): Issue[] => {
+  const prs = openPrs(context);
+  return openIssues(context).filter(
+    (item) =>
+      labelsOf(item).includes(designPolicy.pendingDesign) &&
+      !owners(item).length &&
+      !labelsOf(item).includes(designPolicy.decisionNeeded) &&
+      nextStepAllowed(item, context) &&
+      // An open closing PR is represented by DESIGN REVIEW, as pickup eligibility excludes it.
+      !openClosingPrs(item, prs).length,
+  );
 };
 
 /** Unclaimed open issues another open ticket or PR is waiting on. */
@@ -150,8 +191,7 @@ sectionSelectors.set("pr-waiting", (context) =>
 );
 sectionSelectors.set("own-work", (context) =>
   openIssues(context)
-    // Same policy as the compact action filter: parked work is not a next step unless addressed.
-    .filter((item) => context.isMine(item) && (!isParked(item) || context.isAddressed(item)))
+    .filter((item) => context.isMine(item) && nextStepAllowed(item, context))
     .sort(byNumber)
     .map((item) => ({ url: item.url, reason: "Owned by you; continue before claiming more." })),
 );
@@ -159,8 +199,11 @@ sectionSelectors.set("pickup", ({ facts }) =>
   facts.ready.items.map((item) => ({ url: item.url, reason: item.rankReason })),
 );
 sectionSelectors.set("unblock-candidates", (context) =>
-  ruleRows(context, ["prerequisites-closed"]),
+  ruleRows(context, ["ready-prerequisites-unverified"]),
 );
+// Possible pickup whose eligibility is unknown (for example an unknown viewer platform):
+// inspection only, never confirmed pickup, but never silently dropped.
+sectionSelectors.set("pickup-inspect", (context) => ruleRows(context, ["pickup-unverified"]));
 sectionSelectors.set("stale-claims", (context) => ruleRows(context, ["stale-claim"]));
 sectionSelectors.set("pending-design", (context) =>
   openIssues(context)
@@ -203,15 +246,8 @@ sectionSelectors.set("design-pickup", (context) => {
   const byUrl = new Map(issues.map((item) => [item.url, item]));
   const prs = openPrs(context);
   const platform = context.facts.ranking.platform ?? undefined;
-  return issues
-    .filter(
-      (item) =>
-        labelsOf(item).includes(designPolicy.pendingDesign) &&
-        !owners(item).length &&
-        !labelsOf(item).includes(designPolicy.decisionNeeded) &&
-        // An open closing PR is represented by DESIGN REVIEW, as pickup eligibility excludes it.
-        !openClosingPrs(item, prs).length,
-    )
+  return designCandidates(context)
+    .filter((item) => platformGate(item, context) === null)
     .map((item) => ({
       item,
       unlocks: immediateUnlocks(item, byUrl, { prs, platform }).map((d) => d.number),
@@ -227,6 +263,16 @@ sectionSelectors.set("design-pickup", (context) => {
       reason: `Unclaimed design work; immediately unlocks ${unlocks.length}${unlocks.length ? ` (${unlocks.map((n) => `#${n}`).join(", ")})` : ""} otherwise-ready ticket(s).`,
     }));
 });
+// Platform-restricted design work while the viewer platform is unknown: inspection only.
+sectionSelectors.set("design-pickup-inspect", (context) =>
+  designCandidates(context)
+    .filter((item) => platformGate(item, context) === "unknown")
+    .sort(byNumber)
+    .map((item) => ({
+      url: item.url,
+      reason: `Possible design work restricted to platform ${platformsOf(item).join(" or ")}; viewer platform unknown (state --platform). Inspect only.`,
+    })),
+);
 sectionSelectors.set("implementation-prs", (context) =>
   openPrs(context)
     .filter((pr) => !isDesignPr(pr, context))
@@ -252,7 +298,7 @@ export const roleRegistry = new Map<string, RolePolicy>([
     {
       question: "What action advances implementation most?",
       sections: [
-        { section: "addressed", title: "ADDRESSED TO YOU", budget: 10 },
+        { section: "addressed", title: "ADDRESSED TO YOU", budget: 10, unbounded: true },
         { section: "pr-follow-up", title: "PR FOLLOW-UP", budget: 5 },
         { section: "own-work", title: "YOUR ACTIVE WORK", budget: 5 },
         {
@@ -262,6 +308,12 @@ export const roleRegistry = new Map<string, RolePolicy>([
           background: true,
         },
         { section: "pickup", title: "PICKUP", budget: 5 },
+        {
+          section: "pickup-inspect",
+          title: "POSSIBLE PICKUP (inspect; eligibility unknown)",
+          budget: 5,
+          background: true,
+        },
         { section: "unblock-candidates", title: "UNBLOCK CANDIDATES", budget: 5 },
         { section: "stale-claims", title: "STALE CLAIMS (inspect; never auto-release)", budget: 3 },
         { section: "pending-design", title: "PENDING DESIGN", budget: 3, background: true },
@@ -273,11 +325,17 @@ export const roleRegistry = new Map<string, RolePolicy>([
     {
       question: "What can I resolve to unblock implementation?",
       sections: [
-        { section: "addressed", title: "ADDRESSED TO YOU", budget: 10 },
+        { section: "addressed", title: "ADDRESSED TO YOU", budget: 10, unbounded: true },
         { section: "decision-needed", title: "DECISION NEEDED", budget: 5 },
         { section: "documentation-needed", title: "AGREED, NEEDS DOCUMENTATION", budget: 5 },
         { section: "design-review", title: "DESIGN REVIEW", budget: 5 },
         { section: "design-pickup", title: "NEW DESIGN WORK", budget: 5 },
+        {
+          section: "design-pickup-inspect",
+          title: "POSSIBLE DESIGN WORK (inspect; platform unknown)",
+          budget: 3,
+          background: true,
+        },
         {
           section: "implementation-prs",
           title: "IMPLEMENTATION PRS",
@@ -297,24 +355,49 @@ export interface RoleView {
   /** Foreground rows in role order, each subject once. */
   next: RoleRow[];
 }
-/** Run a registered role over the shared facts. Each subject appears in its first section only. */
+/** Bounded catch-all: baseline subjects no role section placed. */
+export const otherContext = { name: "other-context", title: "OTHER CONTEXT", budget: 5 };
+/**
+ * Run a registered role over the shared facts. Each subject appears in its first section only.
+ * Foreground sections apply the shared next-step policy centrally; any subject the non-role
+ * briefing would show that no section placed lands in the bounded OTHER CONTEXT section.
+ */
 export function roleView(name: string, context: RoleContext): RoleView {
   const policy = roleRegistry.get(name);
   if (!policy) throw new Error(`--role must be one of ${roleNames().join(", ")}.`);
   const seen = new Set<string>();
-  const sections = policy.sections.map(({ section, title, budget, background = false }) => {
-    const selector = sectionSelectors.get(section);
-    if (!selector) throw new Error(`Role ${name}: unregistered section ${section}.`);
-    const rows = selector(context).filter((row) => !seen.has(row.url));
-    for (const row of rows) seen.add(row.url);
-    return {
-      name: section,
-      title,
-      background,
-      total: rows.length,
-      omitted: Math.max(0, rows.length - budget),
-      items: rows.slice(0, budget),
-    };
+  const bounded = (rows: RoleRow[], budget: number) => ({
+    total: rows.length,
+    omitted: Math.max(0, rows.length - budget),
+    items: rows.slice(0, budget),
+  });
+  const sections = policy.sections.map(
+    ({ section, title, budget, background = false, unbounded = false }) => {
+      const selector = sectionSelectors.get(section);
+      if (!selector) throw new Error(`Role ${name}: unregistered section ${section}.`);
+      const rows = selector(context).filter((row) => {
+        if (seen.has(row.url)) return false;
+        const item = context.byUrl.get(row.url);
+        return background || !item || nextStepAllowed(item, context);
+      });
+      for (const row of rows) seen.add(row.url);
+      return {
+        name: section,
+        title,
+        background,
+        ...bounded(rows, unbounded ? rows.length : budget),
+      };
+    },
+  );
+  const rest = [...context.baseline]
+    .filter(([url]) => !seen.has(url))
+    .sort(([a], [b]) => urlNumber(a) - urlNumber(b) || a.localeCompare(b))
+    .map(([url, reason]) => ({ url, reason: `Not in a ${name} section: ${reason}` }));
+  sections.push({
+    name: otherContext.name,
+    title: otherContext.title,
+    background: true,
+    ...bounded(rest, otherContext.budget),
   });
   return {
     name,

@@ -5171,7 +5171,7 @@ describe("estimation queue and briefing visibility (#122)", () => {
 describe("role-shaped briefings (#1, doc/design/briefings.md)", () => {
   const compact = async (
     data: Snapshot,
-    options: { limit: number; agent?: string; role?: string },
+    options: { limit: number; agent?: string; role?: string; platform?: string },
   ) => {
     const { compactBriefing } = await import("./compact.js");
     const expanded = briefing(data, { ...options, limit: 1000 }, new Date(time));
@@ -5350,6 +5350,146 @@ describe("role-shaped briefings (#1, doc/design/briefings.md)", () => {
     });
     expect(numbers(r.role!.next)).not.toContain(80);
     expect(numbers(a.role!.next)).toContain(80);
+  });
+  it("excludes parked design work from new design pickup unless addressed", async () => {
+    const parked = issue(100, ["status:needs-design", "status:parked"]);
+    const fresh = issue(101, ["status:needs-design"]);
+    const r = await compact(snapshot([parked, fresh], []), {
+      limit: 10,
+      agent: "reader",
+      role: "designer",
+    });
+    expect(numbers(section(r, "design-pickup").items)).toEqual([101]);
+    expect(numbers(r.role!.next)).not.toContain(100);
+    // Still visible as background context, never silently dropped.
+    expect(numbers(section(r, "other-context").items)).toContain(100);
+    const addressed = issue(100, ["status:needs-design", "status:parked", "attention:reader"]);
+    const a = await compact(snapshot([addressed, fresh], []), {
+      limit: 10,
+      agent: "reader",
+      role: "designer",
+    });
+    expect(numbers(a.role!.next)).toContain(100);
+  });
+  it("applies the parked guard centrally to every foreground role section", async () => {
+    const { roleView, sectionSelectors } = await import("./roles.js");
+    const parked = issue(102, ["agent:reader", "status:parked"]);
+    const data = snapshot([parked], []);
+    const r = await compact(data, { limit: 10, agent: "reader" });
+    // A selector that ignores parking still cannot promote a parked ticket to a next step.
+    sectionSelectors.set("own-work-unguarded", ({ byUrl }) =>
+      [...byUrl.keys()].map((url) => ({ url, reason: "test" })),
+    );
+    const { roleRegistry } = await import("./roles.js");
+    roleRegistry.set("probe", {
+      question: "probe",
+      sections: [{ section: "own-work-unguarded", title: "PROBE", budget: 5 }],
+    });
+    try {
+      const view = roleView("probe", {
+        snapshot: data,
+        facts: briefing(data, { limit: 1000, agent: "reader" }, new Date(time)),
+        findings: new Map(),
+        byUrl: new Map([[parked.url, parked]]),
+        isAddressed: () => false,
+        isMine: () => true,
+        linkedMine: () => true,
+        baseline: new Map([[parked.url, "Parked; not a next step."]]),
+      });
+      expect(view.next).toEqual([]);
+      expect(numbers(view.sections.at(-1)!.items)).toEqual([102]);
+    } finally {
+      roleRegistry.delete("probe");
+      sectionSelectors.delete("own-work-unguarded");
+    }
+    expect(r.role).toBeNull();
+  });
+  it("populates unblock candidates from the real dependency rule", async () => {
+    const blocker = issue(110, ["agent:other"]);
+    const waiting = issue(111);
+    blocking(blocker, waiting);
+    const r = await compact(snapshot([blocker, waiting], []), {
+      limit: 10,
+      agent: "reader",
+      role: "implementer",
+    });
+    expect(numbers(section(r, "unblock-candidates").items)).toEqual([111]);
+    expect(section(r, "unblock-candidates").items[0]!.reason).toMatch(/native blockers close/);
+  });
+  it("never cuts addressed attention by a fixed cap", async () => {
+    const many = Array.from({ length: 14 }, (_, i) => issue(120 + i, ["attention:reader"]));
+    const r = await compact(snapshot(many, []), { limit: 5, agent: "reader", role: "designer" });
+    expect(section(r, "addressed")).toMatchObject({ total: 14, omitted: 0 });
+    expect(section(r, "addressed").items).toHaveLength(14);
+  });
+  it("respects platform restrictions on new design work", async () => {
+    const codex = issue(140, ["status:needs-design", "platform:codex"]);
+    const open = issue(141, ["status:needs-design"]);
+    const data = snapshot([codex, open], []);
+    const other = await compact(data, {
+      limit: 10,
+      agent: "reader",
+      role: "designer",
+      platform: "ori",
+    });
+    expect(numbers(section(other, "design-pickup").items)).toEqual([141]);
+    expect(numbers(other.role!.next)).not.toContain(140);
+    const match = await compact(data, {
+      limit: 10,
+      agent: "reader",
+      role: "designer",
+      platform: "codex",
+    });
+    expect(numbers(section(match, "design-pickup").items)).toEqual([140, 141]);
+    const unknown = await compact(data, { limit: 10, agent: "reader", role: "designer" });
+    expect(numbers(section(unknown, "design-pickup").items)).toEqual([141]);
+    expect(numbers(section(unknown, "design-pickup-inspect").items)).toEqual([140]);
+    expect(section(unknown, "design-pickup-inspect").background).toBe(true);
+    expect(numbers(unknown.role!.next)).not.toContain(140);
+  });
+  it("keeps pickup-unverified tickets visible for inspection", async () => {
+    const restricted = issue(150, ["status:ready", "platform:codex"]);
+    const r = await compact(snapshot([restricted], []), {
+      limit: 10,
+      agent: "reader",
+      role: "implementer",
+    });
+    const inspect = section(r, "pickup-inspect");
+    expect(numbers(inspect.items)).toEqual([150]);
+    expect(inspect.background).toBe(true);
+    expect(inspect.items[0]!.reason).toMatch(/eligibility unknown/);
+    expect(numbers(r.role!.next)).not.toContain(150);
+  });
+  it("shows every issue and PR from the non-role briefing somewhere in each role", async () => {
+    const holder = issue(160, ["agent:other"]);
+    const waiting = issue(161);
+    blocking(holder, waiting);
+    const items = [
+      issue(162),
+      issue(163, ["status:parked"]),
+      issue(164, ["agent:reader"]),
+      issue(165, ["agent:other", "status:parked"]),
+      issue(166, ["status:needs-design", "platform:codex"]),
+      issue(167, ["status:ready", "platform:codex"]),
+      issue(168, ["design:decision-needed", "agent:other"]),
+      issue(169, ["status:blocked"]),
+      holder,
+      waiting,
+    ];
+    const data = snapshot(items, [{ ...pr(), closingIssuesReferences: page([]) }]);
+    const plain = await compact(data, { limit: 50, agent: "reader" });
+    const all = new Set([
+      ...plain.actions.items,
+      ...Object.values(plain.sections).flatMap((s) => s.items),
+    ]);
+    expect([...all].some((url) => url.includes("/issues/"))).toBe(true);
+    for (const role of ["implementer", "designer"]) {
+      const view = await compact(data, { limit: 50, agent: "reader", role });
+      const shown = new Set(view.role!.sections.flatMap((s) => s.items.map((row) => row.url)));
+      // Anything not placed is in OTHER CONTEXT, bounded with an explicit omission count.
+      const missing = [...all].filter((url) => !shown.has(url));
+      expect(missing.length, role).toBe(section(view, "other-context").omitted);
+    }
   });
   it("renders the role in text and rejects unknown roles", async () => {
     const { compactText } = await import("./compact.js");

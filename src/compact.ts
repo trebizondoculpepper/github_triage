@@ -191,32 +191,49 @@ export function compactBriefing(
         unblocksOf(byUrl.get(b.target)) - unblocksOf(byUrl.get(a.target)) ||
         a.target.localeCompare(b.target),
     );
-  const sections: Record<string, Bounded<string>> = Object.fromEntries(
-    [
-      "addressed",
-      "review",
-      "available",
-      "decision-needed",
-      "documentation-needed",
-      "decisions",
-      "dependencies",
-      "hygiene",
-      "context",
-    ].map((name) => [
+  const sectionNames = [
+    "addressed",
+    "review",
+    "available",
+    "decision-needed",
+    "documentation-needed",
+    "decisions",
+    "dependencies",
+    "hygiene",
+    "context",
+  ];
+  // Unbounded section membership; the non-role briefing bounds it, role views use it as the
+  // baseline every role must still show somewhere.
+  const sectionLists: Record<string, string[]> = Object.fromEntries(
+    sectionNames.map((name) => [
       name,
-      bound(
-        groups
-          .filter(({ findings }) => findings.some((f) => ruleMetadata.get(f.rule) === name))
-          .map(({ target }) => target),
-      ),
+      groups
+        .filter(({ findings }) => findings.some((f) => ruleMetadata.get(f.rule) === name))
+        .map(({ target }) => target),
     ]),
   );
-  sections.current = bound(
-    objects
-      .filter((item) => owners(item).length && (!options.agent || linkedMine(item)))
-      .map((item) => item.url),
+  sectionLists.current = objects
+    .filter((item) => owners(item).length && (!options.agent || linkedMine(item)))
+    .map((item) => item.url);
+  sectionLists.deferred = snapshot.issues.filter(isParked).map((item) => item.url);
+  const sections: Record<string, Bounded<string>> = Object.fromEntries(
+    Object.entries(sectionLists).map(([name, urls]) => [name, bound(urls)]),
   );
-  sections.deferred = bound(snapshot.issues.filter(isParked).map((item) => item.url));
+  // Every subject the non-role briefing would show, with the reason it would show it.
+  const baseline = new Map<string, string>();
+  for (const { target, findings } of next)
+    baseline.set(target, findings.map((f) => f.reason).join(" "));
+  for (const [name, urls] of Object.entries(sectionLists))
+    for (const url of urls)
+      if (!baseline.has(url))
+        baseline.set(
+          url,
+          name === "deferred"
+            ? "Parked; not a next step."
+            : name === "current"
+              ? `Current claimed work (${owners(defined(byUrl.get(url))).join(", ")}).`
+              : (grouped.get(url) ?? []).map((f) => f.reason).join(" ") || name,
+        );
   // A registered role (#1) reshapes presentation of the same facts; without one, unchanged.
   const role: RoleView | null = options.role
     ? roleView(options.role, {
@@ -229,6 +246,7 @@ export function compactBriefing(
         isAddressed: (item) => isAddressed(item),
         isMine,
         linkedMine: (item) => linkedMine(item),
+        baseline,
       })
     : null;
   const ordered = role
