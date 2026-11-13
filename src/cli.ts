@@ -28,6 +28,8 @@ import type { PickupOrder } from "./ranking.js";
 import { complexityGuidanceJson, complexityGuidanceText } from "./complexity.js";
 import { runConfig } from "./configcli.js";
 import type { ConfigRuntime } from "./configcli.js";
+import { runSetup, terminalPrompt } from "./complexitysetup.js";
+import type { SetupRuntime } from "./complexitysetup.js";
 import type { GhRun } from "./dependencies.js";
 import type { Query } from "./github.js";
 import type { Snapshot } from "./types.js";
@@ -63,6 +65,8 @@ export interface Runtime {
   stderr?: (text: string) => void;
   /** Filesystem, git and working directory for `config`; tests never touch the real checkout. */
   config?: ConfigRuntime;
+  /** Filesystem, git, GitHub field API and prompt for `setup complexity`. */
+  setup?: SetupRuntime;
 }
 
 type Output = (text: string) => Promise<void>;
@@ -83,6 +87,8 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   ticket-doctor [--stale-hours N] [--limit N]  Read-only consistency scan of all open tickets
   config get KEY | set KEY VALUE | list | help [KEY]  Repository settings in
                         .github/triage.json of this checkout (config help)
+  setup complexity [--select ID | --create]  Discover native issue fields and map one
+                        for complexity; creation is explicit (setup --help)
   --repo owner/name     Repository (default: current gh checkout)
   --json                Versioned structured output (from a checkout: npm run --silent triage)
   --issue N             Include full issue body/history, even if closed; diagnoses
@@ -108,7 +114,8 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   --help                Show usage
 Exit: 0 complete; 2 incomplete evidence; 1 invalid arguments/API/cache failure.
 The briefing never changes GitHub; only deps add/remove, claim and needs-human do;
-config set changes only the local .github/triage.json. Hints require inspection.
+config set changes only the local .github/triage.json; setup complexity may
+also create an owner-wide issue field, only after --create/confirmation. Hints require inspection.
 `;
 export const depsHelp = `Usage: github-triage deps N [--tree] [--json] [--repo owner/name]
        github-triage deps add N --on M [--on K] --note WHY [--dry-run] [--json]
@@ -410,6 +417,11 @@ export async function main(
 /** The command itself; `main` adds the version check around it. */
 async function run(args: string[], output: Output, runtime: Runtime): Promise<number> {
   if (args[0] === "config") return runConfig(args.slice(1), output, runtime.config);
+  if (args[0] === "setup")
+    return runSetup(args.slice(1), output, {
+      prompt: runtime.setup ? null : terminalPrompt(),
+      ...runtime.setup,
+    });
   if (args[0] === "ticket-doctor") {
     const { values } = parseArgs({
       args: args.slice(1),
