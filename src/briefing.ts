@@ -22,6 +22,8 @@ export const workflow = {
     "blocked:testing",
     "blocked:credential",
   ],
+  // Manual pickup-order overrides (#43). Ordering only: never eligibility, claims or authority.
+  urgency: { high: "urgency:high", low: "urgency:low" },
   ownerPrefix: "agent:",
   openStates: ["OPEN"],
   completedReasons: ["COMPLETED", "MERGED"],
@@ -129,6 +131,37 @@ analysisRules.set("ownership-and-labels", ({ issues }) =>
     return findings;
   }),
 );
+/**
+ * Pickup urgency band: 0 high, 1 unspecified, 2 low. Both labels conflict and count as
+ * unspecified until corrected (doc/design/briefings.md, default impact mode).
+ */
+export function urgencyBand(issue: Labelled): 0 | 1 | 2 {
+  const high = labels(issue).includes(workflow.urgency.high);
+  const low = labels(issue).includes(workflow.urgency.low);
+  return high && low ? 1 : high ? 0 : low ? 2 : 1;
+}
+const urgencyNote = (issue: Labelled): string => {
+  const high = labels(issue).includes(workflow.urgency.high);
+  const low = labels(issue).includes(workflow.urgency.low);
+  if (high && low)
+    return " Both urgency labels are present: conflicting, so ordered as unspecified.";
+  if (high) return " Manual urgency:high override raises it in pickup order.";
+  if (low) return " Manual urgency:low override lowers it in pickup order.";
+  return "";
+};
+analysisRules.set("urgency-conflict", ({ issues }) =>
+  issues
+    .filter((issue) => urgencyBand(issue) === 1 && labels(issue).includes(workflow.urgency.high))
+    .map((issue) =>
+      action(
+        "urgency-conflict",
+        issue,
+        35,
+        "Both urgency:high and urgency:low are present; ordering treats it as unspecified.",
+        "Ask whoever set them which one applies and remove the other.",
+      ),
+    ),
+);
 analysisRules.set("ready-work", ({ issues }) =>
   issues
     .filter(
@@ -142,8 +175,9 @@ analysisRules.set("ready-work", ({ issues }) =>
       action(
         "ready-unclaimed",
         issue,
-        40,
-        "Ready and unclaimed according to current labels.",
+        // Within general pickup only: the override stays inside the pickup priority band.
+        40 + (1 - urgencyBand(issue)) * 0.5,
+        `Ready and unclaimed according to current labels.${urgencyNote(issue)}`,
         "Read full intake and merged design, then recheck ownership before claiming.",
       ),
     ),
@@ -479,8 +513,9 @@ export function briefing(snapshot: Snapshot, options: BriefingOptions, now: Date
             !labels(issue).includes(workflow.parked) &&
             pickable(issue),
         )
-        // Pickup order: most dependants unblocked first (doc/issue-dependencies.md).
-        .sort((a, b) => unblocks(b) - unblocks(a))
+        // Pickup order: manual urgency band, then most dependants unblocked
+        // (doc/design/briefings.md; doc/issue-dependencies.md).
+        .sort((a, b) => urgencyBand(a) - urgencyBand(b) || unblocks(b) - unblocks(a))
         .map(context),
     ),
     claimed: limit(issues.filter((issue) => owners(issue).length).map(context)),

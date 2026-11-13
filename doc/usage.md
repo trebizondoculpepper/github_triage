@@ -2,6 +2,10 @@
 
 The installed CLI needs Node 20+ and authenticated `gh`. Check the existing session with `gh auth status`; the tool reuses it rather than handling tokens. For source development use Node 22+, `npm ci`, and prefix the examples below with `npm run --silent triage --` in place of `github-triage`.
 
+## Manual urgency
+
+`urgency:high` and `urgency:low` override the calculated order of general pickup only: high first, then unlabelled, then low, and within each band the usual impact order. The briefing says when an override moved a ticket. Both labels together are reported as a conflict and ordered as unspecified. Urgency never changes eligibility, claims or authority, and explicit addressed attention stays ahead of it.
+
 ## Find work, then inspect evidence
 
 ```sh
