@@ -2099,6 +2099,105 @@ describe("version check (#51, doc/design/updates.md)", () => {
   });
 });
 
+describe("explicit publication helpers (#79)", () => {
+  const A = "a".repeat(40);
+  const B = "b".repeat(40);
+  type Fake = {
+    main?: string;
+    release?: string | null;
+    ancestor?: (x: string, y: string) => boolean;
+    dispatchFails?: boolean;
+  };
+  const fakeRunner = (f: Fake) => {
+    const calls: string[] = [];
+    const run = (cmd: string, args: string[]) => {
+      calls.push(`${cmd} ${args.join(" ")}`);
+      if (cmd === "git" && args[0] === "rev-parse")
+        return args[1] === "origin/main" ? (f.main ?? A) : (f.release ?? "");
+      if (cmd === "git" && args[0] === "ls-remote")
+        return f.release ? `${f.release}\trefs/heads/release` : "";
+      if (cmd === "git" && args[0] === "merge-base") {
+        if (!(f.ancestor ?? (() => true))(args[2], args[3])) throw new Error("not ancestor");
+        return "";
+      }
+      if (cmd === "gh" && f.dispatchFails) throw new Error("dispatch failed");
+      return "";
+    };
+    return { run, calls };
+  };
+  it("make-prerelease resolves main once and dispatches channel=next on main with that SHA", async () => {
+    const { makePrerelease } = await import("../scripts/dispatch.mjs");
+    const f = fakeRunner({ main: A });
+    makePrerelease({}, f.run);
+    expect(f.calls).toEqual([
+      "git fetch --no-tags origin main",
+      "git rev-parse origin/main",
+      `gh workflow run publish.yml --ref main -f channel=next -f sha=${A}`,
+    ]);
+  });
+  it("release fast-forwards release, then dispatches channel=latest on release; never forces", async () => {
+    const { release } = await import("../scripts/dispatch.mjs");
+    const f = fakeRunner({ main: A, release: B });
+    const lines = release({}, f.run);
+    expect(f.calls.filter((c) => c.startsWith("git push") || c.startsWith("gh"))).toEqual([
+      `git push origin ${A}:refs/heads/release`,
+      `gh workflow run publish.yml --ref release -f channel=latest -f sha=${A}`,
+    ]);
+    expect(f.calls.some((c) => c.includes("--force"))).toBe(false);
+    expect(lines[0]).toMatch(/publishes nothing/);
+    const already = fakeRunner({ main: A, release: A });
+    release({}, already.run);
+    expect(already.calls.some((c) => c.startsWith("git push"))).toBe(false);
+  });
+  it("refuses to rewrite release history", async () => {
+    const { release } = await import("../scripts/dispatch.mjs");
+    const f = fakeRunner({ main: A, release: B, ancestor: (x) => x !== B });
+    expect(() => release({}, f.run)).toThrow(/refusing to rewrite release history/);
+    expect(f.calls.some((c) => c.startsWith("git push") || c.startsWith("gh"))).toBe(false);
+  });
+  it("reports a failed dispatch with a retry for the same SHA, and retries never re-resolve main", async () => {
+    const { release, makePrerelease } = await import("../scripts/dispatch.mjs");
+    const f = fakeRunner({ main: A, release: B, dispatchFails: true });
+    expect(() => release({}, f.run)).toThrow(
+      new RegExp(`Promoted ${A}.*npm run release -- --sha ${A}`),
+    );
+    const retry = fakeRunner({ main: B, release: A });
+    makePrerelease({ sha: A }, retry.run);
+    expect(retry.calls).toEqual([
+      "git fetch --no-tags origin main",
+      `git merge-base --is-ancestor ${A} origin/main`,
+      `gh workflow run publish.yml --ref main -f channel=next -f sha=${A}`,
+    ]);
+    const offMain = fakeRunner({ ancestor: () => false });
+    expect(() => makePrerelease({ sha: A }, offMain.run)).toThrow(/not on origin\/main/);
+  });
+  it("validates arguments", async () => {
+    const { parseArgs } = await import("../scripts/dispatch.mjs");
+    expect(parseArgs([])).toEqual({});
+    expect(parseArgs(["--help"])).toEqual({ help: true });
+    expect(parseArgs(["--sha", A])).toEqual({ sha: A });
+    for (const bad of [["--sha", "abc"], ["--sha"], ["--sha", A, "x"], ["--force"]])
+      expect(() => parseArgs(bad)).toThrow();
+  });
+  it("the Publish workflow runs only on explicit dispatch and validates before building", async () => {
+    const workflow = await readFile(
+      new URL("../.github/workflows/publish.yml", import.meta.url),
+      "utf8",
+    );
+    expect(workflow).not.toMatch(/^\s*push:/m);
+    expect(workflow).toMatch(/^\s*workflow_dispatch:/m);
+    const validate = workflow.indexOf("Validate the request");
+    expect(validate).toBeGreaterThan(0);
+    expect(validate).toBeLessThan(workflow.indexOf("npm ci"));
+    expect(workflow).toContain('"$GITHUB_SHA" != "$SHA"');
+    expect(workflow).toContain("next:main|latest:release");
+    // A queued request re-checks the live branch head right before publishing.
+    const live = workflow.indexOf('git ls-remote origin "refs/heads/$GITHUB_REF_NAME"');
+    expect(live).toBeGreaterThan(0);
+    expect(live).toBeLessThan(workflow.indexOf("npm publish --provenance"));
+  });
+});
+
 describe("post-write ownership check with incomplete labels", () => {
   it("reports ownership as unverified instead of confirming success", async () => {
     let reads = 0;
