@@ -32,6 +32,7 @@ export const claimPolicy = {
  * @typedef {{ ok: boolean, error?: string, facts: Record<string, any>, prerequisite?: string,
  *   recovery?: string[], noop?: boolean, reason?: string, changes?: PlanStep[],
  *   notes?: string[], recheck?: { agent: string } }} ClaimPlan
+ * @typedef {ClaimPlan & { steps?: PlanStep[], conflict?: string | null, exitCode: number }} ClaimResult
  */
 
 const marker = (kind, parts) =>
@@ -41,15 +42,28 @@ const marker = (kind, parts) =>
 async function readTicket(repository, number, agent, query) {
   const [owner, name] = repository.split("/");
   const data = await query(
-    `query($owner:String!,$name:String!,$number:Int!,$label:String!){repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on PullRequest{number url} ... on Issue{number title url state updatedAt labels(first:100){nodes{name} pageInfo{hasNextPage}} issueDependenciesSummary{blockedBy} blockedBy(first:20){nodes{number url state}} closedByPullRequestsReferences(first:10,includeClosedPrs:false){nodes{number url state}} comments(last:100){nodes{body}}}} claims:issues(first:20,states:OPEN,labels:[$label]){nodes{number title url}} labels(first:100){nodes{name}}}}`,
-    { owner, name, number, label: claimPolicy.owner(agent) },
+    `query($owner:String!,$name:String!,$number:Int!,$label:String!){repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on PullRequest{number url} ... on Issue{number title url state updatedAt labels(first:100){nodes{name} pageInfo{hasNextPage}} issueDependenciesSummary{blockedBy} blockedBy(first:20){nodes{number url state}} closedByPullRequestsReferences(first:10,includeClosedPrs:false){nodes{number url state}} comments(last:100){nodes{body}}}} claims:issues(first:20,states:OPEN,labels:[$label]){nodes{number title url}} ownerLabel:label(name:$label){name} questionLabel:label(name:$question){name} decisionLabel:label(name:$decision){name} needsDesignLabel:label(name:$needsDesign){name}}}`,
+    {
+      owner,
+      name,
+      number,
+      label: claimPolicy.owner(agent),
+      question: claimPolicy.question,
+      decision: claimPolicy.decisionNeeded,
+      needsDesign: claimPolicy.needsDesign,
+    },
   );
   const repo = data.repository;
   if (!repo) throw new Error(`Repository unavailable: ${repository}`);
   return {
     item: repo.issueOrPullRequest ?? null,
     claims: repo.claims?.nodes ?? [],
-    repoLabels: new Set((repo.labels?.nodes ?? []).map((l) => l.name)),
+    // Exact-name lookups, so a repository with many labels cannot hide an existing one.
+    repoLabels: new Set(
+      [repo.ownerLabel, repo.questionLabel, repo.decisionLabel, repo.needsDesignLabel]
+        .filter(Boolean)
+        .map((l) => l.name),
+    ),
   };
 }
 
@@ -120,14 +134,33 @@ export async function planClaim(repository, request, query = ghQuery) {
         `${triage} claim ${number} --agent ${agent}${branch ? ` --branch ${branch}` : ""}`,
       ],
     );
-  if (label(item, mine))
+  const op = marker("claim", [repository, number, agent]);
+  const claimComment = () => ({
+    step: "comment",
+    command: [
+      "issue",
+      "comment",
+      String(number),
+      "--repo",
+      repository,
+      "--body",
+      `Claimed by \`${agent}\`${branch ? ` on branch \`${branch}\`` : ""} with \`github-triage claim\`.\n\n${op}`,
+    ],
+  });
+  if (label(item, mine)) {
+    // Complete only when the explanatory comment exists too: a run whose comment failed is
+    // repaired by retrying just that step.
+    const commented = item.comments.nodes.some((c) => c.body.includes(op));
     return {
       ok: true,
-      noop: true,
+      noop: commented,
       facts,
-      reason: `Already claimed by ${agent}.`,
-      changes: [],
+      reason: commented
+        ? `Already claimed by ${agent}.`
+        : `Claimed by ${agent}; posting the missing claim comment.`,
+      changes: commented ? [] : [claimComment()],
     };
+  }
   if (item.labels.pageInfo?.hasNextPage)
     return refuse(
       "EVIDENCE_INCOMPLETE",
@@ -196,7 +229,6 @@ export async function planClaim(repository, request, query = ghQuery) {
       [`${triage} --agent ${agent}`],
     );
   const remove = claimPolicy.pickable.filter((l) => label(item, l));
-  const op = marker("claim", [repository, number, agent]);
   const already = item.comments.nodes.some((c) => c.body.includes(op));
   const changes = [];
   if (!repoLabels.has(mine))
@@ -349,6 +381,7 @@ export async function planNeedsHuman(repository, request, query = ghQuery) {
  * Apply a plan step by step. The comment comes first for needs-human, so a failed comment
  * leaves nothing changed. After a claim, ownership is re-read and conflicts are reported.
  * Exit: 0 done, 2 partly done or conflict, 1 nothing done.
+ * @returns {Promise<ClaimResult>}
  */
 export async function applyPlan(repository, plan, { run = ghRun, query = ghQuery } = {}) {
   if (!plan.ok) return { ...plan, exitCode: 1 };
@@ -370,14 +403,19 @@ export async function applyPlan(repository, plan, { run = ghRun, query = ghQuery
   }
   const done = steps.filter((s) => s.status === "done").length;
   let conflict = null;
-  if (!failed && plan.recheck) {
-    const { item } = await readTicket(repository, plan.facts.number, plan.recheck.agent, query);
-    const others = item
-      ? owners(item).filter((o) => o !== claimPolicy.owner(plan.recheck.agent))
-      : [];
-    // GitHub label edits are not a lock: report a competing claim rather than resolve it.
-    if (others.length)
-      conflict = `Another claim appeared concurrently: ${others.join(", ")}. Coordinate on the ticket; do not remove it.`;
+  if (!failed && plan.recheck && done) {
+    try {
+      const { item } = await readTicket(repository, plan.facts.number, plan.recheck.agent, query);
+      const others = item
+        ? owners(item).filter((o) => o !== claimPolicy.owner(plan.recheck.agent))
+        : [];
+      // GitHub label edits are not a lock: report a competing claim rather than resolve it.
+      if (others.length)
+        conflict = `Another claim appeared concurrently: ${others.join(", ")}. Coordinate on the ticket; do not remove it.`;
+    } catch (error) {
+      // Keep the completed writes; ownership is merely unverified.
+      conflict = `Writes completed, but ownership could not be re-checked (${error.message}). Re-run the claim to verify.`;
+    }
   }
   const exitCode = failed ? (done ? 2 : 1) : conflict ? 2 : 0;
   return { ...plan, steps, conflict, exitCode };

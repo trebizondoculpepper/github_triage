@@ -1396,11 +1396,15 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
     claims?: number[];
     repoLabels?: string[];
     afterWriteOwners?: string[];
+    failRecheck?: boolean;
   };
   const fake = (t: Ticket) => {
     let reads = 0;
-    const query: Query = async () => {
+    const query: Query = async (_source, variables) => {
       reads++;
+      if (t.failRecheck && reads > 1) throw new Error("GitHub query failed.");
+      const has = (name: unknown) =>
+        (t.repoLabels ?? []).includes(String(name)) ? { name } : null;
       const labels =
         reads > 1 && t.afterWriteOwners
           ? [...(t.labels ?? []), ...t.afterWriteOwners]
@@ -1436,7 +1440,10 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
           claims: page(
             (t.claims ?? []).map((n) => ({ number: n, title: `Ticket ${n}`, url: issue(n).url })),
           ),
-          labels: page((t.repoLabels ?? []).map((name) => ({ name }))),
+          ownerLabel: has(variables.label),
+          questionLabel: has(variables.question),
+          decisionLabel: has(variables.decision),
+          needsDesignLabel: has(variables.needsDesign),
         },
       };
     };
@@ -1480,8 +1487,12 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
       comments: [marker],
     });
     expect(retry.changes!.map((c) => c.step)).toEqual(["labels"]);
-    const mine = await claim({ labels: ["agent:kavya"], claims: [7] });
+    const mine = await claim({ labels: ["agent:kavya"], claims: [7], comments: [marker] });
     expect(mine).toMatchObject({ ok: true, noop: true, changes: [] });
+    // Labelled but the comment failed earlier: retry only the missing comment.
+    const repair = await claim({ labels: ["agent:kavya"], claims: [7] });
+    expect(repair).toMatchObject({ ok: true, noop: false });
+    expect(repair.changes!.map((c) => c.step)).toEqual(["comment"]);
   });
   it("refuses with stable error IDs, facts and recovery commands", async () => {
     const cases: [Ticket, Record<string, string>, string][] = [
@@ -1527,6 +1538,20 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
     expect(env.writes.some((w) => w.includes("--remove-label") && w.includes("agent:other"))).toBe(
       false,
     );
+  });
+  it("finds existing labels by exact name, and keeps completed writes when the re-check fails", async () => {
+    // Exact-name lookup: an existing label is never scheduled for creation.
+    const existing = await claim({ labels: ["status:ready"], repoLabels: ["agent:kavya"] });
+    expect(existing.changes!.map((c) => c.step)).toEqual(["labels", "comment"]);
+    const env = fake({ labels: ["status:ready"], repoLabels: ["agent:kavya"], failRecheck: true });
+    const result = await applyPlan(
+      repo,
+      await planClaim(repo, { number: 7, agent: "kavya" }, env.query),
+      env,
+    );
+    expect(result.exitCode).toBe(2);
+    expect(result.steps!.map((s) => s.status)).toEqual(["done", "done"]);
+    expect(result.conflict).toMatch(/could not be re-checked/);
   });
   it("records questions first, then marks decision-needed and releases only the caller's claim", async () => {
     const env = fake({
