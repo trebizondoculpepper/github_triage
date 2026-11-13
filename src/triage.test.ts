@@ -25,6 +25,7 @@ import {
 import { briefing, dependencyDone, textReport } from "./briefing.js";
 import { collect, declaredDependencies, graphqlAnswer, pages, type Query } from "./github.js";
 import { clauseFor, hedged, listWideHedge, planMigration } from "./migration.js";
+import { applyPlan, planClaim, planNeedsHuman } from "./claims.js";
 import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
 
 const repo = "example/project";
@@ -1381,5 +1382,242 @@ describe("help names the installed command (#53)", () => {
       expect(text).toMatch(/^Usage: github-triage /);
       expect(text.split("\n").filter((l) => /^\s*npm run triage/.test(l))).toEqual([]);
     }
+  });
+});
+
+describe("claim and needs-human (doc/design/workflow.md)", () => {
+  type Ticket = {
+    typename?: string;
+    state?: string;
+    labels?: string[];
+    blockedBy?: number;
+    openPrs?: number[];
+    comments?: string[];
+    claims?: number[];
+    repoLabels?: string[];
+    afterWriteOwners?: string[];
+  };
+  const fake = (t: Ticket) => {
+    let reads = 0;
+    const query: Query = async () => {
+      reads++;
+      const labels =
+        reads > 1 && t.afterWriteOwners
+          ? [...(t.labels ?? []), ...t.afterWriteOwners]
+          : (t.labels ?? []);
+      return {
+        repository: {
+          issueOrPullRequest:
+            t.typename === "missing"
+              ? null
+              : t.typename === "PullRequest"
+                ? { __typename: "PullRequest", number: 7, url: `https://github.com/${repo}/pull/7` }
+                : {
+                    __typename: "Issue",
+                    number: 7,
+                    title: "Ticket 7",
+                    url: `https://github.com/${repo}/issues/7`,
+                    state: t.state ?? "OPEN",
+                    updatedAt: time,
+                    labels: page(labels.map((name) => ({ name }))),
+                    issueDependenciesSummary: { blockedBy: t.blockedBy ?? 0 },
+                    blockedBy: page(
+                      t.blockedBy ? [{ number: 3, url: issue(3).url, state: "OPEN" }] : [],
+                    ),
+                    closedByPullRequestsReferences: page(
+                      (t.openPrs ?? []).map((n) => ({
+                        number: n,
+                        url: `https://github.com/${repo}/pull/${n}`,
+                        state: "OPEN",
+                      })),
+                    ),
+                    comments: page((t.comments ?? []).map((body) => ({ body }))),
+                  },
+          claims: page(
+            (t.claims ?? []).map((n) => ({ number: n, title: `Ticket ${n}`, url: issue(n).url })),
+          ),
+          labels: page((t.repoLabels ?? []).map((name) => ({ name }))),
+        },
+      };
+    };
+    const writes: string[][] = [];
+    const run = async (args: string[]) => void writes.push(args);
+    return { query, run, writes };
+  };
+  const claim = (t: Ticket, extra = {}) =>
+    planClaim(repo, { number: 7, agent: "kavya", ...extra }, fake(t).query);
+
+  it("claims an eligible ticket: creates the agent label if needed, swaps readiness, comments once", async () => {
+    const env = fake({ labels: ["status:ready"] });
+    const plan = await planClaim(repo, { number: 7, agent: "kavya", branch: "issue-7" }, env.query);
+    const result = await applyPlan(repo, plan, env);
+    expect(result.exitCode).toBe(0);
+    expect(env.writes.map((w) => w.slice(0, 2).join(" "))).toEqual([
+      "label create",
+      "issue edit",
+      "issue comment",
+    ]);
+    expect(env.writes[1]).toEqual([
+      "issue",
+      "edit",
+      "7",
+      "--repo",
+      repo,
+      "--add-label",
+      "agent:kavya",
+      "--remove-label",
+      "status:ready",
+    ]);
+    expect(env.writes[2].at(-1)).toMatch(/branch `issue-7`[\s\S]*<!-- github-triage:claim:/);
+  });
+  it("does not repeat the claim comment on retry, and is a no-op when already claimed", async () => {
+    const first = await claim({ labels: ["status:ready"], repoLabels: ["agent:kavya"] });
+    const comment = first.changes!.find((c) => c.step === "comment")!.command.at(-1)!;
+    const marker = comment.match(/<!-- github-triage:claim:[0-9a-f]+ -->/)![0];
+    const retry = await claim({
+      labels: ["status:ready"],
+      repoLabels: ["agent:kavya"],
+      comments: [marker],
+    });
+    expect(retry.changes!.map((c) => c.step)).toEqual(["labels"]);
+    const mine = await claim({ labels: ["agent:kavya"], claims: [7] });
+    expect(mine).toMatchObject({ ok: true, noop: true, changes: [] });
+  });
+  it("refuses with stable error IDs, facts and recovery commands", async () => {
+    const cases: [Ticket, Record<string, string>, string][] = [
+      [{ typename: "missing" }, {}, "TICKET_NOT_FOUND"],
+      [{ typename: "PullRequest" }, {}, "NOT_AN_ISSUE"],
+      [{ state: "CLOSED", labels: ["status:ready"] }, {}, "TICKET_CLOSED"],
+      [{ labels: ["status:ready", "agent:other"] }, {}, "OWNED_BY_OTHER"],
+      [{ labels: ["status:ready"], claims: [9] }, {}, "OTHER_ACTIVE_CLAIM"],
+      [{ labels: ["status:needs-design"] }, {}, "NOT_READY"],
+      [{ labels: ["status:ready", "question"] }, {}, "NOT_READY"],
+      [{ labels: [] }, {}, "NOT_READY"],
+      [{ labels: ["status:ready"], blockedBy: 1 }, {}, "BLOCKED"],
+      [{ labels: ["status:ready"], openPrs: [12] }, {}, "HAS_OPEN_PR"],
+      [{ labels: ["status:ready", "platform:ori"] }, {}, "PLATFORM_UNKNOWN"],
+      [{ labels: ["status:ready", "platform:ori"] }, { platform: "codex" }, "PLATFORM_MISMATCH"],
+    ];
+    for (const [t, extra, id] of cases) {
+      const plan = await claim(t, extra);
+      expect(plan).toMatchObject({ ok: false, error: id });
+      expect(plan.prerequisite).toBeTruthy();
+    }
+    const owned = await claim({ labels: ["status:ready", "agent:other"] });
+    expect(owned.recovery!.join(" ")).not.toMatch(/agent:other/);
+    const other = await claim({ labels: ["status:ready"], claims: [9] });
+    expect(other.recovery![0]).toMatch(/^manual \(release is #62/);
+    expect(
+      (await claim({ labels: ["status:incomplete", "platform:ori"] }, { platform: "ori" })).ok,
+    ).toBe(true);
+  });
+  it("reports a competing claim found after writing instead of resolving it", async () => {
+    const env = fake({
+      labels: ["status:ready"],
+      repoLabels: ["agent:kavya"],
+      afterWriteOwners: ["agent:kavya", "agent:other"],
+    });
+    const result = await applyPlan(
+      repo,
+      await planClaim(repo, { number: 7, agent: "kavya" }, env.query),
+      env,
+    );
+    expect(result.exitCode).toBe(2);
+    expect(result.conflict).toMatch(/agent:other/);
+    expect(env.writes.some((w) => w.includes("--remove-label") && w.includes("agent:other"))).toBe(
+      false,
+    );
+  });
+  it("records questions first, then marks decision-needed and releases only the caller's claim", async () => {
+    const env = fake({
+      labels: ["status:ready", "agent:kavya", "agent:other"],
+      repoLabels: ["question", "status:needs-design"],
+    });
+    const plan = await planNeedsHuman(
+      repo,
+      {
+        number: 7,
+        agent: "kavya",
+        designer: "nicole",
+        why: "Contract is ambiguous.",
+        questions: ["Which file?", "Which default?"],
+      },
+      env.query,
+    );
+    const result = await applyPlan(repo, plan, env);
+    expect(result.exitCode).toBe(0);
+    expect(env.writes.map((w) => w.slice(0, 2).join(" "))).toEqual([
+      "issue comment",
+      "label create",
+      "issue edit",
+    ]);
+    expect(env.writes[0].at(-1)).toMatch(
+      /^### Questions for the designer\n\nDesigner: `nicole` · Raised by: `kavya`\n\n\*\*Why:\*\* Contract is ambiguous\.\n\n1\. Which file\?\n2\. Which default\?/,
+    );
+    expect(env.writes[1].slice(2, 3)).toEqual(["design:decision-needed"]);
+    const edit = env.writes[2];
+    for (const l of ["question", "design:decision-needed", "status:needs-design"])
+      expect(edit).toContain(l);
+    expect(edit.join(" ")).toContain("--remove-label status:ready");
+    expect(edit.join(" ")).toContain("--remove-label agent:kavya");
+    expect(edit.join(" ")).not.toContain("agent:other");
+  });
+  it("changes nothing when the questions comment fails, and keeps a deliberate blocked state", async () => {
+    const env = fake({
+      labels: ["status:ready"],
+      repoLabels: ["question", "design:decision-needed", "status:needs-design"],
+    });
+    const plan = await planNeedsHuman(
+      repo,
+      { number: 7, agent: "kavya", designer: "nicole", why: "x", questions: ["q"] },
+      env.query,
+    );
+    const failing = async (args: string[]) => {
+      if (args[1] === "comment") throw new Error("gh issue comment failed.");
+      env.writes.push(args);
+    };
+    const result = await applyPlan(repo, plan, { run: failing, query: env.query });
+    expect(result.exitCode).toBe(1);
+    expect(env.writes).toEqual([]);
+    const blocked = await planNeedsHuman(
+      repo,
+      { number: 7, agent: "kavya", designer: "nicole", why: "x", questions: ["q"] },
+      fake({
+        labels: ["status:blocked", "blocked:credential"],
+        repoLabels: ["question", "design:decision-needed"],
+      }).query,
+    );
+    const edit = blocked.changes!.find((c) => c.step === "labels")!.command;
+    expect(edit).not.toContain("status:needs-design");
+    expect(edit.join(" ")).not.toContain("blocked:credential");
+    expect(blocked.notes![0]).toMatch(/status:blocked kept/);
+  });
+  it("validates arguments, and a dry run writes nothing", async () => {
+    for (const bad of [
+      ["claim", "7"],
+      ["claim", "x", "--agent", "a"],
+      ["claim", "7", "--agent", "a", "--why", "w"],
+      ["needs-human", "7", "--agent", "a", "--designer", "d", "--why", "w"],
+      ["needs-human", "7", "--agent", "a", "--why", "w", "--question", "q"],
+    ])
+      await expect(main(bad, async () => {})).rejects.toThrow("Usage");
+    const env = fake({ labels: ["status:ready"] });
+    let text = "";
+    const code = await main(
+      ["claim", "7", "--agent", "kavya", "--dry-run", "--repo", repo],
+      async (t) => void (text = t),
+      {
+        collect: async () => {
+          throw new Error("no briefing");
+        },
+        currentRepository: async () => repo,
+        query: env.query,
+        ghRun: env.run,
+      },
+    );
+    expect(code).toBe(0);
+    expect(env.writes).toEqual([]);
+    expect(text).toContain("DRY RUN");
+    expect(text).toContain("--add-label agent:kavya");
   });
 });
