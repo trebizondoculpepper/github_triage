@@ -1,0 +1,3 @@
+# Standalone cross-platform guidance
+
+Made AGENTS.md explicitly shared across agent harnesses and Windows/macOS/Linux. Removed personal coordination-service instructions and references from tracked project guidance, reports, README and source comments. Superseded the exploratory shared-identity design with explicit selection and a separately reviewed triage-owned local identity boundary. Withdrawn integration research is replaced by an identity-isolation note; historical process copies are accurately described as sanitized context rather than verbatim snapshots. Existing local identity-file exclusion remains covered by a generic filename pattern. No runtime behavior, credentials or personal configuration changed.

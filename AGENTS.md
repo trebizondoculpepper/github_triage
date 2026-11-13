@@ -1,6 +1,6 @@
-# CLAUDE.md
+# Agent guide
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository. `CLAUDE.md` is a symlink to `AGENTS.md`, so other agents read the same guide.
+This is the shared, cross-platform contributor guide for every coding agent working in this repository, including Codex, Claude Code, OpenCode, Ori and other CLI, IDE or MCP clients. It applies on Windows, macOS and Linux; no particular agent harness or personal infrastructure is required. `AGENTS.md` is authoritative; `CLAUDE.md` is a compatibility entry point linked to this same file.
 
 Read [HANDOFF.md](HANDOFF.md) first. This is the standalone GitHub Triage project, extracted from poker_blocks at the owner's request. Its source is under `src/`; do not continue development in the game repository.
 
@@ -60,13 +60,9 @@ Be proactive: when one job finishes, find the next one rather than stopping to a
 
 Skip only work that someone else is visibly doing now: an `agent:` label, an open PR by someone else, or a recent claim comment for active work. A queued intention ("I'll do this after X") is not an active claim. Comment on the ticket when you claim it.
 
-## Inter-agent mail
-
-At the start of every session, read https://api.hub.stodge.org/prompts/agent and do what it says.
-
 ## Mirrored process proposal
 
-The owner requested a mirror of poker_blocks' design/implementation process. Review [doc/process.md](doc/process.md) and [doc/design-implementation.md](doc/design-implementation.md); [doc/poker-blocks-process.md](doc/poker-blocks-process.md) preserves the exact source snapshot. [Issue #12](https://github.com/trebizondoculpepper/github_triage/issues/12) asks this project to consider adoption and adaptations. These are review proposals; they do not silently override this guide or assert that branch protection/reviewer integrations exist.
+The owner requested a mirror of poker_blocks' design/implementation process. Review [doc/process.md](doc/process.md) and [doc/design-implementation.md](doc/design-implementation.md); [doc/poker-blocks-process.md](doc/poker-blocks-process.md) preserves historical process context with personal integration details removed. [Issue #12](https://github.com/trebizondoculpepper/github_triage/issues/12) asks this project to consider adoption and adaptations. These are review proposals; they do not silently override this guide or assert that branch protection/reviewer integrations exist.
 
 The [process adaptation audit](doc/reports/process-adaptation-audit.md) (#12) recommends retaining this guide and the focused merged contracts as active policy. The mirrored process remains context, not a second competing instruction source. Close tickets only when their stated acceptance is complete; completing a documentation phase alone does not finish its implementation or empirical follow-up.
 

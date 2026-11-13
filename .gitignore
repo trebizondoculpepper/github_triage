@@ -3,7 +3,7 @@ dist/
 .idea/
 .env*
 !.env.example
-agent-inbox.toml
+agent-*.toml
 .codex/
 coverage/
 *.tsbuildinfo

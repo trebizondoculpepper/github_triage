@@ -24,4 +24,4 @@ All checks, tests, build and package test pass. Cancellation is detected around 
 
 ## Next Steps
 
-Remaining for #25: client roots and verified `agent-inbox.toml` identity lookup (`--harness`/`--entry`, maintained TOML parser), abort propagation to child processes, older-client negotiation tests, a recorded real-host smoke and the token/latency comparison.
+Remaining for #25: client roots and verified triage-owned project-local identity lookup (`--harness`/`--entry`, storage/parser subject to its own contract), abort propagation to child processes, older-client negotiation tests, a recorded real-host smoke and the token/latency comparison.
