@@ -18,9 +18,9 @@ Team view lists explicit named-agent claims, linked PR state, latest ticket/PR a
 
 ## #64: local configuration doctor
 
-Diagnose intended project, selected harness/server entry, supported local configuration parse/identity/name, triage_role, supported role, Git ignored versus already tracked configuration, and missing runtime/gh access as separate checks. No repairs, login, identity creation, role writes, hooks or Git tracking changes. Return actionable in-band results, especially for hosts discarding stderr. Missing/ambiguous detection is explicit. Reuse the standalone identity resolution contract. Diagnose unavailable or unimplemented local resolution explicitly; no external service is required.
+Diagnose intended project, selected harness/server entry, supported local configuration parse/identity/name, triage_role, supported role, Git ignored versus already tracked configuration, and missing runtime/gh access as separate checks. No repairs, login, identity creation, role writes, hooks or Git tracking changes. Return actionable in-band results, especially for hosts discarding stderr. Missing/ambiguous detection is explicit. Reuse the confirmed root-level local TOML identity resolver and config boundary in identity.md. Diagnose missing, malformed, ambiguous or unimplemented resolution explicitly; no external service/check-in is required.
 
-Implementation defaults (routine, under this contract): the command is `doctor`; check IDs, statuses (`ok`/`missing`/`invalid`/`access`/`unsupported`/`unknown`) and exit codes are documented in `doc/usage.md`. Until a TOML parser is approved (#25), the `agent-inbox.toml` entry, name and `triage_role` checks report `unsupported` rather than hand-parsing.
+Implementation defaults (routine, under this contract): the command is `doctor`; check IDs, statuses (`ok`/`missing`/`invalid`/`access`/`unsupported`/`unknown`) and exit codes are documented in `doc/usage.md`. The current baseline reports identity entry/name/role parsing as unsupported. The owner has confirmed the local TOML file and delegated parser selection; completing these checks no longer waits on an owner parser decision. Preserve existing check/exit semantics or explicitly version documented changes.
 
 ## #66: Ticket Doctor v1
 
