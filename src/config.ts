@@ -12,7 +12,16 @@
  */
 
 import { execFile } from "node:child_process";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  chmod,
+  mkdir,
+  readFile,
+  rename,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -93,7 +102,10 @@ export type ConfigErrorCode =
   | "conflict"
   | "repository-mismatch"
   | "not-a-repository"
-  | "filesystem";
+  | "filesystem"
+  | "tracked"
+  | "not-ignored"
+  | "identity-unresolved";
 
 /** A refusal with exact recovery guidance. The file is left untouched. */
 export class ConfigError extends Error {
@@ -110,8 +122,17 @@ export class ConfigError extends Error {
 /** Filesystem boundary, injectable for tests. `readText` returns null for a missing file. */
 export interface ConfigFileSystem {
   readText(path: string): Promise<string | null>;
-  writeText(path: string, text: string): Promise<void>;
+  /** Create `path` exclusively; `mode` (POSIX permission bits) is used only for private files. */
+  writeText(path: string, text: string, mode?: number): Promise<void>;
   rename(from: string, to: string): Promise<void>;
+  /** Append to `path` (created when missing) without replacing concurrent additions. */
+  appendText?(path: string, text: string): Promise<void>;
+  /** POSIX permission bits of an existing file, or null when missing/unsupported. */
+  fileMode?(path: string): Promise<number | null>;
+  /** Set POSIX permission bits; a no-op where unsupported (Windows). */
+  setFileMode?(path: string, mode: number): Promise<void>;
+  /** Modification time in epoch ms, or null when missing; used to judge stale locks. */
+  modifiedAt?(path: string): Promise<number | null>;
   remove(path: string): Promise<void>;
   makeDirectory(path: string): Promise<void>;
 }
@@ -125,8 +146,30 @@ export const nodeFileSystem: ConfigFileSystem = {
       throw error;
     }
   },
-  writeText: (path, text) => writeFile(path, text, { flag: "wx" }),
+  writeText: (path, text, mode) =>
+    writeFile(path, text, mode === undefined ? { flag: "wx" } : { flag: "wx", mode }),
   rename: (from, to) => rename(from, to),
+  appendText: (path, text) => appendFile(path, text, { flag: "a" }),
+  async fileMode(path) {
+    if (process.platform === "win32") return null;
+    try {
+      return (await stat(path)).mode & 0o777;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  },
+  async setFileMode(path, mode) {
+    if (process.platform !== "win32") await chmod(path, mode);
+  },
+  async modifiedAt(path) {
+    try {
+      return (await stat(path)).mtimeMs;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  },
   remove: (path) => unlink(path),
   async makeDirectory(path) {
     await mkdir(path, { recursive: true });
