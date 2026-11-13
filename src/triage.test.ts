@@ -3268,6 +3268,14 @@ describe("next-action ranking (#45, doc/design/briefings.md acceptance examples)
       [30, []],
     ]);
   });
+  it("does not count a dependant whose own native dependency evidence is missing", () => {
+    const blocker = issue(36);
+    const unknown = blockedBy(issue(37), 1);
+    delete (unknown as Partial<Issue>).blockedBy;
+    blocks(blocker, [unknown]);
+    const r = brief(snapshot([blocker, unknown], []));
+    expect(r.ready.items.map((i) => [i.number, i.unlocks])).toEqual([[36, []]]);
+  });
   it("oldest mode orders by creation time alone, keeping urgency and impact visible", () => {
     const oldLow = at(issue(40, ["status:ready", "urgency:low"]), "2026-01-01T00:00:00Z");
     const newHigh = at(issue(41, ["status:ready", "urgency:high"]), "2026-06-01T00:00:00Z");

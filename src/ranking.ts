@@ -128,7 +128,8 @@ export function pickupEligibility(issue: Issue, context: PickupContext): Eligibi
 /**
  * Distinct open dependants that become otherwise eligible when this ticket, their last open
  * native blocker, completes. Distant descendants, dependants still needing design, dependants
- * absent from the snapshot and unknown eligibility do not count.
+ * absent from the snapshot, dependants without complete native dependency evidence and unknown
+ * eligibility do not count.
  */
 export function immediateUnlocks(
   issue: Issue,
@@ -142,7 +143,12 @@ export function immediateUnlocks(
     seen.add(node.url);
     if (node.state !== "OPEN" || node.issueDependenciesSummary?.blockedBy !== 1) return [];
     const dependant = byUrl.get(node.url);
-    return dependant && otherwiseEligible(dependant, context).status === "eligible"
+    // The dependant's own native evidence must be complete and agree that this ticket is its
+    // only open blocker; otherwise its eligibility is unknown and it is not a definite unlock.
+    return dependant &&
+      nativeKnown(dependant) &&
+      dependant.issueDependenciesSummary.blockedBy === 1 &&
+      otherwiseEligible(dependant, context).status === "eligible"
       ? [dependant]
       : [];
   });
