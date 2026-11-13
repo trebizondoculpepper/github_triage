@@ -103,6 +103,7 @@ import {
 import { detectClientEntry, detectHarness, HARNESS_DETECTORS, resolveEntry } from "./harness.js";
 import { localDoctor, localDoctorExitCode, localDoctorText, nodeProbe } from "./localdoctor.js";
 import { configArgumentsFor } from "./configcli.js";
+import { changeSubject, parseDuration, resolveWindow, snapshotChangeEvidence } from "./changes.js";
 import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
 
 const repo = "example/project";
@@ -9266,5 +9267,272 @@ describe("label-backed complexity classification and prepared reader (#151)", ()
     expect(complexityLabelFindings(labelled(1, [], true))).toMatchObject([
       { kind: "complexity-labels-incomplete", certainty: "unknown" },
     ]);
+  });
+});
+
+describe("briefing change evidence and comparison windows (#168)", () => {
+  it("marks dependency links incomplete when nodes fall short of the native summary totals", () => {
+    const window = { from: "2026-11-12T00:00:00.000Z", through: "2026-11-13T00:00:00.000Z" };
+    const page = { hasNextPage: false, endCursor: null };
+    const base = {
+      number: 7,
+      title: "t",
+      url: "https://github.com/o/r/issues/7",
+      state: "OPEN",
+      createdAt: "2026-11-12T01:00:00Z",
+      updatedAt: "2026-11-12T02:00:00Z",
+      closedByPullRequestsReferences: { nodes: [], pageInfo: page },
+    };
+    const short = changeSubject(
+      "issue",
+      {
+        ...base,
+        issueDependenciesSummary: {
+          blockedBy: 1,
+          totalBlockedBy: 1,
+          blocking: 0,
+          totalBlocking: 0,
+        },
+        blockedBy: { nodes: [], pageInfo: page },
+        blocking: { nodes: [], pageInfo: page },
+      } as never,
+      window,
+    );
+    expect(short).toMatchObject({ linksComplete: false });
+    expect(short.unknown).toContain("links");
+    const missingSummary = changeSubject(
+      "issue",
+      {
+        ...base,
+        blockedBy: { nodes: [], pageInfo: page },
+        blocking: { nodes: [], pageInfo: page },
+      } as never,
+      window,
+    );
+    expect(missingSummary.linksComplete).toBe(false);
+    const exact = changeSubject(
+      "issue",
+      {
+        ...base,
+        issueDependenciesSummary: {
+          blockedBy: 0,
+          totalBlockedBy: 0,
+          blocking: 0,
+          totalBlocking: 0,
+        },
+        blockedBy: { nodes: [], pageInfo: page },
+        blocking: { nodes: [], pageInfo: page },
+      } as never,
+      window,
+    );
+    expect(exact.linksComplete).toBe(true);
+  });
+  const t0 = "2026-11-13T09:00:00.000Z";
+  const clock = () => new Date(t0);
+  it("resolves exactly one window source with half-open UTC boundaries", () => {
+    expect(resolveWindow({}, clock)).toMatchObject({
+      source: "default-last",
+      from: "2026-11-12T09:00:00.000Z",
+      through: t0,
+      last: "24h",
+    });
+    expect(resolveWindow({ last: "90m" }, clock).from).toBe("2026-11-13T07:30:00.000Z");
+    expect(resolveWindow({ last: "2d" }, clock).from).toBe("2026-11-11T09:00:00.000Z");
+    expect(resolveWindow({ since: "2026-11-13T10:00:00+02:00" }, clock)).toMatchObject({
+      source: "since",
+      from: "2026-11-13T08:00:00.000Z",
+    });
+    expect(resolveWindow({ checkpoint: { through: "2026-11-13T08:00:00Z" } }, clock)).toMatchObject(
+      { source: "checkpoint", from: "2026-11-13T08:00:00.000Z" },
+    );
+    expect(resolveWindow({ checkpoint: { through: null } }, clock)).toMatchObject({
+      source: "baseline",
+      from: null,
+      notice: expect.stringContaining("No previous comparison window"),
+    });
+    expect(() => resolveWindow({ since: t0, last: "1h" }, clock)).toThrow("one window source");
+    expect(() => resolveWindow({ last: "1h", checkpoint: { through: null } }, clock)).toThrow(
+      "one window source",
+    );
+    for (const bad of ["0h", "1w", "-1h", "1.5h", "h", "99999999999d"])
+      expect(() => parseDuration(bad)).toThrow("--last");
+    expect(() => resolveWindow({ last: "9999999999d" }, clock)).toThrow();
+    expect(() => resolveWindow({ since: "2026-11-13" }, clock)).toThrow("ISO");
+    expect(() => resolveWindow({ since: "2026-11-13T09:00:01Z" }, clock)).toThrow("after");
+    expect(() => resolveWindow({ checkpoint: { through: "2027-01-01T00:00:00Z" } }, clock)).toThrow(
+      "after",
+    );
+    expect(() => resolveWindow({ checkpoint: { through: "garbage" } }, clock)).toThrow("invalid");
+  });
+
+  const evidenceQuery =
+    (issues: unknown, prs: unknown, calls: string[] = []): Query =>
+    async (source) => {
+      calls.push(source);
+      if (source.includes("states:OPEN)"))
+        return { repository: { issues: page([]), pullRequests: page([]) } };
+      if (source.includes("pullRequests(")) return { repository: { pullRequests: prs } };
+      return { repository: { issues } };
+    };
+
+  it("retains in-window merges despite later updates and keeps old closures distinct", async () => {
+    const window = resolveWindow({ last: "24h" }, clock);
+    const merged = {
+      ...pr(),
+      number: 5,
+      url: `https://github.com/${repo}/pull/5`,
+      state: "MERGED",
+      createdAt: "2026-11-10T00:00:00Z",
+      mergedAt: "2026-11-13T08:00:00Z",
+      closedAt: "2026-11-13T08:00:00Z",
+      // Commented on during collection, after T0.
+      updatedAt: "2026-11-13T09:05:00Z",
+    };
+    const unmerged = {
+      ...pr(),
+      number: 6,
+      url: `https://github.com/${repo}/pull/6`,
+      state: "CLOSED",
+      mergedAt: null,
+      createdAt: "2026-11-12T12:00:00Z",
+      closedAt: "2026-11-13T07:00:00Z",
+      updatedAt: "2026-11-13T07:00:00Z",
+    };
+    const oldClosure = {
+      ...issue(7),
+      state: "CLOSED",
+      stateReason: "COMPLETED",
+      createdAt: "2026-10-01T00:00:00Z",
+      closedAt: "2026-10-02T00:00:00Z",
+      updatedAt: "2026-11-13T06:00:00Z",
+      closedByPullRequestsReferences: page([
+        {
+          number: 3,
+          url: `https://github.com/${repo}/pull/3`,
+          repository: { nameWithOwner: repo },
+        },
+      ]),
+    };
+    const notPlanned = {
+      ...issue(8),
+      state: "CLOSED",
+      stateReason: "NOT_PLANNED",
+      closedAt: "2026-11-13T08:59:59.999Z",
+      updatedAt: "2026-11-13T08:59:59.999Z",
+      closedByPullRequestsReferences: page([]),
+    };
+    const atT0 = {
+      ...issue(9),
+      createdAt: t0,
+      updatedAt: t0,
+      closedByPullRequestsReferences: page([]),
+    };
+    const older = { ...issue(10), updatedAt: "2026-11-01T00:00:00Z" };
+    const calls: string[] = [];
+    const data = await collect(
+      repo,
+      { changeWindow: window },
+      evidenceQuery(
+        page([atT0, notPlanned, oldClosure, older], true, "more"),
+        page([merged, unmerged]),
+        calls,
+      ),
+      clock,
+    );
+    // Existing summary preserved for its callers.
+    expect(data.since).toBe(window.from);
+    expect(data.changed.map((c) => c.number)).toEqual([9, 8, 7, 5, 6]);
+    const evidence = data.changeEvidence!;
+    expect(evidence.complete).toBe(true);
+    expect(evidence.coverage.map((c) => [c.source, c.complete, c.pages])).toEqual([
+      ["issues", true, 1],
+      ["pull-requests", true, 1],
+    ]);
+    // Stops at the cutoff: one page per source, no further history requests.
+    expect(evidence.cost).toEqual({ requests: 2, maxPagesPerSource: 20 });
+    const subject = (n: number) => evidence.subjects.find((s) => s.number === n)!;
+    expect(subject(5)).toMatchObject({
+      kind: "pull-request",
+      mergedAt: "2026-11-13T08:00:00Z",
+      updatedOnly: false,
+      links: [{ relation: "closes", number: 1 }],
+    });
+    expect(subject(5).events).toContainEqual({
+      type: "merged",
+      at: "2026-11-13T08:00:00Z",
+      inWindow: true,
+    });
+    expect(subject(6).events).toContainEqual({
+      type: "closed-unmerged",
+      at: "2026-11-13T07:00:00Z",
+      inWindow: true,
+    });
+    expect(subject(7)).toMatchObject({ updatedOnly: true, stateReason: "COMPLETED" });
+    expect(subject(7).events.find((e) => e.type === "closed")?.inWindow).toBe(false);
+    expect(subject(7).links).toEqual([
+      {
+        relation: "closed-by",
+        number: 3,
+        url: `https://github.com/${repo}/pull/3`,
+        repository: repo,
+      },
+    ]);
+    expect(subject(8)).toMatchObject({ stateReason: "NOT_PLANNED", unknown: [] });
+    expect(subject(8).events.find((e) => e.type === "closed")?.inWindow).toBe(true);
+    // An event at T0 belongs to the next window.
+    expect(subject(9).events).toEqual([{ type: "created", at: t0, inWindow: false }]);
+    expect(subject(9).updatedOnly).toBe(false);
+    expect(calls.some((s) => s.includes("closedByPullRequestsReferences"))).toBe(true);
+  });
+
+  it("reports a page cap before the window start as incomplete, never as no change", async () => {
+    const window = resolveWindow({ last: "24h" }, clock);
+    const recent = { ...issue(11), updatedAt: "2026-11-13T08:00:00Z" };
+    const data = await collect(
+      repo,
+      { changeWindow: window, maxChangePages: 1 },
+      evidenceQuery(page([recent], true, "next"), page([], false)),
+      clock,
+    );
+    const evidence = data.changeEvidence!;
+    expect(evidence.complete).toBe(false);
+    expect(evidence.coverage[0]).toMatchObject({ source: "issues", complete: false, pages: 1 });
+    expect(evidence.coverage[0]!.omission).toContain("page cap");
+    expect(evidence.coverage[1]!.complete).toBe(true);
+    expect(data.warnings.some((w) => w.includes("Change evidence incomplete"))).toBe(true);
+    // Missing closure facts and truncated links are explicit unknowns.
+    expect(evidence.subjects[0]!.unknown).toContain("links");
+  });
+
+  it("makes no history queries for a baseline or ordinary collection", async () => {
+    const calls: string[] = [];
+    const baseline = await collect(
+      repo,
+      { changeWindow: resolveWindow({ checkpoint: { through: null } }, clock) },
+      evidenceQuery(page([]), page([]), calls),
+      clock,
+    );
+    expect(baseline.changeEvidence).toMatchObject({ complete: true, subjects: [], coverage: [] });
+    expect(baseline.since).toBeNull();
+    const plain = await collect(repo, {}, evidenceQuery(page([]), page([]), calls), clock);
+    expect(plain.changeEvidence).toBeUndefined();
+    expect(calls.every((s) => s.includes("states:OPEN)"))).toBe(true);
+    await expect(
+      collect(
+        repo,
+        { since: t0, changeWindow: resolveWindow({}, clock) },
+        evidenceQuery(page([]), page([])),
+        clock,
+      ),
+    ).rejects.toThrow("either since");
+  });
+
+  it("treats legacy snapshots as unavailable history", () => {
+    expect(snapshotChangeEvidence(snapshot())).toMatchObject({ available: false });
+    const legacy = { ...snapshot(), changeEvidence: { schemaVersion: 2 } } as unknown as Snapshot;
+    expect(snapshotChangeEvidence(legacy)).toMatchObject({
+      available: false,
+      reason: expect.stringContaining("unsupported"),
+    });
   });
 });
