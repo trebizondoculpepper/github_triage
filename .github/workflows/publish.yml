@@ -73,7 +73,7 @@ jobs:
       - name: Choose version
         id: version
         run: |
-          node scripts/release-version.mjs "$CHANNEL" "$SHA" > version.json
+          npx tsx scripts/release-version.ts "$CHANNEL" "$SHA" > version.json
           cat version.json
           echo "version=$(node -p 'require("./version.json").version ?? ""')" >> "$GITHUB_OUTPUT"
           echo "published=$(node -p 'require("./version.json").alreadyPublished ?? ""')" >> "$GITHUB_OUTPUT"
@@ -102,7 +102,7 @@ jobs:
             fi
             cat publish.err >&2
             if [ "$TAG" = "next" ] && grep -q "E409" publish.err; then
-              VERSION=$(node scripts/release-version.mjs following "$VERSION")
+              VERSION=$(npx tsx scripts/release-version.ts following "$VERSION")
               echo "::notice::Version taken (registry lag); retrying as $VERSION."
               continue
             fi

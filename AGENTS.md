@@ -8,12 +8,12 @@ Read [HANDOFF.md](HANDOFF.md) first. This is the standalone GitHub Triage projec
 
 Owner decision: application code in `src/` and maintained executable research examples must use TypeScript. Helpers in `scripts/` may use TypeScript, JavaScript, shell, batch, PowerShell or Python with a short justification, runtime requirements and supported platforms documented. Existing TypeScript helpers need no rewrite. Intentionally selected ancillary languages such as Datalog are allowed where the relevant design documents their purpose and validation boundary. Handwritten JavaScript is avoided in application code; the documented helper-script exception is intentional. Generated JavaScript bundles and third-party code remain normal runtime artifacts.
 
-Follow [the TypeScript architecture and migration contract](doc/design/typescript.md) (#91). Existing JavaScript commands below describe the current implementation until migration lands; they do not authorize expanding JavaScript source. Keep the migration behavior-preserving on the selected supported runtime. The owner relaxed older-Node compatibility: follow the [current-LTS runtime policy](doc/design/runtime.md) (#108); do not spend migration work preserving Node 20. Current engine/CI statements below remain implementation facts until that follow-up ships.
+Follow [the TypeScript architecture and migration contract](doc/design/typescript.md) (#91). Source is strict TypeScript, development uses the `tsx` devDependency, and installed consumers run `dist/cli.mjs`. A test enforces the language boundary in `src/` and maintained executable research examples; helper scripts follow the flexible policy above. Follow the [current-LTS runtime policy](doc/design/runtime.md) (#108): older-Node compatibility is not a migration requirement. Existing package engines and CI remain implementation facts until that follow-up ships.
 
 ## Architecture and scope
 
-- Run the JavaScript CLI directly with Node; use Vite+ for checks/tests/builds.
-- `github.js` collects GitHub facts through existing authenticated `gh`, without a shell or new credentials. `dependencies.js` owns native dependency queries and `deps add`/`remove`; `migration.js` owns the read-only `deps migrate --plan` report (automatic apply is deferred, #48); `claims.js` owns `claim` and `needs-human`. `team.js` owns the read-only `team` view; `ticketdoctor.js` owns the read-only `ticket-doctor` scan; `updates.js` owns the npm version check (#51); `briefing.js` owns registered workflow rules/policy, `compact.js` presentation and `cli.js` argument/filesystem orchestration.
+- Run the TypeScript CLI from source with `npm run triage` (tsx); use Vite+ for checks/tests/builds.
+- `github.ts` collects GitHub facts through existing authenticated `gh`, without a shell or new credentials. `dependencies.ts` owns native dependency queries and `deps add`/`remove`; `migration.ts` owns the read-only `deps migrate --plan` report (automatic apply is deferred, #48); `claims.ts` owns `claim` and `needs-human`. `team.ts` owns the read-only `team` view; `ticketdoctor.ts` owns the read-only `ticket-doctor` scan; `updates.ts` owns the npm version check (#51); `briefing.ts` owns registered workflow rules/policy, `compact.ts` presentation and `cli.ts` argument/filesystem orchestration.
 - Keep repository identities opaque. Extend registered workflow/rule/role handlers and declarative policy, not issue-number, named-agent or repository special cases.
 - Preserve schema versions, explicit freshness/completeness, full intake, offline/checkpoint safety and useful omission notices. Missing evidence is not approval.
 - Read the applicable contract in `doc/` before behavior changes. Record changed architectural contracts in a separate docs PR before implementation; existing accurate merged contracts can be reused.
@@ -34,16 +34,18 @@ Before committing run `npm run check`, `npm test` and `npm run build`. Use the i
 npm install                                   # also installs the Vite+ hooks (prepare)
 npm run triage -- --repo owner/repo [--json] [--issue 42] [--agent name]
 npm run triage -- deps 42 --repo owner/repo --tree
-npm run check                                 # vp check: format, lint, type check
+npm run check                                 # vp check (format, lint, type check) + examples tsc
 npm run fmt                                   # apply formatting
 npm test                                      # vp test run (Vitest)
 npx vp test run src/triage.test.ts -t "name"  # one file / one test by name
 npm run build                                 # vp pack -> dist/cli.mjs
 node dist/cli.mjs --help                      # quick CLI smoke test
 npm run smoke                                 # credential-free exit-code smoke of dist/cli.mjs
+npx tsx scripts/smoke.ts src/cli.ts           # same smoke against the TypeScript source
+npm run package-test                          # pack, install globally into a temp prefix, smoke
 ```
 
-Without `--repo`, the target repository is resolved by `gh repo view` from the current working directory. The runtime uses only Node built-ins and `gh`; types live in `src/types.d.ts` (JS checked by TypeScript). Tests are in `src/triage.test.ts`; one test fakes `gh` with a POSIX shell script and is skipped on Windows. The CLI supports Node 20+, but the Vite+ tooling needs Node 22+. CI runs the checks, tests, build and smoke tests on Ubuntu, macOS and Windows with Node 20, 22 and 24; the single `verify` job passes only when every matrix job passes, and is the check to require. Line endings are LF everywhere.
+Without `--repo`, the target repository is resolved by `gh repo view` from the current working directory. The runtime uses only Node built-ins and `gh`; shared GitHub fact types live in `src/types.d.ts`; `tsconfig.json` (strict) covers `src/` and `scripts/`, and `doc/reports/examples/tsconfig.json` covers the rules examples. Tests are in `src/triage.test.ts`; one test fakes `gh` with a POSIX shell script and is skipped on Windows. The CLI supports Node 20+, but the Vite+ tooling needs Node 22+. CI runs the checks, tests, build and smoke tests on Ubuntu, macOS and Windows with Node 20, 22 and 24; the single `verify` job passes only when every matrix job passes, and is the check to require. Line endings are LF everywhere.
 
 ## Choosing work
 

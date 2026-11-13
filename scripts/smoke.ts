@@ -13,10 +13,13 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const cli = resolve(process.argv[2] ?? "dist/cli.mjs");
+// TypeScript source (e.g. src/cli.ts) runs through the development-only tsx loader; the built
+// artifact runs on plain Node exactly as consumers run it.
+const nodeArgs = cli.endsWith(".ts") ? ["--import", import.meta.resolve("tsx"), cli] : [cli];
 const repo = "example/project";
 const time = "2026-11-12T10:00:00.000Z";
-const page = (nodes) => ({ nodes, pageInfo: { hasNextPage: false, endCursor: null } });
-const snapshot = (warnings = []) => ({
+const page = (nodes: unknown[]) => ({ nodes, pageInfo: { hasNextPage: false, endCursor: null } });
+const snapshot = (warnings: string[] = []) => ({
   schemaVersion: 1,
   repository: repo,
   startedAt: time,
@@ -46,20 +49,30 @@ const snapshot = (warnings = []) => ({
   rateLimit: null,
 });
 
+interface RunResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+
 /** Run the CLI and resolve to {code, stdout, stderr}; never rejects on non-zero exit. */
-const run = (args, env = process.env) =>
+const run = (args: string[], env: NodeJS.ProcessEnv = process.env): Promise<RunResult> =>
   new Promise((done) =>
-    execFile(process.execPath, [cli, ...args], { env, timeout: 30_000 }, (error, stdout, stderr) =>
-      done({
-        code: error ? (typeof error.code === "number" ? error.code : -1) : 0,
-        stdout,
-        stderr,
-      }),
+    execFile(
+      process.execPath,
+      [...nodeArgs, ...args],
+      { env, timeout: 30_000 },
+      (error, stdout, stderr) =>
+        done({
+          code: error ? (typeof error.code === "number" ? error.code : -1) : 0,
+          stdout,
+          stderr,
+        }),
     ),
   );
 
-const failures = [];
-const expect = (name, condition, detail) => {
+const failures: string[] = [];
+const expect = (name: string, condition: boolean, detail: unknown): void => {
   console.log(`${condition ? "ok  " : "FAIL"} ${name}`);
   if (!condition) failures.push(`${name}: ${detail}`);
 };
@@ -85,8 +98,9 @@ try {
   expect("unreachable gh exits 1 without leaking details", r.code === 1, r.stderr);
 
   r = await run(["--offline", "--cache", complete, "--json"]);
-  let parsed;
+  let parsed: { repository?: unknown; freshness?: { offline?: unknown } } | undefined;
   try {
+    // Narrowed by the optional-chained field checks below; malformed JSON fails them.
     parsed = JSON.parse(r.stdout);
   } catch {
     parsed = undefined;

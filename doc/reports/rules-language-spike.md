@@ -1,6 +1,6 @@
 # Rules language feasibility spike (#74)
 
-Spike completed 2026-11-13, following the plan in [rules-language-engines.md](rules-language-engines.md) (#73). No runtime code, package dependency, configuration or live workflow changed. The spike lives in [examples/rules-spike/](examples/rules-spike/); DataScript was installed in an isolated scratch directory for the independent verification below; it is not a project runtime dependency. The existing JavaScript wrappers predate the owner’s TypeScript decision and are included in migration #91; intentionally ancillary Datalog clauses may remain.
+Spike completed 2026-11-13, following the plan in [rules-language-engines.md](rules-language-engines.md) (#73). No runtime code, package dependency, configuration or live workflow changed. The spike lives in [examples/rules-spike/](examples/rules-spike/); DataScript was installed in an isolated scratch directory for the independent verification below; it is not a project runtime dependency. The wrappers have been migrated to TypeScript under #91; intentionally ancillary Datalog clauses remain. The independent timing table below records the original pre-migration run, not a newly measured TypeScript result.
 
 ## Recommendation
 
@@ -8,7 +8,7 @@ Spike completed 2026-11-13, following the plan in [rules-language-engines.md](ru
 
 ## What was built
 
-- **Fact table** (`FACTS` in `rules.mjs`): each named fact (`claimedByOther`, `blocked`, `evidenceUnknown`, `restricted`, …) has a JS test, a DataScript clause and an English phrase in one record. Rules cannot contain functions or free-form queries; they only name facts.
+- **Fact table** (`FACTS` in `rules.ts`): each named fact (`claimedByOther`, `blocked`, `evidenceUnknown`, `restricted`, …) has a JS test, a DataScript clause and an English phrase in one record. Rules cannot contain functions or free-form queries; they only name facts.
 - **Rule records** (`RULES`): `{ id, modality: must | may | must_not | inspect, action, when: [fact, optionally negated], reason }`. Eleven records express the slice of the agreed workflow exercised by the scenarios.
 - **Order clause** (`ORDER`): declarative keys for pickup order (dependants unblocked, incomplete first, oldest, number), also compiled to English.
 - **Two evaluators** compiled from the same records: registered JS, and DataScript (one query per rule over ticket datoms).
@@ -44,13 +44,12 @@ Reproduce from the repository root in a POSIX shell (downloads only into scratch
 
 ```sh
 rules_scratch=$(mktemp -d)
-cp doc/reports/examples/rules-spike/rules.mjs doc/reports/examples/rules-spike/run.mjs "$rules_scratch/"
-npm install --prefix "$rules_scratch" --ignore-scripts --no-save datascript@1.8.1
-node "$rules_scratch/run.mjs"
-npm exec --yes --package=node@20.20.2 -- node "$rules_scratch/run.mjs"
+cp doc/reports/examples/rules-spike/rules.ts doc/reports/examples/rules-spike/run.ts "$rules_scratch/"
+npm install --prefix "$rules_scratch" --ignore-scripts --no-save datascript@1.8.1 tsx@4.23.15
+"$rules_scratch/node_modules/.bin/tsx" "$rules_scratch/run.ts"
 ```
 
-The first node command uses the locally installed version; record it with the output. Absolute timing varies by machine/load. Reproduction paths must be updated when #91 converts the wrappers to TypeScript; that migration must preserve these assertions rather than silently change the experiment.
+The runner uses the locally installed Node; record it with the output. Absolute timing varies by machine/load. This current TypeScript reproduction preserves the original assertions; the historical Node 20 measurement is evidence, not an old-runtime support requirement.
 
 ## Limits and what #75 must decide
 

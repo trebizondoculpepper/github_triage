@@ -13,12 +13,17 @@ import { execFileSync } from "node:child_process";
 
 const SHA = /^[0-9a-f]{40}$/;
 
-/** @typedef {(command: "git" | "gh", args: string[]) => string} Runner */
-/** @type {Runner} */
-export const defaultRunner = (command, args) =>
+export type Runner = (command: "git" | "gh", args: string[]) => string;
+export type Kind = "prerelease" | "release";
+export interface DispatchOptions {
+  help?: boolean;
+  sha?: string;
+}
+
+export const defaultRunner: Runner = (command, args) =>
   execFileSync(command, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 
-export const helpText = {
+export const helpText: Record<Kind, string> = {
   prerelease: `Usage: npm run make-prerelease [-- --sha SHA]
 Explicitly publish a prerelease of origin/main to npm "next" (doc/npm-releases.md, #79).
 Resolves origin/main once and dispatches the Publish workflow on main with that full SHA.
@@ -38,8 +43,7 @@ version, and creates the matching vX.Y.Z tag and GitHub release.
 Requires: gh authenticated with push and workflow-dispatch permission; NPM_PUBLISH=true.`,
 };
 
-/** @param {string[]} args @returns {{ help?: boolean, sha?: string }} */
-export function parseArgs(args) {
+export function parseArgs(args: string[]): DispatchOptions {
   if (args.includes("--help") || args.includes("-h")) return { help: true };
   const i = args.indexOf("--sha");
   if (i >= 0) {
@@ -52,7 +56,7 @@ export function parseArgs(args) {
   return {};
 }
 
-const dispatch = (run, ref, channel, sha) =>
+const dispatch = (run: Runner, ref: string, channel: string, sha: string): string =>
   run("gh", [
     "workflow",
     "run",
@@ -66,7 +70,7 @@ const dispatch = (run, ref, channel, sha) =>
   ]);
 
 /** Resolve origin/main's head once, or validate a retry SHA is on main. */
-function selectCommit(run, sha) {
+function selectCommit(run: Runner, sha: string | undefined): string {
   run("git", ["fetch", "--no-tags", "origin", "main"]);
   if (!sha) return run("git", ["rev-parse", "origin/main"]);
   try {
@@ -77,12 +81,11 @@ function selectCommit(run, sha) {
   return sha;
 }
 
-/**
- * @param {{ sha?: string }} options
- * @param {Runner} [run]
- * @returns {string[]} lines reported to the user
- */
-export function makePrerelease({ sha } = {}, run = defaultRunner) {
+/** Returns the lines reported to the user. */
+export function makePrerelease(
+  { sha }: DispatchOptions = {},
+  run: Runner = defaultRunner,
+): string[] {
   const commit = selectCommit(run, sha);
   try {
     dispatch(run, "main", "next", commit);
@@ -97,14 +100,9 @@ export function makePrerelease({ sha } = {}, run = defaultRunner) {
   ];
 }
 
-/**
- * @param {{ sha?: string }} options
- * @param {Runner} [run]
- * @returns {string[]}
- */
-export function release({ sha } = {}, run = defaultRunner) {
+export function release({ sha }: DispatchOptions = {}, run: Runner = defaultRunner): string[] {
   const commit = selectCommit(run, sha);
-  const lines = [];
+  const lines: string[] = [];
   let current = "";
   if (run("git", ["ls-remote", "--heads", "origin", "release"])) {
     run("git", ["fetch", "--no-tags", "origin", "release"]);
@@ -136,8 +134,12 @@ export function release({ sha } = {}, run = defaultRunner) {
   return lines;
 }
 
-/** CLI entry shared by scripts/release.mjs and scripts/make-prerelease.mjs. */
-export function main(kind, argv = process.argv.slice(2), run = defaultRunner) {
+/** CLI entry shared by scripts/release.ts and scripts/make-prerelease.ts. */
+export function main(
+  kind: Kind,
+  argv: string[] = process.argv.slice(2),
+  run: Runner = defaultRunner,
+): number {
   try {
     const options = parseArgs(argv);
     if (options.help) {
@@ -148,7 +150,7 @@ export function main(kind, argv = process.argv.slice(2), run = defaultRunner) {
     for (const line of lines) console.log(line);
     return 0;
   } catch (error) {
-    console.error(error.message);
+    console.error(error instanceof Error ? error.message : String(error));
     return 1;
   }
 }

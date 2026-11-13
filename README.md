@@ -55,7 +55,7 @@ node dist/cli.mjs --help
 npm run smoke    # credential-free exit-code smoke test of dist/cli.mjs
 ```
 
-Vite+ owns formatting, linting, type checking, testing, packaging and staged-file hooks. Runtime uses only Node built-ins and `gh`: no SDK, token handling, frontend or build step is needed to run the source CLI. Tests use fixtures and injected boundaries, not live GitHub credentials.
+Vite+ owns formatting, linting, type checking, testing, packaging and staged-file hooks. Runtime uses only Node built-ins and `gh`: no SDK, token handling or frontend. Source is strict TypeScript; `npm run triage` runs it through the `tsx` devDependency (Node 20 cannot execute `.ts`), while consumers run the built `dist/cli.mjs`. Tests use fixtures and injected boundaries, not live GitHub credentials.
 
 Start with [HANDOFF.md](HANDOFF.md) for transferred issues, provenance, verified behavior and unfinished work. The [CLI contract](doc/github-triage-cli.md) and [dependency design](doc/issue-dependencies.md) describe the design inherited from the original repository. [npm releases](doc/npm-releases.md) records release behavior and owner setup. [CONTRIBUTING.md](CONTRIBUTING.md) covers contributions.
 

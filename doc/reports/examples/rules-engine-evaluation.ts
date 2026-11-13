@@ -1,11 +1,12 @@
 import ds from "datascript";
+import type { Datom } from "datascript";
 import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
 const query = `[:find ?t :where [?t "open" true] [?t "complete" true]
   (or [?t "status" "ready"] [?t "status" "incomplete"])
   (not [?t "blocked" true]) (not [?t "claimed" true])
   (not [?t "restricted" true])]`;
-const datoms = [
+const datoms: Datom[] = [
   [1, "open", true],
   [1, "complete", true],
   [1, "status", "ready"],
@@ -35,15 +36,15 @@ assert.deepEqual(
   ds.q("[:find ?t :in $ % :where (ready ?t)]", ds.init_db(datoms), rules).flat().sort(),
   [1, 3],
 );
-let unsafeNegation;
+let unsafeNegation: string | undefined;
 try {
   ds.q('[:find ?x :where (not [?x "blocked" true])]', ds.init_db(datoms));
 } catch (e) {
-  unsafeNegation = String(e.message);
+  unsafeNegation = String(e instanceof Error ? e.message : undefined);
   assert.ok(unsafeNegation.length);
 }
 const n = 500,
-  facts = [];
+  facts: Datom[] = [];
 for (let i = 1; i <= n; i++) {
   facts.push(
     [i, "open", true],
@@ -57,7 +58,7 @@ const buildStart = performance.now();
 const db = ds.init_db(facts);
 const buildMs = performance.now() - buildStart;
 for (let i = 0; i < 10; i++) ds.q(query, db);
-const times = [];
+const times: number[] = [];
 for (let i = 0; i < 100; i++) {
   const t = performance.now();
   ds.q(query, db);
