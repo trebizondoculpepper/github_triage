@@ -18,6 +18,8 @@ The cost is a supported development execution/build path and an initial typing/r
 
 ## Language policy and intentional exceptions
 
+**TypeScript is the preferred language for this project; handwritten JavaScript is best avoided.** All maintained first-party application code, tooling scripts and executable examples must use TypeScript. Ancillary languages such as Datalog are welcome only when we intentionally decide to add them and document their architectural purpose, integration boundary and validation. They are deliberate additions, not an open-ended exemption from the TypeScript preference.
+
 TypeScript is mandatory for maintained first-party general-purpose code, including future MCP code and contributor/release helpers. An ancillary language is allowed when it is intentionally part of the architecture: for example, Datalog rules evaluated by the rules experiment, or declarative configuration/query formats consumed by TypeScript services. Record the purpose and validation boundary in the relevant design. Do not rewrite a deliberately selected rules language into TypeScript merely to satisfy an extension count.
 
 This exception does not permit starting another JavaScript implementation or keeping scripts in JavaScript for convenience. Generated JavaScript output and third-party dependencies are expected runtime artifacts, not alternative source-language choices. Historical snapshots and literal fixture content preserve provenance; new maintained executable examples follow the TypeScript rule. CI must distinguish these categories explicitly rather than use an unqualified repository-wide extension ban.

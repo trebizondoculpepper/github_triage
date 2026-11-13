@@ -4,6 +4,8 @@ Contract for #25, informed by #19 and identity investigation #69. This is a docu
 
 ## SDK and architecture
 
+Follow the [project language policy](typescript.md): prefer TypeScript, avoid handwritten JavaScript, and use ancillary languages such as Datalog only through an intentional documented architecture decision. This applies to MCP implementation and helper code as well as the CLI.
+
 Use the official **`@modelcontextprotocol/server` v2** and Zod v4 with TypeScript source, emitted ESM and Node 20+ (owner language decision #91). On 2026-11-13, `npm view @modelcontextprotocol/server version engines dependencies --json` reports 2.4.0, Node >=20, core 2.4.0 and Zod ^4.2.0. The [official tool documentation](https://ts.sdk.modelcontextprotocol.io/v2/servers/tools.html) provides registration and validated input/output schemas; [stdio documentation](https://ts.sdk.modelcontextprotocol.io/v2/serving/stdio.html) provides `serveStdio(factory)` and protocol negotiation. Pin the reviewed dependency selection through the lockfile; recheck API/engines at implementation rather than invent framing or adopt a framework.
 
 Create a transport-neutral read service around existing collection, dependency and presentation functions, with injected GitHub/clock/project/filesystem boundaries. CLI and MCP call it directly; do not invoke the CLI in a subprocess or parse terminal text. Reuse authenticated `gh` via the existing argument-array runner. No new credential store or token arguments. Keep mutation imports/routes separate and unavailable through this tool registry.

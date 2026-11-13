@@ -27,6 +27,8 @@ Use injected GitHub, clock, environment and filesystem boundaries. Assert meanin
 
 ## Source language
 
+**Prefer TypeScript and avoid handwritten JavaScript.** Ancillary languages such as Datalog may be added through an intentional architectural decision documenting why they belong in the project. Generated JavaScript for runtime compatibility is a build artifact, not the preferred maintained source.
+
 The owner chose a full [TypeScript migration](typescript.md) in #91. This supersedes earlier plain-JavaScript design preferences, including MCP. Current runtime source remains JavaScript until that focused implementation lands; published bundles remain JavaScript for Node compatibility.
 
 ## Optional event production
