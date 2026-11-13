@@ -2430,3 +2430,85 @@ describe("post-write ownership check with incomplete labels", () => {
     expect(result.conflict).toMatch(/ownership is unverified/);
   });
 });
+
+describe("pr status: formal reviews and in-progress reviews", () => {
+  it("counts a formal review by the requested service and blocks while Codex is running", async () => {
+    const { prStatus } = await import("./prstatus.js");
+    const head = "a".repeat(40);
+    const pr = (comments: any[], reviews: any[]) => ({
+      number: 12,
+      title: "Fix",
+      url: `https://github.com/${repo}/pull/12`,
+      state: "OPEN",
+      isDraft: false,
+      merged: false,
+      mergeable: "MERGEABLE",
+      mergeStateStatus: "CLEAN",
+      reviewDecision: null,
+      headRefOid: head,
+      headRefName: "fix",
+      baseRefName: "main",
+      updatedAt: time,
+      commits: {
+        nodes: [
+          {
+            commit: {
+              oid: head,
+              statusCheckRollup: {
+                contexts: {
+                  nodes: [
+                    {
+                      __typename: "CheckRun",
+                      name: "verify",
+                      status: "COMPLETED",
+                      conclusion: "SUCCESS",
+                      startedAt: time,
+                    },
+                  ],
+                  pageInfo: { hasNextPage: false },
+                },
+              },
+            },
+          },
+        ],
+      },
+      reviews: { nodes: reviews, pageInfo: { hasPreviousPage: false } },
+      reviewThreads: { nodes: [], pageInfo: { hasNextPage: false } },
+      comments: { nodes: comments, pageInfo: { hasPreviousPage: false } },
+      closingIssuesReferences: { nodes: [], pageInfo: { hasNextPage: false } },
+    });
+    const request = {
+      author: { login: "kavya" },
+      body: "@coderabbitai review",
+      createdAt: "2026-11-12T10:00:00Z",
+      url: "u",
+    };
+    const review = {
+      author: { login: "coderabbitai" },
+      state: "COMMENTED",
+      submittedAt: "2026-11-12T11:00:00Z",
+      url: "r",
+      commit: { oid: head },
+    };
+    expect(prStatus(repo, pr([request], [review])).reviewRequest!.status).toBe(
+      "a reviewer has posted since the request",
+    );
+    const codexReq = {
+      author: { login: "kavya" },
+      body: "@codex review",
+      createdAt: "2026-11-12T10:00:00Z",
+      url: "u",
+    };
+    const running = {
+      author: { login: "chatgpt-codex-connector[bot]" },
+      body: `<!-- codex-review-state:v1 {"code_review":{"commit_sha":"${head}","status":"running"}} -->`,
+      createdAt: "2026-11-12T10:05:00Z",
+      url: "c",
+    };
+    expect(
+      prStatus(repo, pr([codexReq, running], [])).blockers.some((b: string) =>
+        b.startsWith("waiting for the requested review"),
+      ),
+    ).toBe(true);
+  });
+});

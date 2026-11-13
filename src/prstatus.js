@@ -135,7 +135,11 @@ export function prStatus(repository, pr, { now = new Date(), startedAt } = {}) {
     reviewerFor[(requestPattern.exec(lastRequest?.body ?? "")?.[1] ?? "").toLowerCase()];
   const answerer = (login) => (login ?? "").replace(/\[bot\]$/, "");
   const newerReceipt = (at) =>
-    receipts.some((r) => answerer(r.by) === requested && (r.at ?? "") > at && !r.codexState);
+    receipts.some((r) => answerer(r.by) === requested && (r.at ?? "") > at && !r.codexState) ||
+    // A formal review by the requested service also answers the request.
+    pr.reviews.nodes.some(
+      (r) => answerer(r.author?.login) === requested && (r.submittedAt ?? "") > at,
+    );
   const request = lastRequest
     ? {
         at: lastRequest.createdAt,
@@ -198,6 +202,8 @@ export function prStatus(repository, pr, { now = new Date(), startedAt } = {}) {
       blockers.push("Codex's latest review is for an older commit; current head not yet covered");
     if (request?.status === "no reaction yet")
       blockers.push("a review was requested and has had no reaction");
+    else if (request?.status.startsWith("review in progress"))
+      blockers.push(`waiting for the requested review to finish (${request.status})`);
   }
 
   const incomplete = [];
