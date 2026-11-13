@@ -8,7 +8,7 @@ Read [HANDOFF.md](HANDOFF.md) first. This is the standalone GitHub Triage projec
 
 Owner decision: all maintained first-party application code, scripts and executable examples must use TypeScript. Intentionally selected ancillary languages such as Datalog are allowed where the relevant design documents their purpose and validation boundary. Handwritten JavaScript is not an allowed convenience exception. Generated JavaScript bundles and third-party code remain normal runtime artifacts.
 
-Follow [the TypeScript architecture and migration contract](doc/design/typescript.md) (#91). Existing JavaScript commands below describe the current implementation until migration lands; they do not authorize expanding JavaScript source. Keep the migration behavior-preserving and preserve Node 20 consumers through built JavaScript.
+Follow [the TypeScript architecture and migration contract](doc/design/typescript.md) (#91). Existing JavaScript commands below describe the current implementation until migration lands; they do not authorize expanding JavaScript source. Keep the migration behavior-preserving on the selected supported runtime. The owner relaxed older-Node compatibility: follow the [Node 26+ runtime policy](doc/design/runtime.md) (#108); do not spend migration work preserving Node 20. Current engine/CI statements below remain implementation facts until that follow-up ships.
 
 ## Architecture and scope
 
