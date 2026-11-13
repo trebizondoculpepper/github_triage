@@ -53,7 +53,6 @@ import type { SetupRuntime } from "./complexitysetup.js";
 import { estimateUsage, runEstimate } from "./estimate.js";
 import type { EstimationRuntime } from "./estimation.js";
 import type { EstimateRuntime } from "./estimate.js";
-import { diagnoseComplexityConfig } from "./complexitydoctor.js";
 import type { ComplexityDoctorRuntime } from "./complexitydoctor.js";
 import { localDoctor, localDoctorExitCode, localDoctorText } from "./localdoctor.js";
 import type { LocalDoctorRuntime } from "./localdoctor.js";
@@ -115,7 +114,7 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   deps add|remove N --on M --note WHY [--dry-run]  Change native dependencies
   estimate --help       Complexity sizing guidance (XS..XXL)
   estimate N --size S --rationale TEXT [--assumption A]... [--replace OLD]  Record a size
-                        in the mapped native field with provenance (estimate --help)
+                        as a complexity:S label with provenance (estimate --help)
   pr N                  Why is pull request N not progressing? Every blocker at once
   pr N --history        Why does PR N keep failing review? Rounds, findings, recurring files
   claim N --agent NAME [--branch B] [--platform P] [--rework] [--dry-run]  Claim an eligible ticket;
@@ -620,13 +619,6 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
       now: runtime.now?.() ?? new Date(),
       offline: !!values.offline,
     });
-    report.configuration = {
-      complexity: await diagnoseComplexityConfig(
-        snapshot.repository,
-        { offline: !!values.offline },
-        runtime.doctor,
-      ),
-    };
     await output(values.json ? JSON.stringify(report, null, 2) + "\n" : ticketDoctorText(report));
     return report.completeness.complete ? 0 : 2;
   }

@@ -9,6 +9,7 @@
 import { owners, workflow } from "./briefing.js";
 import { dependencyDrift, nativeKnown } from "./dependencies.js";
 import { teamView } from "./team.js";
+import { complexityLabelFindings } from "./complexitylabels.js";
 import { complexityConfigText } from "./complexitydoctor.js";
 import type { ComplexityConfigReport } from "./complexitydoctor.js";
 import type { Issue, PullRequest, Snapshot } from "./types.js";
@@ -223,6 +224,18 @@ export function ticketDoctor(
       );
       gaps.push(`${issue.url}: more than 100 labels`);
     }
+    // Shared label classifier (#152): conflicting size labels are an inspection finding, never
+    // repaired here; unestimated tickets are not findings, and truncated labels are reported above.
+    for (const finding of complexityLabelFindings(issue))
+      if (finding.kind === "complexity-label-conflict")
+        add(
+          issue,
+          finding.kind,
+          finding.certainty,
+          `Conflicting complexity: ${finding.detail}.`,
+          [cmd.inspectIssue(issue.number), cmd.estimate(issue.number)],
+          { judgment: true },
+        );
     const classes = doctorPolicy.classification.filter((l) => labels.includes(l));
     if (!classes.length)
       add(
