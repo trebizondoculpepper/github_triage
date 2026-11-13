@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -1565,8 +1566,13 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
   };
   const at = (hoursAgo: number) => new Date(Date.parse(time) - hoursAgo * 3_600_000).toISOString();
   /** A recorded release handoff comment, as `release` writes it. */
-  const doneBy = (agent: string, createdAt = "2026-11-12T10:00:00Z", outcome = "done") => ({
-    body: `Handoff.\n\n<!-- github-triage:release:0123456789abcdef ${JSON.stringify({ v: 1, agent, outcome, target: "status:awaiting-review", remove: [], retained: [], claimedAt: null })} -->`,
+  const doneBy = (
+    agent: string,
+    createdAt = "2026-11-12T10:00:00Z",
+    outcome = "done",
+    claimedAt: string | null = "2026-11-12T09:00:00Z",
+  ) => ({
+    body: `Handoff.\n\n<!-- github-triage:release:0123456789abcdef ${JSON.stringify({ v: 1, agent, outcome, target: "status:awaiting-review", remove: [], retained: [], claimedAt })} -->`,
     createdAt,
   });
   const claim = (t: Ticket, extra = {}) =>
@@ -1689,6 +1695,13 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
       openPrs: [70],
       comments: [doneBy("kavya")],
       ...extra,
+    });
+    it("refuses rework authorised only by a handoff with an unknown claim time", async () => {
+      const plan = await claim(
+        waiting({ comments: [doneBy("kavya", "2026-11-12T10:00:00Z", "done", null)] }),
+        { rework: true },
+      );
+      expect(plan).toMatchObject({ ok: false, error: "REWORK_NOT_AUTHORISED" });
     });
     it("refuses a plain claim on awaiting review but offers the explicit --rework reclaim", async () => {
       const plan = await claim(waiting());
@@ -6106,7 +6119,19 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
       s.events.push({ __typename: "UnlabeledEvent", createdAt: tick(), label: { name } });
     };
     const writes: string[][] = [];
+    // Label history paged like GitHub's: the newest 50, then older pages of 100 by cursor.
+    const timeline = (end: number, size: number) => {
+      const start = Math.max(0, end - size);
+      return {
+        nodes: s.events.slice(start, end),
+        pageInfo: { hasPreviousPage: start > 0, startCursor: String(start) },
+      };
+    };
     const query = async (source: string, variables: Record<string, unknown> = {}) => {
+      if (source.includes("before:$before"))
+        return {
+          repository: { issue: { timelineItems: timeline(Number(variables.before), 100) } },
+        };
       if (source.includes("resource(url:"))
         return {
           resource: s.prState === null ? null : { __typename: "PullRequest", state: s.prState },
@@ -6129,7 +6154,7 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
                 : [],
             ),
             comments: page(s.comments),
-            timelineItems: page(s.events),
+            timelineItems: timeline(s.events.length, 50),
           },
           claims: page([]),
           ownerLabel: { name: "agent:kavya" },
@@ -6364,6 +6389,69 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
     expect(await release(pending, { outcome: "ready" })).toMatchObject({
       ok: false,
       error: "RELEASE_PENDING",
+    });
+  });
+  describe("claim identity beyond the first page of label history (Codex P2)", () => {
+    const at = (n: number) =>
+      new Date(Date.parse("2026-11-12T09:00:00.000Z") + n * 1000).toISOString();
+    // A handoff from an earlier acquisition whose claim time was never established.
+    const unknownHandoff = (outcome = "incomplete") => {
+      const op = `<!-- github-triage:release:${createHash("sha256")
+        .update(JSON.stringify([repo, 7, "kavya", null]))
+        .digest("hex")
+        .slice(0, 16)}`;
+      const plan = {
+        v: 1,
+        agent: "kavya",
+        outcome,
+        target: "status:incomplete",
+        remove: ["agent:kavya"],
+        retained: [],
+        claimedAt: null,
+      };
+      return { body: `Handoff.\n\n${op} ${JSON.stringify(plan)} -->`, createdAt: at(5) };
+    };
+    // The current claim's add event, followed by more noise than one page holds.
+    const buried = (noise: number) => {
+      const events: Live["events"] = [{ createdAt: at(10), label: { name: "agent:kavya" } }];
+      for (let i = 0; i < noise; i++)
+        events.push({
+          ...(i % 2 ? { __typename: "UnlabeledEvent" } : {}),
+          createdAt: at(11 + i),
+          label: { name: "noise" },
+        });
+      return events;
+    };
+    it("finds the claim time by paging back, so an older handoff is not matched", async () => {
+      const env = live({
+        labels: ["agent:kavya"],
+        comments: [unknownHandoff()],
+        events: buried(60),
+      });
+      const plan = await release(env, { outcome: "ready" });
+      expect(plan).toMatchObject({ ok: true, noop: false });
+      expect(accepted(plan).changes.map((c) => c.step)).toContain("comment");
+      expect(
+        accepted(plan)
+          .changes.find((c) => c.step === "comment")!
+          .command.at(-1),
+      ).toContain(`"claimedAt":"${at(10)}"`);
+    });
+    it("refuses EVIDENCE_INCOMPLETE when the claim time is beyond the bounded search", async () => {
+      const env = live({
+        labels: ["agent:kavya"],
+        comments: [unknownHandoff()],
+        events: buried(400),
+      });
+      const plan = await release(env, { outcome: "ready" });
+      expect(plan).toMatchObject({ ok: false, error: "EVIDENCE_INCOMPLETE" });
+      expect(refused(plan).recovery.length).toBeGreaterThan(0);
+      // Same outcome as the old handoff: still never replayed.
+      expect(await release(env)).toMatchObject({ ok: false, error: "EVIDENCE_INCOMPLETE" });
+    });
+    it("never matches a handoff recorded with no claim time, even with no visible claim", async () => {
+      const env = live({ labels: [], comments: [unknownHandoff()], labelledAt: undefined });
+      expect(await release(env)).toMatchObject({ ok: false, error: "NOT_CLAIMED" });
     });
   });
   it("never restores labels from a completed handoff after others changed them", async () => {

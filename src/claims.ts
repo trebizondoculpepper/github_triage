@@ -141,9 +141,11 @@ interface TicketIssue {
   closedByPullRequestsReferences: { nodes: { number: number; url: string; state: string }[] };
   comments: { nodes: { body: string; createdAt?: string }[] };
   timelineItems?: {
-    nodes: { __typename?: string; createdAt?: string; label?: { name: string } }[];
+    nodes: LabelEvent[];
+    pageInfo?: { hasPreviousPage?: boolean; startCursor?: string | null };
   };
 }
+type LabelEvent = { __typename?: string; createdAt?: string; label?: { name: string } };
 type TicketItem = TicketIssue | { __typename: "PullRequest"; number: number; url: string };
 interface TicketResponse {
   repository: {
@@ -254,6 +256,55 @@ function labelSteps(
   return changes;
 }
 
+/** Older label-event pages read at most, so a long label history costs a bounded number of requests. */
+const claimHistoryPages = 3;
+/**
+ * When `ownerLabel` was last added: the identity of the caller's current claim. Pages backwards
+ * through label history (bounded) when the add event is not in `readTicket`'s window. `since` is
+ * null when no add event was found; `complete` says whether the whole history was searched, so a
+ * null there is a genuine absence rather than unknown evidence.
+ */
+async function claimStart(
+  repository: string,
+  number: number,
+  ownerLabel: string,
+  item: TicketIssue,
+  query: GraphQuery,
+): Promise<{ since: string | null; complete: boolean; events: LabelEvent[] }> {
+  const latestAdd = (events: LabelEvent[]): string | null =>
+    events
+      .filter(
+        (e) => e.__typename !== "UnlabeledEvent" && e.label?.name === ownerLabel && e.createdAt,
+      )
+      .map((e) => e.createdAt!)
+      .sort((a, b) => a.localeCompare(b))
+      .at(-1) ?? null;
+  let events = item.timelineItems?.nodes ?? [];
+  let info = item.timelineItems?.pageInfo;
+  let since = latestAdd(events);
+  const [owner, name] = repository.split("/");
+  for (
+    let pageNo = 0;
+    !since && info?.hasPreviousPage && info.startCursor && pageNo < claimHistoryPages;
+    pageNo++
+  ) {
+    const data = (await query(
+      `query($owner:String!,$name:String!,$number:Int!,$before:String!){repository(owner:$owner,name:$name){issue(number:$number){timelineItems(itemTypes:[LABELED_EVENT,UNLABELED_EVENT],last:100,before:$before){nodes{__typename ... on LabeledEvent{createdAt label{name}} ... on UnlabeledEvent{createdAt label{name}}} pageInfo{hasPreviousPage startCursor}}}}}`,
+      { owner, name, number, before: info.startCursor },
+    )) as {
+      repository: {
+        issue: { timelineItems: NonNullable<TicketIssue["timelineItems"]> } | null;
+      } | null;
+    };
+    const older = data.repository?.issue?.timelineItems;
+    if (!older) break;
+    events = [...older.nodes, ...events];
+    info = older.pageInfo;
+    since = latestAdd(older.nodes);
+  }
+  return { since, complete: !info?.hasPreviousPage, events };
+}
+
 /** Live read of one ticket plus the agent's open claims. */
 async function readTicket(
   repository: string,
@@ -265,7 +316,7 @@ async function readTicket(
 ) {
   const [owner, name] = repository.split("/");
   const data = await query(
-    `query($owner:String!,$name:String!,$number:Int!,$label:String!,$question:String!,$decision:String!,$needsDesign:String!,$attention:String!${target ? ",$target:String!" : ""}){repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on PullRequest{number url} ... on Issue{number title url state updatedAt labels(first:100){nodes{name} pageInfo{hasNextPage}} issueDependenciesSummary{blockedBy} blockedBy(first:20){nodes{number url state}} closedByPullRequestsReferences(first:10,includeClosedPrs:false){nodes{number url state}} comments(last:100){nodes{body createdAt}} timelineItems(itemTypes:[LABELED_EVENT,UNLABELED_EVENT],last:50){nodes{__typename ... on LabeledEvent{createdAt label{name}} ... on UnlabeledEvent{createdAt label{name}}}}}} claims:issues(first:20,states:OPEN,labels:[$label]){nodes{number title url}} ownerLabel:label(name:$label){name} questionLabel:label(name:$question){name} decisionLabel:label(name:$decision){name} needsDesignLabel:label(name:$needsDesign){name} attentionLabel:label(name:$attention){name}${target ? " targetLabel:label(name:$target){name}" : ""}}}`,
+    `query($owner:String!,$name:String!,$number:Int!,$label:String!,$question:String!,$decision:String!,$needsDesign:String!,$attention:String!${target ? ",$target:String!" : ""}){repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on PullRequest{number url} ... on Issue{number title url state updatedAt labels(first:100){nodes{name} pageInfo{hasNextPage}} issueDependenciesSummary{blockedBy} blockedBy(first:20){nodes{number url state}} closedByPullRequestsReferences(first:10,includeClosedPrs:false){nodes{number url state}} comments(last:100){nodes{body createdAt}} timelineItems(itemTypes:[LABELED_EVENT,UNLABELED_EVENT],last:50){nodes{__typename ... on LabeledEvent{createdAt label{name}} ... on UnlabeledEvent{createdAt label{name}}} pageInfo{hasPreviousPage startCursor}}}} claims:issues(first:20,states:OPEN,labels:[$label]){nodes{number title url}} ownerLabel:label(name:$label){name} questionLabel:label(name:$question){name} decisionLabel:label(name:$decision){name} needsDesignLabel:label(name:$needsDesign){name} attentionLabel:label(name:$attention){name}${target ? " targetLabel:label(name:$target){name}" : ""}}}`,
     {
       owner,
       name,
@@ -439,7 +490,9 @@ export async function planClaim(
     label(item, claimPolicy.awaitingReview) &&
     openPrs.length > 0 &&
     lastRelease?.agent === agent &&
-    lastRelease.outcome === "done";
+    lastRelease.outcome === "done" &&
+    // A handoff with no recorded claim time cannot be tied to the caller's claim.
+    !!lastRelease.claimedAt;
   const reworkCommand = command(
     `claim ${number} --agent ${agent}${branch ? ` --branch ${branch}` : ""} --rework`,
   );
@@ -776,19 +829,26 @@ export async function planRelease(
   // The operation identity is the claim being released (when its label was last added). The
   // handoff comment is posted BEFORE any label changes and carries the full label plan, so a
   // retry is authorised only by that durable record of intent, never by label history alone.
-  const events = (item.timelineItems?.nodes ?? []).filter((e) => e.label && e.createdAt);
+  const history = await claimStart(repository, number, mine, item, query);
+  const since = history.since;
+  if (!since && (!history.complete || label(item, mine)))
+    // Without the claim's start time, separate acquisitions by this agent are indistinguishable,
+    // so no recorded handoff may be matched (it could belong to an earlier claim).
+    return refuse(
+      "EVIDENCE_INCOMPLETE",
+      facts,
+      `When ${mine} was added to #${number} cannot be established from its label history, so this claim cannot be told apart from earlier ones; nothing is changed. Inspect the ticket's label history and coordinate on the ticket, or remove and re-add ${mine} to start a verifiable claim.`,
+      [`${triage} --issue ${number}`, command(`who ${number}`)],
+    );
+  const events = history.events.filter((e) => e.label && e.createdAt);
   const removed = (e: (typeof events)[number]): boolean => e.__typename === "UnlabeledEvent";
-  const labelled = events.filter((e) => !removed(e));
-  const since =
-    labelled
-      .filter((e) => e.label!.name === mine)
-      .map((e) => e.createdAt!)
-      .sort((a, b) => a.localeCompare(b))
-      .at(-1) ?? null;
   const op = marker("release", [repository, number, agent, since]);
-  const record = releaseRecords(item.comments.nodes, op)
-    .filter((r) => r.agent === agent && r.claimedAt === since)
-    .at(-1);
+  // A record with no claim time can never be tied to a particular claim, so it never matches.
+  const record = since
+    ? releaseRecords(item.comments.nodes, op)
+        .filter((r) => r.agent === agent && r.claimedAt !== null && r.claimedAt === since)
+        .at(-1)
+    : undefined;
   const holds = label(item, mine);
   const others = facts.owners.filter((o) => o !== mine);
   if (record) {
