@@ -11,7 +11,24 @@ import { dependencyDrift, nativeKnown } from "./dependencies.js";
 import { teamView } from "./team.js";
 import { complexityConfigText } from "./complexitydoctor.js";
 import type { ComplexityConfigReport } from "./complexitydoctor.js";
-import type { Issue, Snapshot } from "./types.js";
+import type { Issue, PullRequest, Snapshot } from "./types.js";
+
+/**
+ * Whether a PR's contribution is evidently finished: out of draft, checks passing, no open or
+ * unseen review threads, no changes requested. Missing evidence is not finished.
+ */
+export function contributionFinished(pr: PullRequest): boolean {
+  const rollup = pr.commits?.nodes?.[0]?.commit?.statusCheckRollup;
+  const threads = pr.reviewThreads;
+  return (
+    !pr.isDraft &&
+    rollup?.state === "SUCCESS" &&
+    !!threads &&
+    !threads.pageInfo?.hasNextPage &&
+    threads.nodes.every((t) => t.isResolved) &&
+    !workflow.changesRequested.includes(pr.reviewDecision ?? "")
+  );
+}
 import { planCommands } from "./doctorplans.js";
 import type { CorrectionPlan, CorrectionStep } from "./doctorplans.js";
 
@@ -173,14 +190,19 @@ export function ticketDoctor(
   };
   /** Evidence gaps that make the scan itself incomplete, not just one ticket's finding. */
   const gaps: string[] = [];
-  const openPrsFor = new Map<string, { number: number; url: string }[]>();
+  const openPrsFor = new Map<string, { number: number; url: string; finished: boolean }[]>();
+  // An open PR whose linked-issue page is truncated may address any ticket: "no open PR" is
+  // then not established for anyone.
+  let prLinksPartial = false;
   for (const pr of snapshot.pullRequests)
-    if (pr.state === "OPEN")
+    if (pr.state === "OPEN") {
+      if (pr.closingIssuesReferences?.pageInfo?.hasNextPage) prLinksPartial = true;
       for (const ref of pr.closingIssuesReferences?.nodes ?? [])
         openPrsFor.set(ref.url, [
           ...(openPrsFor.get(ref.url) ?? []),
-          { number: pr.number, url: pr.url },
+          { number: pr.number, url: pr.url, finished: contributionFinished(pr) },
         ]);
+    }
 
   for (const issue of open) {
     const labels = issue.labels.nodes.map((l) => l.name);
@@ -339,7 +361,8 @@ export function ticketDoctor(
         `Claimed (${held.join(", ")}) but still labelled ${claimedReady.join(", ")}: a leftover after claim or handoff.`,
         [
           cmd.who(issue.number),
-          ...(held.length === 1
+          // With labels on an unseen page another claimant may exist: inspect, do not act.
+          ...(held.length === 1 && !partial
             ? [
                 cmd.labels(
                   issue.number,
@@ -362,24 +385,48 @@ export function ticketDoctor(
       );
     const prs = openPrsFor.get(issue.url) ?? [];
     const pickup = labels.filter((l) => doctorPolicy.claimedReadiness.includes(l));
+    // Releasing as done ends active ownership, so it is a single definite step only when every
+    // linked PR is evidently finished (not draft, checks green, no open review threads).
+    const finished = prs.length > 0 && prs.every((p) => p.finished);
     if (prs.length && pickup.length)
       add(
         issue,
         "ready-with-open-pr",
-        "definite",
+        // Ownership rests on the absence of agent labels, unknown when labels are truncated.
+        absent("definite"),
         `Open PR ${prs.map((p) => `#${p.number}`).join(", ")} addresses it, yet it is labelled for pickup; expected ${doctorPolicy.awaitingReview}.`,
         [
+          cmd.who(issue.number),
+          cmd.inspectIssue(issue.number),
           ...prs.map((p) => cmd.pr(p.number)),
           ...(held.length === 1
-            ? prs.map((p) =>
-                cmd.release(
-                  issue.number,
-                  agents[0],
-                  "done",
-                  `${agents[0]} hands over to review with PR #${p.number}.`,
-                  { pr: p.url, choice: prs.length > 1 ? `done-pr-${p.number}` : "done" },
-                ),
-              )
+            ? [
+                ...(finished
+                  ? []
+                  : [
+                      cmd.labels(
+                        issue.number,
+                        [],
+                        pickup,
+                        `${agents[0]} keeps the claim while the PR is unfinished: remove the leftover pickup label.`,
+                        { choice: "keep-claim", runBy: `agent ${agents[0]} only (the claimant)` },
+                      ),
+                    ]),
+                ...prs.map((p) => {
+                  const step = cmd.release(
+                    issue.number,
+                    agents[0],
+                    "done",
+                    `${agents[0]} hands over to review with PR #${p.number}.`,
+                    { pr: p.url, choice: prs.length > 1 ? `done-pr-${p.number}` : "done" },
+                  );
+                  if (!p.finished)
+                    step.preconditions.push(
+                      `Only once PR #${p.number} is finished: out of draft, checks passing, review threads resolved.`,
+                    );
+                  return step;
+                }),
+              ]
             : held.length
               ? []
               : [
@@ -391,7 +438,7 @@ export function ticketDoctor(
                   ),
                 ]),
         ],
-        { judgment: prs.length > 1 || held.length > 1 },
+        { judgment: prs.length > 1 || held.length > 1 || (held.length === 1 && !finished) },
       );
     // A handoff to review that no open PR backs: the PR merged or closed, so the awaiting-review
     // state (and any remaining claim) is a leftover to inspect.
@@ -399,9 +446,11 @@ export function ticketDoctor(
       add(
         issue,
         "awaiting-review-without-pr",
-        "candidate",
+        // Rests on the absence of an open PR, unknown when a PR's linked issues are truncated.
+        prLinksPartial ? "unknown" : "candidate",
         `Labelled ${doctorPolicy.awaitingReview}${held.length ? ` and claimed by ${held.join(", ")}` : ""}, but no open PR addresses it; the PR may have merged or closed.`,
         [
+          cmd.who(issue.number),
           cmd.inspectIssue(issue.number),
           // The claimant decides; the ticket is never closed by a suggestion.
           ...agents.flatMap((agent) => [
