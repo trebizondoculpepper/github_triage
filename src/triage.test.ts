@@ -5187,6 +5187,8 @@ describe("read-only MCP adapter (#25)", async () => {
       },
       dependencyReport: (r: string, n: number, o?: { tree?: boolean }) =>
         dependencyReport(r, n, o, graphQuery({ edges: [[1, 2]] }).query, clock),
+      // A fixed clock keeps freshness ages identical between the MCP and CLI reads.
+      now: clock,
       ...overrides,
     };
   };

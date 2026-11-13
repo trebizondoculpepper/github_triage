@@ -36,6 +36,7 @@ export async function presentBriefing(
   snapshot: Snapshot,
   options: PresentOptions,
   estimationRuntime?: EstimationRuntime,
+  now: Date = new Date(),
 ): Promise<PresentedBriefing> {
   const estimation = await collectEstimationInput(
     snapshot.repository,
@@ -51,6 +52,7 @@ export async function presentBriefing(
           estimation,
           limit: Math.max(snapshot.issues.length + snapshot.pullRequests.length, 1) * 20,
         },
+    now,
   );
   const compact = options.full ? null : compactBriefing(snapshot, options, expanded);
   const report = compact ?? expanded;
@@ -66,6 +68,8 @@ export interface ReadRuntime {
   collect: typeof collect;
   dependencyReport: typeof dependencyReport;
   estimation?: EstimationRuntime;
+  /** Clock for freshness ages; defaults to the system clock. */
+  now?: () => Date;
 }
 
 /** Live read request for a briefing or one issue's intake. */
@@ -116,6 +120,7 @@ export async function readBriefing(
       issue: request.issue,
     },
     runtime.estimation,
+    runtime.now?.(),
   );
   return { kind: "report", ...presented };
 }

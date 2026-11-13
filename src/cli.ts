@@ -695,7 +695,12 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
   }
   if (options.issue && !snapshot.issues.some((issue) => issue.number === options.issue))
     throw new Error(`Issue #${options.issue} not in this cache. Refresh live with --issue.`);
-  const { report, text } = await presentBriefing(snapshot, options, runtime.estimation);
+  const { report, text } = await presentBriefing(
+    snapshot,
+    options,
+    runtime.estimation,
+    runtime.now?.(),
+  );
   const checkpoint = options.checkpoint
     ? {
         previousWindow: snapshot.since,
