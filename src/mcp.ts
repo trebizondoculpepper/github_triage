@@ -24,14 +24,24 @@ import {
   Watcher,
 } from "./polling.js";
 import type { ReadRuntime } from "./service.js";
+import type { ConfigFileSystem, GitRunner } from "./config.js";
+import { validateHarness } from "./harness.js";
+import type { Environment } from "./harness.js";
+import { validateEntryKey } from "./identity.js";
+import { resolveReadIdentity } from "./readidentity.js";
+import type { ReadIdentity } from "./readidentity.js";
 import { installedVersion } from "./updates.js";
 
-/** Startup selection, explicit only so far (roots and project-local identity lookup are pending on #25). */
+/** Startup selection. Client roots remain a separately tested follow-up (#25). */
 export interface McpOptions {
   /** Configured local project used for repository resolution and repository configuration. */
   project?: string;
   repo?: string;
   agent?: string;
+  /** Explicit `[agents.KEY]` entry of the project's agent-inbox.toml (read only). */
+  entry?: string;
+  /** Explicit supported harness selecting its entry (read only). */
+  harness?: string;
   /** Opt-in proactive polling of the one resolved repository (doc/design/polling-events.md). */
   poll?: boolean;
   /** Minutes between completed polls; default 30, minimum 1. */
@@ -41,17 +51,27 @@ export interface McpOptions {
 /** Injected boundaries; tests replace every GitHub-facing one. */
 export interface McpRuntime extends ReadRuntime {
   currentRepository: (cwd?: string, signal?: AbortSignal) => Promise<string>;
+  /** Environment for harness detection; absent means no environment signals. */
+  env?: Environment;
+  /** Git and filesystem boundaries for the read-only identity lookup. */
+  git?: GitRunner;
+  fs?: ConfigFileSystem;
   /** The process's watcher when polling is enabled; absent means polling is disabled. */
   watcher?: Watcher;
 }
 
 export const mcpHelp = `Usage: github-triage-mcp [--project PATH] [--repo owner/name] [--agent NAME]
-                         [--poll [--poll-interval-minutes N]]
+                         [--entry KEY | --harness NAME] [--poll [--poll-interval-minutes N]]
 Read-only stdio MCP server for github-triage. Requires authenticated gh and Node 26+.
 Tools: triage_briefing, triage_issue, triage_dependencies, triage_events. Never changes GitHub.
   --project PATH        Local project checkout used to resolve the default repository
   --repo owner/name     Default repository (a tool's repo argument wins)
   --agent NAME          Default agent for focused reads (a tool's agent argument wins)
+  --entry KEY           Without an agent, read the name of [agents.KEY] in the project's
+                        root agent-inbox.toml (read only; never created or changed)
+  --harness NAME        Without an agent or --entry, select that harness's entry
+                        (claude, codex, ori); else the MCP client (ori-SERVER selects
+                        ori.SERVER), else the detected harness; otherwise unfocused
   --poll                Opt in: poll the resolved repository while this server runs
                         and record deduplicated events for triage_events (off by default)
   --poll-interval-minutes N
@@ -71,6 +91,8 @@ export function mcpArguments(args: string[]): McpOptions & { help?: boolean } {
       project: { type: "string" },
       repo: { type: "string" },
       agent: { type: "string" },
+      entry: { type: "string" },
+      harness: { type: "string" },
       poll: { type: "boolean" },
       "poll-interval-minutes": { type: "string" },
       help: { type: "boolean" },
@@ -90,11 +112,17 @@ export function mcpArguments(args: string[]): McpOptions & { help?: boolean } {
     throw new Error("--repo must be owner/name.");
   if (values.agent !== undefined && !agentPattern.test(values.agent))
     throw new Error("--agent must be an agent name such as kavya_sabbagh.");
+  if (values.entry !== undefined && values.harness !== undefined)
+    throw new Error("Pass either --entry or --harness, not both.");
+  if (values.entry !== undefined) validateEntryKey(values.entry);
+  if (values.harness !== undefined) validateHarness(values.harness);
   return {
     help: values.help,
     project: values.project === undefined ? undefined : resolve(values.project),
     repo: values.repo,
     agent: values.agent,
+    entry: values.entry,
+    harness: values.harness,
     ...(values.poll
       ? {
           poll: true,
@@ -133,7 +161,15 @@ export const dependenciesInput = z.strictObject({
   tree: z.boolean().default(false),
 });
 
-const identitySource = z.enum(["tool", "startup", "unresolved"]);
+const identitySource = z.enum([
+  "tool",
+  "startup",
+  "entry",
+  "harness",
+  "client",
+  "environment",
+  "unresolved",
+]);
 /** Versioned MCP envelope; `result` is the unchanged versioned CLI JSON. */
 export const envelope = z.object({
   schemaVersion: z.literal(1),
@@ -143,6 +179,11 @@ export const envelope = z.object({
     repository: z.string().nullable(),
     agent: z.string().nullable(),
     identitySource,
+    /** `[agents.KEY]` consulted for a persisted identity, if any. */
+    entry: z.string().nullable(),
+    triageRole: z.string().nullable(),
+    /** Why identity is unresolved (the read is unfocused), with recovery. */
+    identityDiagnostic: z.string().nullable(),
   }),
   result: z.record(z.string(), z.unknown()).nullable(),
   error: z.object({ code: z.string(), message: z.string() }).nullable(),
@@ -270,6 +311,25 @@ export function redactLocalText(text: string): string {
     .replace(homePath, replacePath);
 }
 
+type IdentitySelection = Omit<Selection, "repository">;
+
+const identitySelection = (identity: ReadIdentity): IdentitySelection => ({
+  agent: identity.agent,
+  identitySource: identity.source,
+  entry: identity.entry,
+  triageRole: identity.triageRole,
+  identityDiagnostic: identity.diagnostic,
+});
+
+/** Selection known without any lookup (error envelopes, events). */
+const explicitSelection = (tool?: string, startup?: string): IdentitySelection => ({
+  agent: tool ?? startup ?? null,
+  identitySource: tool ? "tool" : startup ? "startup" : "unresolved",
+  entry: null,
+  triageRole: null,
+  identityDiagnostic: null,
+});
+
 /** Build one server for one connection; no state is shared between calls or connections. */
 export function createServer(
   options: McpOptions,
@@ -295,18 +355,28 @@ export function createServer(
       if (!repoPattern.test(repository)) throw new Failure("repository-unresolved");
     }
     if (signal.aborted) throw new Failure("cancelled");
-    const name = args.agent ?? options.agent ?? null;
-    return {
+    const identity = await resolveReadIdentity({
+      toolAgent: args.agent,
+      startupAgent: options.agent,
+      project: options.project,
       repository,
-      agent: name,
-      identitySource: args.agent ? "tool" : options.agent ? "startup" : "unresolved",
-    };
+      entry: options.entry,
+      harness: options.harness,
+      clientName: server.server.getClientVersion()?.name,
+      env: runtime.env ?? {},
+      git: runtime.git,
+      fs: runtime.fs,
+    });
+    if (signal.aborted) throw new Failure("cancelled");
+    return { repository, ...identitySelection(identity) };
   };
 
   const identityNotice = (selection: Selection): string =>
     selection.identitySource === "unresolved"
-      ? "Identity: unresolved; this is an unfocused read. Pass agent to focus it.\n"
-      : "";
+      ? `Identity: unresolved; this is an unfocused read. ${selection.identityDiagnostic ?? "Pass agent to focus it."}\n`
+      : selection.entry
+        ? `Identity: ${selection.agent} from agent-inbox.toml [agents.${selection.entry}] (${selection.identitySource}).\n`
+        : "";
 
   /** Run one call with per-call selection, mapping failures to a sanitized error envelope. */
   const call = async (
@@ -323,8 +393,7 @@ export function createServer(
   ) => {
     let selection: Selection = {
       repository: args.repo ?? options.repo ?? null,
-      agent: args.agent ?? options.agent ?? null,
-      identitySource: args.agent ? "tool" : options.agent ? "startup" : "unresolved",
+      ...explicitSelection(args.agent, options.agent),
     };
     try {
       const selected = await select(args, signal);
@@ -474,11 +543,7 @@ export function createServer(
         schemaVersion: 1,
         kind: "events",
         status: ctx.mcpReq.signal.aborted ? "error" : report.complete ? "complete" : "incomplete",
-        selection: {
-          repository,
-          agent: options.agent ?? null,
-          identitySource: options.agent ? "startup" : "unresolved",
-        },
+        selection: { repository, ...explicitSelection(undefined, options.agent) },
         result: ctx.mcpReq.signal.aborted
           ? null
           : redactPaths(plain(report), localPaths(options.project)),
@@ -522,6 +587,7 @@ export const defaultRuntime = (options: McpOptions): McpRuntime => ({
   collect,
   dependencyReport,
   currentRepository,
+  env: process.env,
   // Every runtime piece that reads local state resolves against the configured project, not
   // the server's working directory: estimation settings and the workflow-guide opt-out (#71).
   estimation: options.project ? { cwd: options.project } : undefined,
