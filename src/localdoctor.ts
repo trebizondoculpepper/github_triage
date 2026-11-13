@@ -7,9 +7,9 @@
  * never prints file contents, credentials or `gh` output; paths are reported relative to the
  * checkout so output can be shared without exposing the local filesystem layout.
  *
- * `agent-inbox.toml` contents are not read: doc/design/mcp.md requires a maintained TOML parser
- * and none is approved as a dependency yet (open question on #25). Those checks report
- * `unsupported` with the explicit `--agent`/`--role` fallback until that decision lands.
+ * The root `agent-inbox.toml` is read only through the shared identity service (#70, maintained
+ * TOML parser) and entry resolver (#38). Only the selected entry's registered `name` and
+ * `triage_role` are used; parse errors report line/column only, never file text.
  */
 import { execFile } from "node:child_process";
 import { join } from "node:path";
@@ -21,6 +21,9 @@ import {
 } from "./config.js";
 import type { ConfigFileSystem, GitRunner } from "./config.js";
 import { roleNames } from "./roles.js";
+import { resolveEntry } from "./harness.js";
+import type { Environment } from "./harness.js";
+import { parseIdentityDocument, readIdentity, TRIAGE_ROLES } from "./identity.js";
 
 export const LOCAL_DOCTOR_SCHEMA_VERSION = 1;
 export { IDENTITY_FILE } from "./identity.js";
@@ -47,6 +50,8 @@ export interface LocalDoctorReport {
   repository: string | null;
   agent: string | null;
   role: string | null;
+  /** Selected `[agents.KEY]` entry of the root identity file, when one was resolved. */
+  entry: string | null;
   checks: LocalCheck[];
   summary: Record<CheckStatus, number>;
 }
@@ -74,12 +79,18 @@ export interface LocalDoctorRuntime {
   readonly probe?: Probe;
   /** Node version string such as "26.1.0"; defaults to the running process. */
   readonly nodeVersion?: string;
+  /** Environment for harness detection; defaults to the process. Values are never reported. */
+  readonly env?: Environment;
 }
 
 export interface LocalDoctorOptions {
   repo?: string;
   agent?: string;
   role?: string;
+  /** Explicit `[agents.KEY]` entry. */
+  entry?: string;
+  /** Explicit supported harness. */
+  harness?: string;
 }
 
 const gitRunner =
@@ -106,6 +117,7 @@ export async function localDoctor(
     repository: null,
     agent: options.agent ?? null,
     role: options.role ?? null,
+    entry: null,
     checks,
     summary: { ok: 0, missing: 0, invalid: 0, access: 0, unsupported: 0, unknown: 0 },
   };
@@ -259,8 +271,13 @@ export async function localDoctor(
               id: "identity.file",
               status: "missing",
               source: `${IDENTITY_FILE} absent`,
-              detail: `No ${IDENTITY_FILE} at the checkout root. Triage still works with an explicit agent name.`,
-              next: ["github-triage --agent <AGENT_NAME> --role <ROLE>"],
+              detail: `No ${IDENTITY_FILE} at the checkout root. Setting a triage role creates it (Git-excluded) with a generated name; explicit --agent still works meanwhile.`,
+              next: [
+                withRepo(
+                  "github-triage config set identity.triage_role <TRIAGE_ROLE> --entry <ENTRY>",
+                  report.repository,
+                ),
+              ],
             },
       );
     } catch (caught) {
@@ -333,24 +350,22 @@ export async function localDoctor(
     );
   }
 
-  // identity.entry: parse, harness/server entry and persistent name need a TOML parser.
-  add({
-    id: "identity.entry",
-    status: "unsupported",
-    source: "no approved TOML parser (#25)",
-    detail: `This version does not read ${IDENTITY_FILE}, so parse validity, the harness/server entry (including distinct Ori entries) and its persistent name are not checked. Pass the name explicitly.`,
-    next: ["github-triage --agent <AGENT_NAME>"],
-  });
-  add({
-    id: "identity.compatibility",
-    status: "unsupported",
-    source: "doc/design/identity.md (#69)",
-    detail:
-      "Agent Inbox's writer may drop triage_role and does not establish Ori per-server mapping; shared writes stay disabled.",
-    next: [],
-  });
+  // identity.parse, identity.entry, identity.name, identity.triage-role: through the shared
+  // identity service (#70) and entry resolver (#38). Only the selected entry's registered
+  // values are used; other agents' values and raw contents are never reported.
+  const identity = await identityChecks(
+    root,
+    report.repository,
+    options,
+    fs,
+    runtime.env ?? process.env,
+  );
+  for (const check of identity.checks) add(check);
+  report.entry = identity.entry;
 
   // identity.agent: the deciding signal for which agent this is.
+  const agent = options.agent ?? identity.name;
+  report.agent = agent ?? null;
   add(
     options.agent
       ? {
@@ -360,46 +375,275 @@ export async function localDoctor(
           detail: `Agent ${options.agent} supplied explicitly.`,
           next: [],
         }
-      : {
-          id: "identity.agent",
-          status: "unknown",
-          source: "no --agent; automatic lookup unsupported",
-          detail:
-            "No agent identity resolved. A shared GitHub login does not identify an agent; reads are unfocused.",
-          next: ["github-triage doctor --agent <AGENT_NAME>"],
-        },
+      : identity.name !== null
+        ? {
+            id: "identity.agent",
+            status: "ok",
+            source: `${IDENTITY_FILE} [agents.${identity.entry}] name`,
+            detail: `Agent ${identity.name} is the persisted name of the selected entry.`,
+            next: [],
+          }
+        : {
+            id: "identity.agent",
+            status: "unknown",
+            source: "no --agent and no persisted name of a selected entry",
+            detail:
+              "No agent identity resolved. A shared GitHub login does not identify an agent; reads are unfocused.",
+            next: [withRepo("github-triage doctor --agent <AGENT_NAME>", report.repository)],
+          },
   );
 
-  // triage.role: validated against the registered views; Agent Inbox's `role` is different.
+  // triage.role: validated against the registered views; a generic `role` key is different.
   const roles = roleNames();
+  const role = options.role ?? identity.triageRole;
+  report.role = role ?? null;
   add(
-    options.role === undefined
+    role === null || role === undefined
       ? {
           id: "triage.role",
-          status: "unsupported",
-          source: "triage_role not read (#25)",
-          detail: `triage_role in ${IDENTITY_FILE} is not read by this version; Agent Inbox's mailbox role is a different field. Supported views: ${roles.join(", ")}.`,
-          next: ["github-triage doctor --role <ROLE>"],
+          status: "unknown",
+          source: "no --role and no persisted triage_role of a selected entry",
+          detail: `No triage role resolved; a generic 'role' key is not a triage role. Supported views: ${roles.join(", ")}.`,
+          next: [withRepo("github-triage doctor --role <ROLE>", report.repository)],
         }
-      : roles.includes(options.role)
+      : roles.includes(role)
         ? {
             id: "triage.role",
             status: "ok",
-            source: "--role",
-            detail: `${options.role} is a registered view.`,
+            source: options.role !== undefined ? "--role" : `${IDENTITY_FILE} triage_role`,
+            detail: `${role} is a registered view.`,
             next: [],
           }
         : {
             id: "triage.role",
             status: "invalid",
             source: "--role",
-            detail: `${options.role} is not a registered view. Supported: ${roles.join(", ")}.`,
-            next: roles.map((r) => `github-triage doctor --role ${r}`),
+            detail: `${role} is not a registered view. Supported: ${roles.join(", ")}.`,
+            next: roles.map((r) => withRepo(`github-triage doctor --role ${r}`, report.repository)),
           },
   );
 
   for (const check of checks) report.summary[check.status] += 1;
   return report;
+}
+
+/** Suggested commands always name the repository, or a placeholder when it is unknown. */
+const withRepo = (command: string, repository: string | null): string =>
+  `${command} --repo ${repository ?? "<OWNER/NAME>"}`;
+
+const IDENTITY_CHECK_IDS = [
+  "identity.parse",
+  "identity.entry",
+  "identity.name",
+  "identity.triage-role",
+] as const;
+
+interface IdentityChecks {
+  checks: LocalCheck[];
+  entry: string | null;
+  name: string | null;
+  triageRole: string | null;
+}
+
+/** Read-only identity checks. Nothing is created, repaired or reported beyond the selected entry. */
+async function identityChecks(
+  root: string | null,
+  repository: string | null,
+  options: LocalDoctorOptions,
+  fs: ConfigFileSystem,
+  env: Environment,
+): Promise<IdentityChecks> {
+  const result: IdentityChecks = { checks: [], entry: null, name: null, triageRole: null };
+  const unknownRest = (from: number, source: string, detail: string) => {
+    for (const id of IDENTITY_CHECK_IDS.slice(from))
+      result.checks.push({ id, status: "unknown", source, detail, next: [] });
+  };
+  if (root === null) {
+    unknownRest(0, "no checkout", "No checkout was resolved, so this was not checked.");
+    return result;
+  }
+  let raw: string | null;
+  try {
+    raw = await fs.readText(join(root, IDENTITY_FILE));
+  } catch (caught) {
+    if (!filesystemRefusal(caught)) throw caught;
+    unknownRest(
+      0,
+      `${IDENTITY_FILE} unreadable`,
+      `${IDENTITY_FILE} could not be read; see identity.file.`,
+    );
+    return result;
+  }
+  if (raw === null) {
+    result.checks.push({
+      id: "identity.parse",
+      status: "unknown",
+      source: `${IDENTITY_FILE} absent`,
+      detail: "There is no identity file to parse; see identity.file.",
+      next: [],
+    });
+  } else {
+    try {
+      parseIdentityDocument(raw);
+      result.checks.push({
+        id: "identity.parse",
+        status: "ok",
+        source: "TOML parser",
+        detail: `${IDENTITY_FILE} is valid TOML with an agents table (contents not shown).`,
+        next: [],
+      });
+    } catch (caught) {
+      if (!(caught instanceof ConfigError)) throw caught;
+      result.checks.push({
+        id: "identity.parse",
+        status: "invalid",
+        source: "TOML parser",
+        // The service's message carries line/column only, never file text.
+        detail: `${caught.message} Doctor does not repair it.`,
+        next: [
+          `Fix ${IDENTITY_FILE} at the checkout root by hand, then run: ${withRepo("github-triage doctor", repository)}`,
+        ],
+      });
+      unknownRest(1, `${IDENTITY_FILE} malformed`, "The identity file could not be parsed.");
+      return result;
+    }
+  }
+
+  let resolution;
+  try {
+    resolution = await resolveEntry({
+      entry: options.entry,
+      harness: options.harness,
+      env,
+      root,
+      fs,
+    });
+  } catch (caught) {
+    if (!(caught instanceof ConfigError)) throw caught;
+    result.checks.push({
+      id: "identity.entry",
+      status: "invalid",
+      source: options.entry !== undefined ? "--entry" : "--harness",
+      detail: caught.message,
+      next: [withRepo("github-triage doctor --entry <ENTRY>", repository)],
+    });
+    unknownRest(2, "no entry selected", "No identity entry was selected.");
+    return result;
+  }
+  if (resolution.status === "unresolved") {
+    const choices = resolution.candidates.length > 0 ? resolution.candidates : ["<ENTRY>"];
+    result.checks.push({
+      id: "identity.entry",
+      status: "unknown",
+      source:
+        resolution.signals.length > 0
+          ? `${resolution.reason} (signals: ${resolution.signals.join(", ")})`
+          : resolution.reason,
+      detail: `${resolution.message} Select the entry explicitly.`,
+      next: choices.map((entry) => withRepo(`github-triage doctor --entry ${entry}`, repository)),
+    });
+    unknownRest(2, "no entry selected", "No identity entry was selected.");
+    return result;
+  }
+
+  const entry = resolution.entry;
+  result.entry = entry;
+  const source =
+    resolution.signals.length > 0
+      ? `${resolution.source} (signals: ${resolution.signals.join(", ")})`
+      : resolution.source;
+  const select = `--entry ${entry}`;
+  const initialise = TRIAGE_ROLES.map((role) =>
+    withRepo(`github-triage config set identity.triage_role ${role} ${select}`, repository),
+  );
+  const record = await readIdentity(root, entry, fs);
+  if (!record.entryExists) {
+    result.checks.push({
+      id: "identity.entry",
+      status: "missing",
+      source,
+      detail: `Entry [agents.${entry}] is not in ${IDENTITY_FILE}${record.fileExists ? "" : " (file absent)"}. Setting a triage role creates it with a generated name.`,
+      next: initialise,
+    });
+    for (const id of ["identity.name", "identity.triage-role"])
+      result.checks.push({
+        id,
+        status: "missing",
+        source: `[agents.${entry}] absent`,
+        detail: `The selected entry does not exist yet.`,
+        next: initialise,
+      });
+    return result;
+  }
+  if (record.problems.some((problem) => problem.endsWith("is not a table."))) {
+    result.checks.push({
+      id: "identity.entry",
+      status: "invalid",
+      source,
+      detail: `agents.${entry} in ${IDENTITY_FILE} is not a table. Doctor does not repair it.`,
+      next: [
+        `Fix [agents.${entry}] in ${IDENTITY_FILE} by hand, then run: ${withRepo(`github-triage doctor ${select}`, repository)}`,
+      ],
+    });
+    unknownRest(2, "entry malformed", "The selected entry is not a table.");
+    return result;
+  }
+  result.checks.push({
+    id: "identity.entry",
+    status: "ok",
+    source,
+    detail: `Entry [agents.${entry}] is selected and present.`,
+    next: [],
+  });
+
+  result.name = record.name;
+  const nameInvalid = record.problems.some((problem) => problem.startsWith("Stored name"));
+  result.checks.push(
+    record.name !== null
+      ? {
+          id: "identity.name",
+          status: "ok",
+          source: `[agents.${entry}] name`,
+          detail: `Persisted name ${record.name}.`,
+          next: [],
+        }
+      : {
+          id: "identity.name",
+          status: nameInvalid ? "invalid" : "missing",
+          source: `[agents.${entry}] name`,
+          detail: nameInvalid
+            ? "The stored name is not a valid agent name (value not shown)."
+            : "The selected entry has no persisted name.",
+          next: [
+            withRepo(`github-triage config set identity.name <AGENT_NAME> ${select}`, repository),
+          ],
+        },
+  );
+
+  result.triageRole = record.triageRole;
+  const roleInvalid = record.problems.some((problem) => problem.includes("triage_role"));
+  result.checks.push(
+    record.triageRole !== null
+      ? {
+          id: "identity.triage-role",
+          status: "ok",
+          source: `[agents.${entry}] triage_role`,
+          detail: `Persisted triage role ${record.triageRole}.`,
+          next: [],
+        }
+      : {
+          id: "identity.triage-role",
+          status: roleInvalid ? "invalid" : "missing",
+          source: `[agents.${entry}] triage_role`,
+          detail: `${
+            roleInvalid
+              ? "The stored triage_role is not valid (value not shown)."
+              : "The selected entry has no triage_role."
+          } Valid: ${TRIAGE_ROLES.join(", ")}; a generic 'role' key is not a substitute.`,
+          next: initialise,
+        },
+  );
+  return result;
 }
 
 /** 0: nothing actionable; 1: missing, invalid or access problems; 2: only unknowns remain. */
