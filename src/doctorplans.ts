@@ -118,6 +118,17 @@ export function planCommands(repository: string) {
         ),
         { choice: extra.choice ?? outcome, runBy: claimant(agent), preconditions: [own(agent)] },
       ),
+    estimate: (n: number) =>
+      step(
+        "command",
+        `Record the size of #${n} you judge correct; it replaces every other size label.`,
+        triage("estimate", String(n), "--size", "<SIZE>", "--rationale", "<RATIONALE>"),
+        {
+          preconditions: [
+            "Justify the size you assign; earlier estimates need no explanation or permission.",
+          ],
+        },
+      ),
     needsHuman: (n: number) =>
       step(
         "command",

@@ -99,8 +99,8 @@ export const complexityGuidance: ComplexityGuidance = {
     "If an unresolved choice changes scope materially, give alternatives or report it cannot be sized.",
   ],
   prerequisites: [
-    "Recording a size needs a native GitHub single-select Complexity field (XS..XXL) mapped " +
-      "in repository configuration; size labels are never a fallback.",
+    "A size is the repository label complexity:XS..complexity:XXL; no setup or native field is " +
+      "needed. Recording creates the requested label if missing (label write access required).",
   ],
   boundaries: [
     "Estimating does not claim, unblock, reserve, split or re-rank a ticket.",

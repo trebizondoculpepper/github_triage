@@ -8,8 +8,9 @@ import {
 } from "./dependencies.js";
 import { pickupEligibility, rankPickup, urgencyBand } from "./ranking.js";
 import type { PickupOrder } from "./ranking.js";
-import { estimationReport, estimationText } from "./estimation.js";
-import type { EstimationInput } from "./estimation.js";
+import { estimationText } from "./estimation.js";
+import { labelEstimationReport } from "./complexitylabels.js";
+import type { LabelEstimationInput } from "./complexitylabels.js";
 import type { Action, Dependency, Issue, PullRequest, Snapshot } from "./types.js";
 
 export { urgencyBand };
@@ -528,8 +529,8 @@ export interface BriefingOptions {
   order?: PickupOrder;
   /** Stale-claim threshold in hours; default two days. */
   staleHours?: number;
-  /** Collected complexity configuration and native values (#122); absent means unknown. */
-  estimation?: EstimationInput;
+  /** Collected complexity configuration (#152: sizes come from snapshot labels); absent means unknown. */
+  estimation?: LabelEstimationInput;
   /** Explicit request to estimate: present the estimation queue first. */
   estimate?: boolean;
 }
@@ -640,7 +641,7 @@ export function briefing(snapshot: Snapshot, options: BriefingOptions, now: Date
       ),
     ),
     // Optional estimation queue (#122): separate eligibility from implementation pickup.
-    estimation: estimationReport(issues, options.estimation, {
+    estimation: labelEstimationReport(issues, options.estimation, {
       prs,
       platform: options.platform,
       limit: options.limit,

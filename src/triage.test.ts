@@ -62,8 +62,8 @@ import {
 import { pickupPolicy } from "./ranking.js";
 import { complexityGuidance } from "./complexity.js";
 import { classifyField } from "./complexitysetup.js";
-import { MAX_COMMENT_PAGES, parseProvenance, provenanceComment } from "./estimate.js";
-import type { EstimateProvenance } from "./estimate.js";
+import { parseLabelProvenance, provenanceComment } from "./estimate.js";
+import type { LabelEstimateProvenance } from "./estimate.js";
 import { complexityConfigText, diagnoseComplexityConfig } from "./complexitydoctor.js";
 import {
   classifyComplexityLabels,
@@ -4850,40 +4850,35 @@ describe("config get/set/list/help commands (#117)", () => {
   });
 });
 
-describe("estimate N records a size with provenance (#121)", () => {
+describe("estimate N records a size label with provenance (#152)", () => {
   const root = "/repo";
   const path = join(root, CONFIG_PATH);
   const sha = "a".repeat(40);
-  const mapped = '{"schemaVersion":1,"complexity":{"fieldId":"IF_c"}}\n';
-  const field = {
-    __typename: "IssueFieldSingleSelect",
-    id: "IF_c",
-    name: "Complexity",
-    dataType: "SINGLE_SELECT",
-    visibility: "ALL",
-    options: ["XS", "S", "M", "L", "XL", "XXL"].map((name) => ({ id: `O_${name}`, name })),
-  };
   type Answer = { data: unknown; errors: { type?: string; message?: string }[] };
+  type Label = { id: string; name: string };
   function harness(
     options: {
       config?: string | null;
-      current?: string | null;
+      labels?: string[];
+      /** Repository label definitions beyond those on the ticket. */
+      repoLabels?: string[];
       comments?: string[];
-      fieldNode?: unknown;
+      truncated?: boolean;
       queryErrors?: Answer["errors"];
-      /** Change the remote value after the Nth query (simulates a concurrent writer). */
-      concurrent?: { afterQuery: number; size?: string; comment?: string };
-      /** Fail the Nth older-comments page query with GraphQL errors. */
+      /** Change the ticket after the Nth issue read (a concurrent writer). */
+      concurrent?: { afterQuery: number; labels?: string[]; comment?: string };
+      /** A concurrent writer adds this label just after our label is applied. */
+      afterAdd?: string;
       failPage?: number;
-      failSet?: Answer;
+      createFails?: "denied" | "race";
+      failAdd?: boolean;
+      /** Fail removal of this label name, the first N times. */
+      failRemove?: { name: string; times: number };
       failComment?: boolean;
-      /** Degrade the Nth query: GraphQL errors and/or issueFieldValues missing. */
-      degrade?: { onQuery: number; errors?: Answer["errors"]; dropValues?: boolean };
     } = {},
   ) {
     const files = new Map<string, string>();
-    const config = options.config === undefined ? mapped : options.config;
-    if (config !== null) files.set(path, config);
+    if (options.config) files.set(path, options.config);
     const fs: ConfigFileSystem = {
       readText: async (file) => files.get(file) ?? null,
       writeText: async () => {
@@ -4899,11 +4894,25 @@ describe("estimate N records a size with provenance (#121)", () => {
           ? `${sha}\n`
           : `${root}\n`
         : "origin\thttps://github.com/owner/name.git (fetch)\n";
-    const remote = { current: options.current ?? null, comments: [...(options.comments ?? [])] };
+    let ids = 0;
+    const definitions = new Map<string, Label>();
+    const define = (name: string): Label => {
+      const known = definitions.get(name.toLowerCase());
+      if (known) return known;
+      const created = { id: `LA_${(ids += 1)}`, name };
+      definitions.set(name.toLowerCase(), created);
+      return created;
+    };
+    for (const name of options.repoLabels ?? []) define(name);
+    const remote = {
+      labels: (options.labels ?? ["bug"]).map(define),
+      comments: [...(options.comments ?? [])],
+    };
+    const names = () => remote.labels.map((l) => l.name);
     const mutations: { query: string; vars: Record<string, string> }[] = [];
     let queries = 0;
     let pageQueries = 0;
-    // Comment pages are served newest-last, 100 at a time; a cursor is the start index.
+    let removeFailures = 0;
     const page = (end: number) => {
       const start = Math.max(0, end - 100);
       return {
@@ -4911,30 +4920,22 @@ describe("estimate N records a size with provenance (#121)", () => {
         nodes: remote.comments.slice(start, end).map((body) => ({ body })),
       };
     };
-    const answer = (): Answer => ({
+    const answer = (label: string): Answer => ({
       data: {
-        field: options.fieldNode === undefined ? field : options.fieldNode,
         repository: {
+          id: "R_1",
+          label: definitions.get(label.toLowerCase()) ?? null,
           issue: {
             id: "I_7",
             state: "OPEN",
-            issueFieldValues: {
-              nodes: remote.current
-                ? [
-                    {
-                      __typename: "IssueFieldSingleSelectValue",
-                      name: remote.current,
-                      field: { id: "IF_c" },
-                    },
-                  ]
-                : [],
-            },
+            labels: { pageInfo: { hasNextPage: !!options.truncated }, nodes: [...remote.labels] },
             comments: page(remote.comments.length),
           },
         },
       },
       errors: options.queryErrors ?? [],
     });
+    const ok = (data: unknown): Answer => ({ data, errors: [] });
     const out: string[] = [];
     const call = (...args: string[]) =>
       main(["estimate", "7", ...args, "--no-update-check"], async (t) => void out.push(t), {
@@ -4955,57 +4956,89 @@ describe("estimate N records a size with provenance (#121)", () => {
                 pageQueries += 1;
                 if (options.failPage === pageQueries)
                   return { data: null, errors: [{ type: "INTERNAL", message: "timeout" }] };
-                return {
-                  data: { repository: { issue: { comments: page(Number(vars.before)) } } },
-                  errors: [],
-                };
+                return ok({ repository: { issue: { comments: page(Number(vars.before)) } } });
               }
               queries += 1;
-              const a = answer();
-              const d = options.degrade;
-              if (d && queries === d.onQuery) {
-                if (d.errors) a.errors = d.errors;
-                if (d.dropValues)
-                  delete (a.data as { repository: { issue: Record<string, unknown> } }).repository
-                    .issue.issueFieldValues;
-              }
+              const a = answer(vars.label!);
               const c = options.concurrent;
               if (c && queries === c.afterQuery) {
-                if (c.size) remote.current = c.size;
+                if (c.labels) remote.labels = c.labels.map(define);
                 if (c.comment) remote.comments.push(c.comment);
               }
               return a;
             },
             mutate: async (query, vars) => {
               mutations.push({ query, vars });
-              if (query.includes("setIssueFieldValue")) {
-                if (options.failSet) return options.failSet;
-                remote.current = vars.option!.replace("O_", "");
-                return { data: { setIssueFieldValue: { issue: { id: "I_7" } } }, errors: [] };
+              if (query.includes("createLabel")) {
+                if (options.createFails === "denied")
+                  return { data: null, errors: [{ type: "FORBIDDEN", message: "no write" }] };
+                const label = define(vars.name!);
+                if (options.createFails === "race")
+                  return { data: null, errors: [{ message: "Name has already been taken" }] };
+                return ok({ createLabel: { label } });
+              }
+              if (query.includes("addLabelsToLabelable")) {
+                if (options.failAdd)
+                  return { data: null, errors: [{ type: "FORBIDDEN", message: "no" }] };
+                const label = [...definitions.values()].find((l) => l.id === vars.label)!;
+                remote.labels.push(label);
+                if (options.afterAdd) remote.labels.push(define(options.afterAdd));
+                return ok({ addLabelsToLabelable: { clientMutationId: null } });
+              }
+              if (query.includes("removeLabelsFromLabelable")) {
+                const label = remote.labels.find((l) => l.id === vars.label)!;
+                const f = options.failRemove;
+                if (f && f.name === label.name && removeFailures < f.times) {
+                  removeFailures += 1;
+                  return { data: null, errors: [{ message: "server error" }] };
+                }
+                remote.labels = remote.labels.filter((l) => l.id !== vars.label);
+                return ok({ removeLabelsFromLabelable: { clientMutationId: null } });
               }
               if (options.failComment) throw new Error("network down");
               remote.comments.push(vars.body!);
-              return {
-                data: { addComment: { commentEdge: { node: { url: "https://c/1" } } } },
-                errors: [],
-              };
+              return ok({ addComment: { commentEdge: { node: { url: "https://c/1" } } } });
             },
           },
         },
       });
+    const kinds = () =>
+      mutations.map(
+        (m) =>
+          m.query.match(
+            /(createLabel|addLabelsToLabelable|removeLabelsFromLabelable|addComment)/,
+          )![1],
+      );
     return {
       remote,
+      names,
       mutations,
-      out,
+      kinds,
       call,
+      queries: () => queries,
       pageQueries: () => pageQueries,
       json: () => JSON.parse(out.at(-1)!),
     };
   }
+  const harnessMarker = (size: "L" | "M") =>
+    provenanceComment({
+      schemaVersion: 2,
+      kind: "complexity-estimate",
+      storage: "labels",
+      size,
+      previous: [],
+      rationale: "someone else's estimate",
+      assumptions: [],
+      references: [],
+      estimator: "ana",
+      revision: null,
+      guidanceVersion: 1,
+      recordedAt: "2026-11-13T11:00:00.000Z",
+    });
   const base = ["--size", "M", "--rationale", "few modules; bounded tests", "--json"];
 
-  it("records the native value and versioned provenance without inventing identity", async () => {
-    const t = harness();
+  it("creates only the missing requested label, applies it and records v2 provenance", async () => {
+    const t = harness({ labels: ["bug", "status:ready"] });
     expect(
       await t.call(
         ...base,
@@ -5016,14 +5049,20 @@ describe("estimate N records a size with provenance (#121)", () => {
       ),
     ).toBe(0);
     expect(t.json()).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       kind: "complexity-estimate",
       status: "recorded",
-      previous: null,
-      valueWritten: true,
+      label: "complexity:M",
+      previous: [],
+      labelCreated: true,
+      labelsAdded: ["complexity:M"],
+      labelsRemoved: [],
+      final: { sizes: ["M"] },
       provenanceWritten: true,
       provenance: {
+        storage: "labels",
         size: "M",
+        previous: [],
         estimator: null,
         revision: sha,
         guidanceVersion: complexityGuidance.guidanceVersion,
@@ -5031,222 +5070,263 @@ describe("estimate N records a size with provenance (#121)", () => {
         references: ["#86"],
       },
     });
-    expect(t.remote.current).toBe("M");
-    expect(t.mutations.map((m) => m.query.match(/(setIssueFieldValue|addComment)/)![1])).toEqual([
-      "setIssueFieldValue",
-      "addComment",
-    ]);
-    // Never touches labels, claims or dependencies.
-    expect(t.mutations.some((m) => /label|claim|BlockedBy/i.test(m.query))).toBe(false);
-    const stored = parseProvenance(t.remote.comments[0]!);
-    expect(stored).toMatchObject({ size: "M", rationale: "few modules; bounded tests" });
+    expect(t.json().provenance).not.toHaveProperty("fieldId");
+    expect(t.names()).toEqual(["bug", "status:ready", "complexity:M"]);
+    expect(t.kinds()).toEqual(["createLabel", "addLabelsToLabelable", "addComment"]);
+    expect(t.mutations[0]!.vars).toMatchObject({ name: "complexity:M", repository: "R_1" });
+    // Never touches fields, claims, dependencies or label definitions beyond the one creation.
+    expect(
+      t.mutations.some((m) => /IssueField|updateLabel|BlockedBy|clearLabels/.test(m.query)),
+    ).toBe(false);
+    expect(parseLabelProvenance(t.remote.comments[0]!)).toMatchObject({
+      size: "M",
+      rationale: "few modules; bounded tests",
+    });
   });
-  it("records the estimator only when given", async () => {
-    const t = harness();
+  it("reuses an existing case-equivalent label definition without restyling it", async () => {
+    const t = harness({ repoLabels: ["Complexity:m"] });
     expect(await t.call(...base, "--agent", "kavya")).toBe(0);
+    expect(t.json()).toMatchObject({ labelCreated: false, labelsAdded: ["Complexity:m"] });
     expect(t.json().provenance.estimator).toBe("kavya");
+    expect(t.kinds()).toEqual(["addLabelsToLabelable", "addComment"]);
   });
-  it("is idempotent: the same size and provenance write nothing", async () => {
+  it("replaces a different estimate with only a justification of the new size", async () => {
+    const t = harness({ labels: ["bug", "complexity:S", "agent:ana"] });
+    expect(await t.call(...base)).toBe(0);
+    expect(t.json()).toMatchObject({
+      status: "recorded",
+      previous: ["S"],
+      labelsRemoved: ["complexity:S"],
+      provenance: { previous: ["S"] },
+    });
+    expect(t.names()).toEqual(["bug", "agent:ana", "complexity:M"]);
+    expect(t.remote.comments[0]).toContain("(was S)");
+  });
+  it("replaces a conflicting set and records every observed previous size", async () => {
+    const t = harness({ labels: ["complexity:XL", "bug", "complexity:s"] });
+    expect(await t.call(...base)).toBe(0);
+    expect(t.json()).toMatchObject({ previous: ["S", "XL"], final: { sizes: ["M"] } });
+    expect(t.names()).toEqual(["bug", "complexity:M"]);
+  });
+  it("does not duplicate or talk over an assessment finished concurrently before the final read", async () => {
+    const record = (rationale: string) =>
+      provenanceComment({
+        schemaVersion: 2,
+        kind: "complexity-estimate",
+        storage: "labels",
+        size: "M",
+        previous: ["S"],
+        rationale,
+        assumptions: [],
+        references: [],
+        estimator: null,
+        revision: null,
+        guidanceVersion: 1,
+        recordedAt: "2026-11-13T00:00:00.000Z",
+      });
+    // The matching record appears on the third issue read (the final verification read).
+    const same = harness({
+      labels: ["complexity:S"],
+      concurrent: { afterQuery: 2, comment: record("few modules; bounded tests") },
+    });
+    expect(await same.call(...base)).toBe(0);
+    expect(same.json()).toMatchObject({ status: "unchanged", provenanceWritten: false });
+    expect(same.remote.comments).toHaveLength(1);
+    const other = harness({
+      labels: ["complexity:S"],
+      concurrent: { afterQuery: 2, comment: record("someone else's reasoning") },
+    });
+    expect(await other.call(...base)).toBe(2);
+    expect(other.json()).toMatchObject({ status: "conflict", provenanceWritten: false });
+    expect(other.remote.comments).toHaveLength(1);
+  });
+  it("records only observed sizes when older provenance disagrees with the current label", async () => {
+    // The label was changed by hand from S to M after an S estimate was recorded.
+    const t = harness({ labels: ["complexity:M"] });
+    t.remote.comments.push(
+      provenanceComment({
+        schemaVersion: 2,
+        kind: "complexity-estimate",
+        storage: "labels",
+        size: "S",
+        previous: [],
+        rationale: "older",
+        assumptions: [],
+        references: [],
+        estimator: null,
+        revision: null,
+        guidanceVersion: 1,
+        recordedAt: "2026-11-01T00:00:00.000Z",
+      }),
+    );
+    expect(await t.call(...base)).toBe(0);
+    expect(t.json()).toMatchObject({ previous: ["M"], provenance: { previous: ["M"] } });
+    expect(parseLabelProvenance(t.remote.comments.at(-1)!)?.previous).toEqual(["M"]);
+  });
+  it("tells a partial-write retry to pass --replace so the replaced size is recorded", async () => {
+    const t = harness({ labels: ["complexity:S"], failComment: true });
+    expect(await t.call(...base)).toBe(2);
+    expect(t.json().recovery).toContain("--replace S");
+  });
+  it("is idempotent and reports the stored provenance, not a fresh timestamp", async () => {
+    const t = harness({ labels: ["complexity:M"] });
+    const stored = provenanceComment({
+      schemaVersion: 2,
+      kind: "complexity-estimate",
+      storage: "labels",
+      size: "M",
+      previous: [],
+      rationale: "few modules; bounded tests",
+      assumptions: [],
+      references: [],
+      estimator: null,
+      revision: "b".repeat(40),
+      guidanceVersion: 1,
+      recordedAt: "2026-11-01T00:00:00.000Z",
+    });
+    t.remote.comments.push(stored);
+    expect(await t.call(...base)).toBe(0);
+    expect(t.json()).toMatchObject({
+      status: "unchanged",
+      provenance: { recordedAt: "2026-11-01T00:00:00.000Z", revision: "b".repeat(40) },
+    });
+    expect(t.mutations).toEqual([]);
+  });
+  it("records a new same-size assessment as provenance only", async () => {
     const t = harness();
     await t.call(...base);
     const writes = t.mutations.length;
-    expect(await t.call(...base)).toBe(0);
-    expect(t.json().status).toBe("unchanged");
-    expect(t.mutations.length).toBe(writes);
+    expect(await t.call("--size", "M", "--rationale", "scope grew: new API", "--json")).toBe(0);
+    expect(t.json()).toMatchObject({ status: "recorded", labelsAdded: [], labelsRemoved: [] });
+    expect(t.kinds().slice(writes)).toEqual(["addComment"]);
+    expect(t.remote.comments).toHaveLength(2);
   });
-  it("preserves a different existing estimate unless --replace names it", async () => {
-    const t = harness({ current: "S" });
-    expect(await t.call(...base)).toBe(1);
-    expect(t.json()).toMatchObject({ status: "refused:existing", code: "existing-estimate" });
-    expect(t.json().recovery).toContain("--replace S");
-    expect(t.mutations).toEqual([]);
-    expect(await t.call(...base, "--replace", "S")).toBe(0);
-    expect(t.json()).toMatchObject({
-      status: "recorded",
-      previous: "S",
-      provenance: { previous: "S" },
-    });
-  });
-  it("refuses a stale --replace", async () => {
-    const t = harness({ current: "L" });
+  it("treats --replace as an optional guard, refusing only when it is stale", async () => {
+    const t = harness({ labels: ["complexity:L"] });
     expect(await t.call(...base, "--replace", "S")).toBe(1);
     expect(t.json()).toMatchObject({ status: "refused:stale", code: "stale" });
     expect(t.mutations).toEqual([]);
+    expect(await t.call(...base, "--replace", "L")).toBe(0);
+    expect(t.names()).toEqual(["complexity:M"]);
   });
-  it("does not overwrite a concurrent estimate recorded after the first read", async () => {
-    const t = harness({ concurrent: { afterQuery: 1, size: "XL" } });
-    expect(await t.call(...base)).toBe(1);
-    expect(t.json()).toMatchObject({ status: "refused:stale", code: "concurrent-change" });
-    expect(t.remote.current).toBe("XL");
-    expect(t.mutations).toEqual([]);
-  });
-  it("rereads before a provenance-only write and refuses a concurrent value change", async () => {
-    // Value already M (needs provenance); another writer sets L after the first read.
-    const t = harness({ current: "M", concurrent: { afterQuery: 1, size: "L" } });
-    expect(await t.call(...base)).toBe(1);
-    expect(t.json()).toMatchObject({ status: "refused:stale", code: "concurrent-change" });
-    expect(t.json().recovery).toContain("Re-run");
-    expect(t.mutations).toEqual([]);
-    expect(t.remote.current).toBe("L");
-  });
-  it("refuses a provenance-only write when newer provenance appeared meanwhile", async () => {
-    const other = harness();
-    await other.call(...base, "--agent", "other");
-    const t = harness({
-      current: "M",
-      concurrent: { afterQuery: 1, comment: other.remote.comments[0]! },
-    });
-    expect(await t.call(...base)).toBe(1);
-    expect(t.json()).toMatchObject({ status: "refused:stale", code: "concurrent-change" });
-    expect(t.mutations).toEqual([]);
-  });
-  it("pages back through older comments to find the newest provenance marker", async () => {
-    const seed = harness();
-    await seed.call(...base);
-    const marker = seed.remote.comments[0]!;
-    const filler = Array.from({ length: 250 }, (_, i) => `chatter ${i}`);
-    const t = harness({ current: "M", comments: [marker, ...filler] });
-    expect(await t.call(...base)).toBe(0);
-    expect(t.json().status).toBe("unchanged");
-    expect(t.mutations).toEqual([]);
-    // Bounded: stops once found (2 older pages per read; unchanged needs no reread).
-    expect(t.pageQueries()).toBe(2);
-  });
-  it("treats failed or unbounded comment paging as unknown provenance and writes nothing", async () => {
-    const filler = Array.from({ length: 150 }, (_, i) => `chatter ${i}`);
-    const failed = harness({ current: "M", comments: filler, failPage: 1 });
-    expect(await failed.call(...base)).toBe(2);
-    expect(failed.json()).toMatchObject({
+  it("refuses truncated or errored label reads as unknown and writes nothing", async () => {
+    const truncated = harness({ truncated: true });
+    expect(await truncated.call(...base)).toBe(2);
+    expect(truncated.json()).toMatchObject({
       status: "failed:unknown",
-      code: "provenance-unavailable",
+      code: "labels-unavailable",
     });
-    expect(failed.mutations).toEqual([]);
-    const huge = Array.from({ length: 100 * (MAX_COMMENT_PAGES + 2) }, (_, i) => `c ${i}`);
-    const endless = harness({ current: "M", comments: huge });
-    expect(await endless.call(...base)).toBe(2);
-    expect(endless.json().code).toBe("provenance-unavailable");
-    expect(endless.pageQueries()).toBe(MAX_COMMENT_PAGES);
-    expect(endless.mutations).toEqual([]);
+    const errored = harness({ queryErrors: [{ type: "INTERNAL", message: "timeout" }] });
+    expect(await errored.call(...base)).toBe(2);
+    expect(errored.json().code).toBe("labels-unavailable");
+    expect([...truncated.mutations, ...errored.mutations]).toEqual([]);
   });
-  it("reports a partial write honestly and repairs only provenance on retry", async () => {
-    const t = harness({ failComment: true });
+  it("refuses unrecognized complexity labels instead of guessing", async () => {
+    const t = harness({ labels: ["complexity:huge"] });
+    expect(await t.call(...base)).toBe(1);
+    expect(t.json()).toMatchObject({ code: "unrecognized-label" });
+    expect(t.json().recovery).toContain("--remove-label");
+    expect(t.mutations).toEqual([]);
+  });
+  it("reports permission refusal to create the label without touching the ticket", async () => {
+    const t = harness({ labels: ["complexity:S"], createFails: "denied" });
+    expect(await t.call(...base)).toBe(1);
+    expect(t.json()).toMatchObject({ status: "failed", code: "label-create-denied" });
+    expect(t.json().message).toContain("FORBIDDEN");
+    expect(t.kinds()).toEqual(["createLabel"]);
+    expect(t.names()).toEqual(["complexity:S"]);
+  });
+  it("settles a label-creation race by fresh verification", async () => {
+    const t = harness({ createFails: "race" });
+    expect(await t.call(...base)).toBe(0);
+    expect(t.json()).toMatchObject({ status: "recorded", labelCreated: false });
+    expect(t.names()).toEqual(["bug", "complexity:M"]);
+  });
+  it("refuses when the ticket changes between the first read and the write", async () => {
+    const t = harness({
+      labels: ["complexity:S"],
+      repoLabels: ["complexity:M"],
+      concurrent: { afterQuery: 1, labels: ["complexity:L"] },
+    });
+    expect(await t.call(...base)).toBe(1);
+    expect(t.json()).toMatchObject({ status: "refused:stale", code: "concurrent-change" });
+    expect(t.json().message).toContain("changed from S to L");
+    expect(t.mutations).toEqual([]);
+    const marker = harness({
+      repoLabels: ["complexity:M"],
+      concurrent: { afterQuery: 1, comment: harnessMarker("L") },
+    });
+    expect(await marker.call(...base)).toBe(1);
+    expect(marker.json().code).toBe("concurrent-change");
+  });
+  it("reports a concurrent contradictory size after writing as a conflict, not success", async () => {
+    const t = harness({ afterAdd: "complexity:XL" });
+    expect(await t.call(...base)).toBe(2);
+    expect(t.json()).toMatchObject({
+      status: "conflict",
+      provenanceWritten: false,
+      final: { sizes: ["M", "XL"] },
+    });
+    expect(t.remote.comments).toEqual([]);
+  });
+  it("reports a partial label write honestly and completes it on retry", async () => {
+    const t = harness({
+      labels: ["complexity:S", "complexity:L"],
+      failRemove: { name: "complexity:L", times: 1 },
+    });
     expect(await t.call(...base)).toBe(2);
     expect(t.json()).toMatchObject({
       status: "partial",
-      valueWritten: true,
+      labelsRemoved: ["complexity:S"],
       provenanceWritten: false,
     });
-    expect(t.remote.current).toBe("M");
-    const retry = harness({ current: "M" });
-    expect(await retry.call(...base)).toBe(0);
-    expect(retry.json()).toMatchObject({ status: "recorded", valueWritten: false });
-    expect(retry.mutations.map((m) => m.query.includes("addComment"))).toEqual([true]);
+    expect(t.json().recovery).toContain("re-run the same command");
+    expect(t.names()).toEqual(["complexity:L", "complexity:M"]);
+    expect(await t.call(...base)).toBe(0);
+    expect(t.json()).toMatchObject({ status: "recorded", previous: ["M", "L"] });
+    expect(t.names()).toEqual(["complexity:M"]);
+    expect(t.remote.comments).toHaveLength(1);
   });
-  it("refuses an errored or incomplete value read instead of treating it as unset", async () => {
-    for (const degrade of [
-      { onQuery: 1, dropValues: true },
-      { onQuery: 1, errors: [{ type: "INTERNAL", message: "partial" }] },
-      { onQuery: 2, dropValues: true },
-      { onQuery: 2, errors: [{ type: "INTERNAL", message: "partial" }], dropValues: true },
-    ]) {
-      const t = harness({ current: "S", degrade });
-      // The reread (query 2) is only reached by an authorised replacement.
-      const replace = degrade.onQuery === 2 ? ["--replace", "S"] : [];
-      expect(await t.call(...base, ...replace)).toBe(2);
-      expect(t.json()).toMatchObject({ status: "failed:unknown", code: "value-unavailable" });
-      expect(t.json().recovery).toContain("Retry");
-      expect(t.mutations).toEqual([]);
-      expect(t.remote.current).toBe("S");
-    }
-  });
-  it("retries --replace idempotently after a partial write, repairing only provenance", async () => {
-    const t = harness({ current: "S", failComment: true });
-    expect(await t.call(...base, "--replace", "S")).toBe(2);
-    expect(t.json().status).toBe("partial");
-    const retry = harness({ current: "M", comments: t.remote.comments });
+  it("reports a failed comment as partial and adds only provenance on retry", async () => {
+    const t = harness({ labels: ["complexity:S"], failComment: true });
+    expect(await t.call(...base)).toBe(2);
+    expect(t.json()).toMatchObject({ status: "partial", provenanceWritten: false });
+    expect(t.names()).toEqual(["complexity:M"]);
+    const retry = harness({ labels: ["complexity:M"] });
     expect(await retry.call(...base, "--replace", "S")).toBe(0);
-    expect(retry.json()).toMatchObject({
-      status: "recorded",
-      valueWritten: false,
-      provenance: { previous: "S" },
-    });
-    expect(retry.mutations.map((m) => m.query.includes("addComment"))).toEqual([true]);
-    const conflict = harness({ current: "L" });
-    expect(await conflict.call(...base, "--replace", "S")).toBe(1);
-    expect(conflict.json().code).toBe("stale");
+    expect(retry.json()).toMatchObject({ status: "recorded", provenance: { previous: ["S"] } });
+    expect(retry.kinds()).toEqual(["addComment"]);
   });
-  it("records new provenance when only the estimator identity changes", async () => {
-    const t = harness();
+  it("pages back through older comments for provenance; failed paging is unknown", async () => {
+    const t = harness({ labels: ["complexity:M"] });
     await t.call(...base);
-    const sets = () => t.mutations.filter((m) => m.query.includes("setIssueFieldValue")).length;
-    expect(await t.call(...base, "--agent", "kavya")).toBe(0);
-    expect(t.json()).toMatchObject({
-      status: "recorded",
-      valueWritten: false,
-      provenance: { estimator: "kavya" },
-    });
-    expect(sets()).toBe(1);
-    expect(parseProvenance(t.remote.comments.at(-1)!)?.estimator).toBe("kavya");
-    expect(await t.call(...base, "--agent", "kavya")).toBe(0);
-    expect(t.json().status).toBe("unchanged");
-  });
-  it("reports the stored provenance, not a new timestamp or revision, when unchanged", async () => {
-    const t = harness();
-    await t.call(...base);
-    const stored = t.remote.comments.at(-1)!;
-    const first = parseProvenance(stored)!;
-    expect(first.revision).toBe(sha);
-    const older = stored
-      .replaceAll(first.recordedAt, "2026-01-01T00:00:00.000Z")
-      .replaceAll(sha, "b".repeat(40));
-    t.remote.comments[t.remote.comments.length - 1] = older;
+    for (let i = 0; i < 150; i += 1) t.remote.comments.push(`chatter ${i}`);
+    const writes = t.mutations.length;
     expect(await t.call(...base)).toBe(0);
     expect(t.json().status).toBe("unchanged");
-    expect(t.json().provenance).toEqual(parseProvenance(older));
-    expect(JSON.stringify(t.json().provenance)).not.toContain(sha);
-  });
-  it("reports API denial of the value write without claiming success", async () => {
-    const t = harness({ failSet: { data: null, errors: [{ type: "FORBIDDEN", message: "no" }] } });
-    expect(await t.call(...base)).toBe(1);
-    expect(t.json()).toMatchObject({ status: "failed", code: "api-denied" });
-    expect(t.json().message).toContain("FORBIDDEN");
-    expect(t.remote.comments).toEqual([]);
-  });
-  it("gives opt-in and setup guidance when disabled or unmapped, without remote calls", async () => {
-    const off = harness({ config: '{"schemaVersion":1,"complexity":{"enabled":false}}\n' });
-    expect(await off.call(...base)).toBe(2);
-    expect(off.json()).toMatchObject({
-      status: "disabled",
-      recovery: "Opt in with: github-triage config set complexity.enabled true",
+    expect(t.pageQueries()).toBe(1);
+    expect(t.mutations.length).toBe(writes);
+    const failing = harness({
+      comments: Array.from({ length: 150 }, (_, i) => `chatter ${i}`),
+      failPage: 1,
     });
-    const unset = harness({ config: null });
-    expect(await unset.call(...base)).toBe(2);
-    expect(unset.json()).toMatchObject({ status: "setup-required", code: "not-configured" });
-    expect(unset.json().recovery).toContain("github-triage setup complexity");
-    expect([...off.mutations, ...unset.mutations]).toEqual([]);
+    expect(await failing.call(...base)).toBe(2);
+    expect(failing.json().code).toBe("provenance-unavailable");
+    expect(failing.mutations).toEqual([]);
   });
-  it("distinguishes a forbidden or incompatible field and never writes", async () => {
-    const forbidden = harness({
-      fieldNode: null,
-      queryErrors: [{ type: "FORBIDDEN", message: "x" }],
-    });
-    expect(await forbidden.call(...base)).toBe(2);
-    expect(forbidden.json()).toMatchObject({
-      status: "setup-required:inaccessible",
-      code: "field-forbidden",
-    });
-    const wrong = harness({ fieldNode: { ...field, options: field.options.slice(0, 3) } });
-    expect(await wrong.call(...base)).toBe(2);
-    expect(wrong.json()).toMatchObject({ status: "setup-required:incompatible" });
-    expect([...forbidden.mutations, ...wrong.mutations]).toEqual([]);
+  it("gives opt-in guidance when disabled, without remote calls", async () => {
+    const t = harness({ config: '{"schemaVersion":1,"complexity":{"enabled":false}}\n' });
+    expect(await t.call(...base)).toBe(2);
+    expect(t.json()).toMatchObject({ status: "disabled" });
+    expect(t.queries()).toBe(0);
   });
   it("keeps the provenance marker safe inside an HTML comment and ignores forgeries", () => {
-    const p: EstimateProvenance = {
-      schemaVersion: 1,
+    const p: LabelEstimateProvenance = {
+      schemaVersion: 2,
       kind: "complexity-estimate",
-      fieldId: "IF_c",
+      storage: "labels",
       size: "S",
-      previous: null,
+      previous: ["M"],
       rationale: "ends --> early? <b>",
       assumptions: [],
       references: [],
@@ -5256,10 +5336,16 @@ describe("estimate N records a size with provenance (#121)", () => {
       recordedAt: "2026-11-13T12:00:00.000Z",
     };
     const body = provenanceComment(p);
-    expect(body.split("-->")[0]).toContain("recordedAt"); // the marker ends only at its own close
-    expect(parseProvenance(body)).toEqual(p);
+    expect(body.split("-->")[0]).toContain("recordedAt");
+    expect(parseLabelProvenance(body)).toEqual(p);
     expect(
-      parseProvenance('<!-- github-triage:complexity-estimate v1 {"size":"HUGE"} -->'),
+      parseLabelProvenance('<!-- github-triage:complexity-estimate v2 {"size":"HUGE"} -->'),
+    ).toBeNull();
+    // Field-era (v1) records are not label provenance.
+    expect(
+      parseLabelProvenance(
+        '<!-- github-triage:complexity-estimate v1 {"kind":"complexity-estimate","fieldId":"F","size":"S","rationale":"x"} -->',
+      ),
     ).toBeNull();
   });
 });
@@ -5663,10 +5749,9 @@ describe("Ticket Doctor: complexity configuration (#120)", () => {
   });
 });
 
-describe("estimation queue and briefing visibility (#122)", () => {
+describe("estimation queue and briefing visibility from size labels (#122, #152)", () => {
   const root = "/repo";
   const path = join(root, CONFIG_PATH);
-  const field = "IF_size";
   const config = (text: string | null): ConfigFileSystem => ({
     readText: async (file) => (file === path ? text : null),
     writeText: async () => undefined,
@@ -5676,82 +5761,22 @@ describe("estimation queue and briefing visibility (#122)", () => {
   });
   const git: GitRunner = async (args) =>
     args[0] === "rev-parse" ? `${root}\n` : `origin\thttps://github.com/${repo}.git (fetch)\n`;
-  const mapped = `{"schemaVersion":1,"complexity":{"fieldId":"${field}"}}\n`;
-  const valuesAnswer = (values: Record<number, string | null>) => ({
-    data: {
-      repository: {
-        issues: {
-          pageInfo: { hasNextPage: false, endCursor: null },
-          nodes: Object.entries(values).map(([number, name]) => ({
-            number: Number(number),
-            issueFieldValues: {
-              nodes: name
-                ? [{ __typename: "IssueFieldSingleSelectValue", name, field: { id: field } }]
-                : [],
-            },
-          })),
-        },
-      },
+  /** The briefing never reaches GitHub for sizes: any field/API call fails the test. */
+  const api = {
+    query: async () => {
+      throw new Error("briefing must not query sizes");
     },
-    errors: [],
-  });
-  const sizeOptions = ["XS", "S", "M", "L", "XL", "XXL"].map((name) => ({ name }));
-  const sizeField = {
-    __typename: "IssueFieldSingleSelect",
-    id: field,
-    name: "Complexity",
-    dataType: "SINGLE_SELECT",
-    visibility: "ALL",
-    options: sizeOptions,
-  };
-  /** Owner issue-field discovery answer (Ticket Doctor's verification query). */
-  const discoveryOf = (
-    fields: unknown[] | null,
-    errors: { type?: string; message?: string }[] = [],
-  ) => ({
-    data: {
-      viewer: { login: "owner" },
-      repository: {
-        owner: {
-          __typename: "User",
-          id: "U_1",
-          login: "owner",
-          issueFields: fields ? { pageInfo: { hasNextPage: false }, nodes: fields } : null,
-        },
-      },
+    mutate: async () => {
+      throw new Error("briefing must never mutate");
     },
-    errors,
-  });
-  const apiOf = (answer: unknown, discovery: unknown = discoveryOf([sizeField])) => {
-    /** Native value queries only; field verification is recorded separately. */
-    const calls: unknown[] = [];
-    const verifications: unknown[] = [];
-    return {
-      calls,
-      verifications,
-      api: {
-        query: async (q: string, v: Record<string, string>) => {
-          if (q.includes("issueFields(")) {
-            verifications.push(v);
-            return discovery as { data: unknown; errors: { type?: string; message?: string }[] };
-          }
-          calls.push(v);
-          if (answer instanceof Error) throw answer;
-          return answer as { data: unknown; errors: { type?: string; message?: string }[] };
-        },
-        mutate: async () => {
-          throw new Error("briefing must never mutate");
-        },
-      },
-    };
   };
   const marker = (size: "M" | "S", recordedAt = time, guidanceVersion = 1) =>
     provenanceComment({
-      schemaVersion: 1,
+      schemaVersion: 2,
       kind: "complexity-estimate",
-      fieldId: field,
+      storage: "labels",
       size,
-      previous: null,
+      previous: [],
       rationale: "contained capability across modules",
       assumptions: ["blocker #9 supplies the API; waiting excluded"],
       references: [],
@@ -5760,18 +5785,19 @@ describe("estimation queue and briefing visibility (#122)", () => {
       guidanceVersion,
       recordedAt,
     });
+  const sized = (number: number, labels: string[], truncated = false): Issue => ({
+    ...issue(number, labels),
+    labels: page(
+      labels.map((name) => ({ name })),
+      truncated,
+      truncated ? "c" : null,
+    ),
+  });
   const withComment = (item: Issue, body: string): Issue => ({
     ...item,
     comments: page([{ body, url: `${item.url}#c`, author: null, createdAt: time }]),
   });
-  async function brief(
-    configText: string | null,
-    answer: unknown,
-    issues: Issue[],
-    args: string[] = [],
-    discovery?: unknown,
-  ) {
-    const { api, calls } = apiOf(answer, discovery);
+  async function brief(configText: string | null, issues: Issue[], args: string[] = []) {
     let out = "";
     const code = await main(["--json", ...args], async (t) => void (out = t), {
       collect: async () => snapshot(issues, []),
@@ -5779,22 +5805,25 @@ describe("estimation queue and briefing visibility (#122)", () => {
       now: () => new Date(time),
       estimation: { fs: config(configText), git, cwd: root, api },
     });
-    return { code, report: JSON.parse(out), calls };
+    return { code, report: JSON.parse(out) };
   }
   const blocked = (): Issue => ({
     ...issue(2),
     issueDependenciesSummary: { blockedBy: 1, totalBlockedBy: 1, blocking: 0, totalBlocking: 0 },
   });
 
-  it("queues unestimated blocked tickets while they stay ineligible for implementation", async () => {
-    const { code, report, calls } = await brief(mapped, valuesAnswer({ 1: "M", 2: null }), [
-      withComment(issue(1), marker("M")),
+  it("queues unestimated blocked tickets with no setup, while they stay ineligible", async () => {
+    const { code, report } = await brief(null, [
+      withComment(sized(1, ["status:ready", "complexity:M"]), marker("M")),
       blocked(),
     ]);
     expect(code).toBe(0);
-    expect(calls).toHaveLength(1);
     expect(report.schemaVersion).toBe(2);
-    expect(report.estimation).toMatchObject({ status: "available", requested: false });
+    expect(report.estimation).toMatchObject({
+      status: "available",
+      requested: false,
+      findings: [],
+    });
     expect(report.estimation.queue.items.map((e: { number: number }) => e.number)).toEqual([2]);
     expect(report.estimation.queue.items[0]).toMatchObject({
       state: "unestimated",
@@ -5806,16 +5835,18 @@ describe("estimation queue and briefing visibility (#122)", () => {
       state: "estimated",
       recorded: { rationale: "contained capability across modules", estimator: "ana" },
     });
-    // Eligible pickup still comes first; estimation is not offered automatically.
     expect(report.actions.items[0]).toBe(issue(1).url);
     expect(report.estimation.offered).toBe(false);
   });
-  it("flags stale estimates: value drift, older guidance or later description edits", async () => {
-    const edited = { ...withComment(issue(1), marker("M")), lastEditedAt: "2026-11-13T00:00:00Z" };
-    const { report } = await brief(mapped, valuesAnswer({ 1: "M", 2: "L", 3: "S" }), [
+  it("flags stale estimates: label drift, older guidance or later description edits", async () => {
+    const edited = {
+      ...withComment(sized(1, ["complexity:M"]), marker("M")),
+      lastEditedAt: "2026-11-13T00:00:00Z",
+    };
+    const { report } = await brief(null, [
       edited,
-      withComment(issue(2), marker("M")),
-      withComment(issue(3), marker("S", time, 0)),
+      withComment(sized(2, ["complexity:L"]), marker("M")),
+      withComment(sized(3, ["complexity:S"]), marker("S", time, 0)),
     ]);
     const states = report.estimation.queue.items.map(
       (e: { number: number; state: string; reasons: string[] }) => [
@@ -5830,106 +5861,55 @@ describe("estimation queue and briefing visibility (#122)", () => {
       [3, "stale", expect.stringContaining("guidance version 0 < 1")],
     ]);
   });
-  it("treats unreadable native values (FORBIDDEN) as unknown, never unestimated, and still succeeds", async () => {
-    const forbidden = { data: null, errors: [{ type: "FORBIDDEN", message: "not enabled" }] };
-    const { code, report } = await brief(mapped, forbidden, [
-      withComment(issue(1), marker("M")),
-      blocked(),
+  it("keeps truncated labels unknown and conflicting labels as inspection, never queued", async () => {
+    const { code, report } = await brief(null, [
+      sized(1, ["status:ready"], true),
+      sized(2, ["complexity:S", "complexity:XL"]),
+      sized(3, []),
     ]);
     expect(code).toBe(0);
-    expect(report.estimation).toMatchObject({ status: "unknown", queue: null, unknown: 2 });
-    expect(report.estimation.detail).toContain("FORBIDDEN");
+    expect(report.estimation).toMatchObject({ status: "available", unknown: 1 });
+    expect(report.estimation.queue.items.map((e: { number: number }) => e.number)).toEqual([3]);
+    expect(report.estimation.conflicts.items.map((e: { number: number }) => e.number)).toEqual([2]);
+  });
+  it("ignores field-era provenance records on the label route", async () => {
+    const v1 =
+      '<!-- github-triage:complexity-estimate v1 {"kind":"complexity-estimate","fieldId":"F","size":"M","rationale":"old"} -->';
+    const { report } = await brief(null, [withComment(sized(1, ["complexity:M"]), v1)]);
     const one = report.subjects.find((s: { number: number }) => s.number === 1);
-    expect(one.complexity).toMatchObject({ state: "unknown", size: null, recorded: { size: "M" } });
-    const thrown = await brief(mapped, new Error("network down"), [issue(1)]);
-    expect(thrown.code).toBe(0);
-    expect(thrown.report.estimation.status).toBe("unknown");
+    expect(one.complexity).toMatchObject({ state: "estimated", recorded: null });
   });
-  it("keeps the queue unavailable when the mapped field is deleted, incompatible or inaccessible", async () => {
-    const issues = [issue(1), blocked()];
-    // The values query succeeds with no matching values: without verification every
-    // issue would wrongly be queued as unestimated.
-    const empty = valuesAnswer({ 1: null, 2: null });
-    const other = { ...sizeField, id: "IF_other" };
-    const deleted = await brief(mapped, empty, issues, [], discoveryOf([other]));
-    expect(deleted.report.estimation).toMatchObject({ status: "missing", queue: null, unknown: 2 });
-    expect(deleted.report.estimation.findings[0]).toMatchObject({
-      rule: "complexity-field-missing",
-      next: [
-        "github-triage setup complexity --select IF_other",
-        "github-triage config set complexity.enabled false",
-      ],
-    });
-    const wrong = { ...sizeField, options: sizeOptions.slice(0, 3) };
-    const incompatible = await brief(mapped, empty, issues, [], discoveryOf([wrong]));
-    expect(incompatible.report.estimation).toMatchObject({ status: "incompatible", queue: null });
-    expect(incompatible.report.estimation.findings[0].rule).toBe("complexity-field-incompatible");
-    const forbidden = discoveryOf(null, [{ type: "FORBIDDEN", message: "no" }]);
-    const inaccessible = await brief(mapped, empty, issues, [], forbidden);
-    expect(inaccessible.report.estimation).toMatchObject({ status: "inaccessible", queue: null });
-    expect(inaccessible.report.estimation.findings[0]).toMatchObject({
-      rule: "complexity-field-api-inaccessible",
-      next: ["github-triage setup complexity", "github-triage config set complexity.enabled false"],
-    });
-    for (const r of [deleted, incompatible, inaccessible]) {
-      expect(r.code).toBe(0);
-      expect(r.calls).toEqual([]);
-      const subject = r.report.subjects.find((s: { number: number }) => s.number === 2);
-      expect(subject.complexity.state).toBe("unknown");
-    }
-  });
-  it("suppresses the queue when disabled and reports a missing mapping as a finding", async () => {
-    const disabled = await brief(
-      '{"schemaVersion":1,"complexity":{"enabled":false,"fieldId":"x"}}',
-      valuesAnswer({}),
-      [issue(1)],
-    );
-    expect(disabled.calls).toEqual([]);
+  it("suppresses the queue only when complexity is explicitly disabled", async () => {
+    const disabled = await brief('{"schemaVersion":1,"complexity":{"enabled":false}}', [
+      sized(1, []),
+    ]);
     expect(disabled.report.estimation).toMatchObject({ status: "disabled", queue: null });
-    const unmapped = await brief(null, valuesAnswer({}), [issue(1)]);
-    expect(unmapped.calls).toEqual([]);
-    expect(unmapped.report.estimation).toMatchObject({ status: "setup-required", queue: null });
-    expect(unmapped.report.estimation.findings[0]).toMatchObject({
-      rule: "complexity-field-unmapped",
-      next: ["github-triage setup complexity", "github-triage config set complexity.enabled false"],
-    });
   });
   it("offers estimation only without higher-priority work, or first on --estimate", async () => {
-    const idle = await brief(mapped, valuesAnswer({ 2: null }), [blocked()]);
+    const idle = await brief(null, [blocked()]);
     expect(idle.report.estimation.offered).toBe(true);
-    const { api } = apiOf(valuesAnswer({ 1: null, 2: null }));
-    let text = "";
-    await main(["--estimate"], async (t) => void (text = t), {
+    const runtime = {
       collect: async () => snapshot([issue(1), blocked()], []),
       currentRepository: async () => repo,
       now: () => new Date(time),
-      estimation: { fs: config(mapped), git, cwd: root, api },
-    });
+      estimation: { fs: config(null), git, cwd: root, api },
+    };
+    let text = "";
+    await main(["--estimate"], async (t) => void (text = t), runtime);
     expect(text.indexOf("ESTIMATION (requested)")).toBeGreaterThan(0);
     expect(text.indexOf("ESTIMATION (requested)")).toBeLessThan(text.indexOf("NEXT STEPS"));
     expect(text).toContain("unestimated [unestimated]; implementation ineligible");
     expect(text).toContain("acquires no claim");
     let full = "";
-    await main(["--estimate", "--full"], async (t) => void (full = t), {
-      collect: async () => snapshot([issue(1), blocked()], []),
-      currentRepository: async () => repo,
-      now: () => new Date(time),
-      estimation: { fs: config(mapped), git, cwd: root, api },
-    });
+    await main(["--estimate", "--full"], async (t) => void (full = t), runtime);
     expect(full.indexOf("ESTIMATION (requested)")).toBeGreaterThan(0);
     expect(full.indexOf("ESTIMATION (requested)")).toBeLessThan(full.indexOf("NEXT ACTIONS"));
     let plain = "";
-    await main([], async (t) => void (plain = t), {
-      collect: async () => snapshot([issue(1), blocked()], []),
-      currentRepository: async () => repo,
-      now: () => new Date(time),
-      estimation: { fs: config(mapped), git, cwd: root, api },
-    });
+    await main([], async (t) => void (plain = t), runtime);
     expect(plain.indexOf("ESTIMATION (optional")).toBeGreaterThan(plain.indexOf("NEXT STEPS"));
     expect(plain).toContain("#1 Ticket 1  (unestimated)");
   });
-  it("reports offline briefings as unknown without querying, and keeps --full in sync", async () => {
-    const { api, calls } = apiOf(valuesAnswer({ 1: null }));
+  it("reads sizes from cached labels offline, and keeps --full in sync", async () => {
     const dir = await mkdtemp(join(tmpdir(), "triage-estimation-"));
     try {
       const cache = join(dir, "cache.json");
@@ -5940,10 +5920,12 @@ describe("estimation queue and briefing visibility (#122)", () => {
           throw new Error("offline only");
         },
         currentRepository: async () => repo,
-        estimation: { fs: config(mapped), git, cwd: root, api },
+        estimation: { fs: config(null), git, cwd: root, api },
       });
-      expect(calls).toEqual([]);
-      expect(JSON.parse(out).estimation).toMatchObject({ status: "unknown", queue: null });
+      expect(JSON.parse(out).estimation).toMatchObject({
+        status: "available",
+        queue: { items: [{ number: 1, state: "unestimated" }] },
+      });
       expect(JSON.parse(out).schemaVersion).toBe(1);
     } finally {
       await rm(dir, { recursive: true });
@@ -9093,11 +9075,11 @@ describe("label-backed complexity classification and prepared reader (#151)", ()
   });
   const marker = (size: "M" | "S", recordedAt = time) =>
     provenanceComment({
-      schemaVersion: 1,
+      schemaVersion: 2,
       kind: "complexity-estimate",
-      fieldId: "",
+      storage: "labels",
       size,
-      previous: null,
+      previous: [],
       rationale: "contained capability",
       assumptions: [],
       references: [],
@@ -9141,6 +9123,33 @@ describe("label-backed complexity classification and prepared reader (#151)", ()
     });
   });
 
+  it("Ticket Doctor reports conflicting size labels via the shared classifier, never unestimated", () => {
+    const r = ticketDoctor(
+      snapshot(
+        [
+          labelled(1, ["bug", "status:ready", "complexity:S", "complexity:XL"]),
+          labelled(2, ["bug", "status:ready"]),
+          labelled(3, ["bug", "status:ready", "complexity:M"]),
+        ],
+        [],
+      ),
+      { now: new Date(time) },
+    );
+    const complexity = r.tickets.flatMap((t) =>
+      t.findings.filter((f) => f.kind.startsWith("complexity")).map((f) => [t.number, f]),
+    );
+    expect(complexity).toHaveLength(1);
+    expect(complexity[0]).toMatchObject([
+      1,
+      { kind: "complexity-label-conflict", certainty: "definite", plan: { judgment: true } },
+    ]);
+    const [, finding] = complexity[0] as [number, { plan: { steps: { argv: string[] }[] } }];
+    expect(finding.plan.steps.map((x) => x.argv.slice(1, 3))).toEqual([
+      ["--issue", "1"],
+      ["estimate", "1"],
+    ]);
+    expect(r.configuration).toBeUndefined();
+  });
   it("treats truncated label pages as unknown, never unestimated", () => {
     expect(classifyComplexityLabels(labelled(1, ["status:ready"], true)).state).toBe("unknown");
     expect(classifyComplexityLabels(labelled(1, ["complexity:M"], true)).state).toBe("unknown");

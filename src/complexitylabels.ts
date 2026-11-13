@@ -10,10 +10,10 @@
  * `complexity:` prefix but an unrecognized suffix is also a conflict. A truncated label page is
  * unknown, never unestimated. A conflict never chooses a size.
  *
- * Rollout (#151 -> #152 -> #153): this module is the classifier the label writer shares and the
- * reader the production queue/briefing routes will consume. It is deliberately not wired into
- * production reads yet; #152 switches the writer and the read routes together, so there is never
- * a dual authoritative read or a backend setting.
+ * Rollout (#151 -> #152 -> #153): this module is the classifier the label writer (estimate.ts)
+ * shares and the reader the production briefing/estimation queue and Ticket Doctor consume. #152
+ * switched the writer and those read routes together, so there is never a dual authoritative read
+ * or a backend setting; #153 deletes the retired field code.
  */
 import { COMPLEXITY_SIZES } from "./complexity.js";
 import type { ComplexitySize } from "./complexity.js";

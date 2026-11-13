@@ -8,7 +8,7 @@ import {
   SYNTHETIC_ROOT,
 } from "../scripts/benchmark-isolation.js";
 import { resolveGuideSetting } from "./process.js";
-import { collectEstimationInput } from "./estimation.js";
+import { collectLabelEstimationInput } from "./complexitylabels.js";
 
 describe("benchmark isolation (scripts/mcp-benchmark.ts)", () => {
   it("forbids subprocesses, including through ESM named imports, and restores them", () => {
@@ -34,8 +34,8 @@ describe("benchmark isolation (scripts/mcp-benchmark.ts)", () => {
       const local = { cwd: SYNTHETIC_ROOT, fs: emptyFileSystem, git: fakeGit("example/project") };
       const guide = await resolveGuideSetting("example/project", undefined, local);
       expect(guide).toEqual({ enabled: true, source: "default", diagnostics: [] });
-      const estimation = await collectEstimationInput("example/project", {}, local);
-      expect(estimation.status).toBe("setup-required");
+      const estimation = await collectLabelEstimationInput("example/project", local);
+      expect(estimation.status).toBe("available");
       assertNoLocalPaths("estimation", JSON.stringify(estimation));
     } finally {
       restore();

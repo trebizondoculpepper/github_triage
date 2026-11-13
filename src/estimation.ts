@@ -29,7 +29,7 @@ import type { ConfigFileSystem, GitRunner } from "./config.js";
 import { diagnoseComplexityConfig } from "./complexitydoctor.js";
 import { ghFieldApi } from "./complexitysetup.js";
 import type { FieldApi, GraphqlAnswer } from "./complexitysetup.js";
-import { parseProvenance } from "./estimate.js";
+import { parseLabelProvenance, parseProvenance } from "./estimate.js";
 import { prop } from "./github.js";
 import { pickupEligibility } from "./ranking.js";
 import type { PickupContext } from "./ranking.js";
@@ -262,8 +262,9 @@ export interface EstimationReport {
 function newestRecord(issue: Issue, fieldId: string | null): RecordedEstimate | null | undefined {
   let found: RecordedEstimate | null = null;
   for (const comment of issue.comments.nodes) {
-    const p = parseProvenance(comment.body);
-    if (p && (!fieldId || p.fieldId === fieldId))
+    // Label-backed reads (no field) accept only v2 label provenance, never field-era records.
+    const p = fieldId ? parseProvenance(comment.body) : parseLabelProvenance(comment.body);
+    if (p && (!fieldId || ("fieldId" in p && p.fieldId === fieldId)))
       found = {
         size: p.size,
         rationale: p.rationale,
@@ -293,7 +294,7 @@ export interface SizeSource {
   fieldId: string | null;
   unavailable: string | null;
   findings: EstimationFinding[];
-  /** Restrict provenance markers to this field; null accepts any marker. */
+  /** Restrict provenance markers to this field; null reads label-backed (v2) markers only. */
   provenanceFieldId: string | null;
   /** Human noun for the authoritative size evidence, e.g. "native value". */
   evidence: string;

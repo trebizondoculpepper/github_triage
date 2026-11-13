@@ -12,7 +12,7 @@ import type { DependencyReport } from "./dependencies.js";
 import { compactBriefing, compactText } from "./compact.js";
 import { briefing, textReport } from "./briefing.js";
 import type { BriefingOptions } from "./briefing.js";
-import { collectEstimationInput } from "./estimation.js";
+import { collectLabelEstimationInput } from "./complexitylabels.js";
 import type { EstimationRuntime } from "./estimation.js";
 import type { Snapshot } from "./types.js";
 import { briefingProcess, resolveGuideSetting } from "./process.js";
@@ -45,11 +45,8 @@ export async function presentBriefing(
   now: Date = new Date(),
   redactDiagnostic?: (text: string) => string,
 ): Promise<PresentedBriefing> {
-  const collected = await collectEstimationInput(
-    snapshot.repository,
-    { offline: !!options.offline },
-    estimationRuntime,
-  );
+  // Sizes come from the snapshot's labels (#152); only configuration is read here.
+  const collected = await collectLabelEstimationInput(snapshot.repository, estimationRuntime);
   // Locally generated configuration diagnostics may name local directories; a remote front end
   // rewrites only these strings, never GitHub-authored evidence. The CLI passes no rewriter.
   const estimation = redactDiagnostic

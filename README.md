@@ -115,12 +115,11 @@ Use the configuration commands from the target checkout instead of editing confi
 github-triage config list
 github-triage config help
 github-triage estimate --help
-github-triage setup complexity
 ```
 
-Complexity is enabled by default, with bundled XS–XXL guidance. Setup lets you choose a compatible native field or explicitly create one, explaining its account/organization-wide ownership first. Repository settings and calibration remain repository-specific. Disable the feature with `github-triage config set complexity.enabled false`.
+Complexity is enabled by default, with bundled XS–XXL guidance. Sizes are repository labels `complexity:XS`–`complexity:XXL`: `estimate N --size S --rationale TEXT` creates the requested label if missing, replaces other size labels and records provenance in a comment, and the briefing's estimation queue reads the labels with no setup. Repository calibration remains repository-specific. Disable the feature with `github-triage config set complexity.enabled false`.
 
-Estimate recording and the estimation queue are separate deliveries; guidance alone does not mean those operations are available. Check installed help before using them. See the [usage guide](doc/usage.md) for setup, workflow mutations, caching and offline reports.
+See the [usage guide](doc/usage.md) for estimates, workflow mutations, caching and offline reports.
 
 ## Contribute
 
@@ -140,4 +139,4 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for contribution requirements and the [d
 
 [MIT](LICENSE).
 
-Complexity storage is changing to repository labels (`complexity:XS`–`complexity:XXL`); native-field setup above describes the current implementation and is being retired. See the [replacement contract](doc/design/complexity-estimation.md). No field migration or separate field permissions are planned.
+Complexity is stored in repository labels (`complexity:XS`–`complexity:XXL`); the retired native-field `setup complexity` command is no longer needed and will be removed (#153). See the [contract](doc/design/complexity-estimation.md). No field migration or separate field permissions are needed.
