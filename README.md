@@ -41,6 +41,8 @@ github-triage --repo owner/repository
 
 Use `@next` to opt into development prereleases, or `@VERSION` to pin a release. One executable serves multiple checkouts; project identity/configuration stays project-specific. The first registry publications are prereleases; see the [release contract](doc/npm-releases.md) for channels and official-release policy. Running the source checkout remains useful for development.
 
+The owner-approved release policy is explicit `npm run prerelease` for `next` and `npm run release` for `latest`; main builds should verify only. This change is pending implementation in #79: the current publishing workflow still automatically publishes prereleases on main pushes. See the [release contract](doc/npm-releases.md) before requesting or changing publication.
+
 See the [usage guide](doc/usage.md) for ticket intake, dependencies, catch-up, cache/offline behavior and exit codes. The [design handoff](doc/design/README.md) describes planned role, workflow, doctor, MCP and update features; it does not claim those commands already exist.
 
 ## Supported runtimes
