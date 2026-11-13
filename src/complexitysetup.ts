@@ -141,7 +141,10 @@ export function classifyField(node: unknown): DiscoveredField | null {
   const visibility = prop(node, "visibility");
   let reason = "single-select with exactly XS, S, M, L, XL, XXL";
   if (dataType !== "SINGLE_SELECT") reason = `type ${dataType}, not SINGLE_SELECT`;
-  else if (options.join() !== COMPLEXITY_SIZES.join())
+  else if (
+    options.length !== COMPLEXITY_SIZES.length ||
+    options.some((option, index) => option !== COMPLEXITY_SIZES[index])
+  )
     reason = `options ${options.join(", ") || "(none)"}; expected ${COMPLEXITY_SIZES.join(", ")} in order`;
   return {
     id,
@@ -425,7 +428,22 @@ export async function runSetup(
     return await save(chosen, false);
 
     async function save(field: DiscoveredField, created: boolean): Promise<number> {
-      const write = await updateConfig(target, new Map([["complexity.fieldId", field.id]]), { fs });
+      let write;
+      try {
+        write = await updateConfig(target, new Map([["complexity.fieldId", field.id]]), {
+          fs,
+          // Refuse if the file changed since it was read and shown at the start of setup.
+          expectedRaw: config.raw,
+        });
+      } catch (error) {
+        if (error instanceof ConfigError && error.code === "conflict")
+          throw new ConfigError(
+            "conflict",
+            `${CONFIG_PATH} changed while setup was running (complexity.fieldId may have been set elsewhere); nothing was overwritten.`,
+            "Re-run github-triage setup complexity to review the current mapping.",
+          );
+        throw error;
+      }
       result.mappedFieldId = field.id;
       result.changed = write.changed;
       lines.push(

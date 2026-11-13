@@ -422,12 +422,25 @@ export interface WriteOptions {
   readonly schema?: ConfigSchema;
   /** Unique suffix for the temporary file; injected for deterministic tests. */
   readonly token?: () => string;
+  /**
+   * Optional precondition: the raw file text (null when absent) the caller observed earlier,
+   * e.g. what it showed an operator before a slow step. When given and the file no longer
+   * matches, the update is refused with a conflict instead of applying to newer contents.
+   */
+  readonly expectedRaw?: string | null;
 }
 
 export interface WriteResult {
   readonly changed: boolean;
   readonly config: LoadedConfig;
 }
+
+const conflict = (): ConfigError =>
+  new ConfigError(
+    "conflict",
+    `${CONFIG_PATH} changed while this update was being prepared.`,
+    "Review the new contents and retry the command; nothing was overwritten.",
+  );
 
 /**
  * Validate and apply changes to a verified repository, migrating supported older schemas.
@@ -443,6 +456,7 @@ export async function updateConfig(
   const schema = options.schema ?? DEFAULT_SCHEMA;
   const path = join(target.root, CONFIG_PATH);
   const current = parseConfig(await fs.readText(path), schema, target.root);
+  if (options.expectedRaw !== undefined && current.raw !== options.expectedRaw) throw conflict();
   const next = new Map(current.explicit);
   for (const [key, value] of changes) {
     if (value === undefined) {
@@ -463,13 +477,7 @@ export async function updateConfig(
   await fs.writeText(temporary, text);
   try {
     const latest = await fs.readText(path);
-    if (latest !== current.raw) {
-      throw new ConfigError(
-        "conflict",
-        `${CONFIG_PATH} changed while this update was being prepared.`,
-        "Review the new contents and retry the command; nothing was overwritten.",
-      );
-    }
+    if (latest !== current.raw) throw conflict();
     await fs.rename(temporary, path);
   } catch (error) {
     await fs.remove(temporary).catch(() => undefined);

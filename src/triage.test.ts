@@ -38,6 +38,7 @@ import {
 } from "./config.js";
 import { briefing, dependencyDone, textReport } from "./briefing.js";
 import { complexityGuidance } from "./complexity.js";
+import { classifyField } from "./complexitysetup.js";
 import {
   collect,
   declaredDependencies,
@@ -4086,7 +4087,13 @@ describe("setup complexity (#119)", () => {
   const list = (...nodes: unknown[]) => ({ pageInfo: { hasNextPage: false }, nodes });
   function setup(
     answer: Answer,
-    options: { initial?: string; prompt?: string[]; failWrite?: boolean; created?: Answer } = {},
+    options: {
+      initial?: string;
+      prompt?: string[];
+      failWrite?: boolean;
+      created?: Answer;
+      onQuery?: (files: Map<string, string>) => void;
+    } = {},
   ) {
     const files = new Map<string, string>(
       options.initial === undefined ? [] : [[path, options.initial]],
@@ -4124,7 +4131,7 @@ describe("setup complexity (#119)", () => {
           git,
           cwd: root,
           api: {
-            query: async (_q, v) => (queries.push(v), answer),
+            query: async (_q, v) => (queries.push(v), options.onQuery?.(files), answer),
             mutate: async (_q, v) => (
               mutations.push(v),
               options.created ?? { data: null, errors: [] }
@@ -4168,6 +4175,24 @@ describe("setup complexity (#119)", () => {
     expect(t.json()).toMatchObject({ changed: false });
     expect(await t.call()).toBe(0);
     expect(t.out.at(-1)).toContain("Configured");
+  });
+  it("compares options one by one, not as a comma-joined string", async () => {
+    const merged = [{ name: "XS,S" }, ...sizes.slice(2)];
+    const field = classifyField({ ...good, options: merged })!;
+    expect(field.compatible).toBe(false);
+    expect(classifyField(good)!.compatible).toBe(true);
+  });
+  it("refuses with a conflict when the mapping changes while setup is running", async () => {
+    const elsewhere = '{"schemaVersion":1,"complexity":{"fieldId":"IF_other"}}\n';
+    const t = setup(owner(list(good)), {
+      onQuery: (files) => void files.set(path, elsewhere),
+    });
+    expect(await t.call("--select", "IF_good", "--json")).toBe(1);
+    expect(t.json()).toMatchObject({
+      code: "conflict",
+      recovery: expect.stringContaining("setup complexity"),
+    });
+    expect(t.files.get(path)).toBe(elsewhere);
   });
   it("refuses incompatible or unknown selections without writing", async () => {
     const t = setup(owner(list(good, wrongOptions)));
