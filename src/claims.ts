@@ -8,7 +8,8 @@
  */
 import { createHash } from "node:crypto";
 import { workflow } from "./briefing.js";
-import { ghQuery } from "./github.js";
+import { ghQuery, permissionLookup, writePermissions } from "./github.js";
+import type { PermissionLookup } from "./github.js";
 import { ghRun } from "./dependencies.js";
 
 const labelColours: Record<string, string> = {
@@ -159,7 +160,19 @@ interface TicketIssue {
     pageInfo?: { hasPreviousPage?: boolean; startCursor?: string | null };
   };
 }
-type Comment = { body: string; createdAt?: string };
+/**
+ * An issue comment. Author and edit evidence (#212) decide whether a marker in it may drive a
+ * write; `undefined` means the field was not read, which is missing evidence.
+ */
+type Comment = {
+  body: string;
+  createdAt?: string;
+  author?: Actor | null;
+  lastEditedAt?: string | null;
+  includesCreatedEdit?: boolean;
+  editor?: Actor | null;
+};
+type Actor = { __typename?: string; login?: string };
 type CommentPageInfo = { hasPreviousPage?: boolean; startCursor?: string | null };
 type LabelEvent = { __typename?: string; createdAt?: string; label?: { name: string } };
 type TicketItem = TicketIssue | { __typename: "PullRequest"; number: number; url: string };
@@ -179,6 +192,87 @@ interface TicketResponse {
   } | null;
 }
 
+/** Comment fields read wherever a marker may drive a write: body, author and edit evidence. */
+const commentFields =
+  "body createdAt author{__typename login} lastEditedAt includesCreatedEdit editor{__typename login}";
+
+/**
+ * Whether a marker comment may drive a write (#212, doc/design/triage-efficiency-and-trust.md
+ * "Message visibility is distinct from authority"): its author is a user with current write,
+ * maintain or admin permission, and any edit was made by such a user. `untrusted` is established
+ * as lacking authority (ignored, with a warning); `unknown` could not be established (refused).
+ */
+type Authority = { status: "trusted" } | { status: "untrusted" | "unknown"; why: string };
+async function actorAuthority(
+  actor: Actor | null | undefined,
+  role: string,
+  permission: PermissionLookup,
+): Promise<Authority> {
+  if (actor === undefined) return { status: "unknown", why: `${role} not read` };
+  if (actor === null || !actor.login)
+    return { status: "untrusted", why: `${role} is a deleted or unknown account` };
+  if (actor.__typename === undefined)
+    return { status: "unknown", why: `${role} ${actor.login} has no account type` };
+  // Apps and bots get no marker authority: a shared integration never speaks for an agent.
+  if (actor.__typename !== "User" || actor.login.endsWith("[bot]"))
+    return { status: "untrusted", why: `${role} ${actor.login} is an app or bot account` };
+  const level = await permission(actor.login);
+  if (level === "unknown")
+    return {
+      status: "unknown",
+      why: `${role} ${actor.login}'s repository permission could not be verified`,
+    };
+  return writePermissions.has(level)
+    ? { status: "trusted" }
+    : { status: "untrusted", why: `${role} ${actor.login} has ${level} permission, not write` };
+}
+async function commentAuthority(c: Comment, permission: PermissionLookup): Promise<Authority> {
+  const author = await actorAuthority(c.author, "author", permission);
+  if (author.status !== "trusted") return author;
+  if (c.lastEditedAt === undefined || c.includesCreatedEdit === undefined)
+    return { status: "unknown", why: "edit history not read" };
+  if (!c.lastEditedAt && !c.includesCreatedEdit) return { status: "trusted" };
+  // Edited: GitHub exposes only the last editor. Only the author or a user with write access can
+  // edit a comment, so a trusted author and a trusted last editor leave no untrusted edit.
+  if (!c.editor?.login)
+    return { status: "unknown", why: "edited, and who edited it cannot be established" };
+  if (c.editor.login === c.author?.login) return { status: "trusted" };
+  return actorAuthority(c.editor, "editor", permission);
+}
+/** A marker comment's authority, partitioned for the caller (newest first). */
+interface MarkerVerdicts<T> {
+  trusted: T | null;
+  /** Newer than `trusted` and not established either way: refuse rather than guess. */
+  unverified: string[];
+  /** Established as lacking authority: ignored and named in a warning. */
+  ignored: string[];
+}
+/**
+ * The newest trusted candidate, checking newest first and stopping there, so permission lookups
+ * are bounded by the distinct authors (and editors) of the markers newer than it.
+ */
+async function newestTrusted<T>(
+  candidates: T[],
+  comment: (c: T) => Comment,
+  permission: PermissionLookup,
+): Promise<MarkerVerdicts<T>> {
+  const verdicts: MarkerVerdicts<T> = { trusted: null, unverified: [], ignored: [] };
+  for (const candidate of [...candidates].reverse()) {
+    const c = comment(candidate);
+    const authority = await commentAuthority(c, permission);
+    if (authority.status === "trusted") {
+      verdicts.trusted = candidate;
+      break;
+    }
+    const what = `marker comment${c.createdAt ? ` at ${c.createdAt}` : ""} (${authority.why})`;
+    (authority.status === "unknown" ? verdicts.unverified : verdicts.ignored).push(what);
+  }
+  return verdicts;
+}
+const ignoredNote = (ignored: string[]): string[] =>
+  ignored.length ? [`Ignored marker(s) without write authority: ${ignored.join("; ")}.`] : [];
+const markerRecovery = "a maintainer must re-post or confirm the handoff on the ticket";
+
 const marker = (kind: string, parts: unknown[]): string =>
   `<!-- github-triage:${kind}:${createHash("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 16)} -->`;
 
@@ -193,17 +287,16 @@ interface ReleaseRecord {
   claimedAt: string | null;
   /** The comment's creation time (from GitHub; not serialised). */
   createdAt: string;
+  /** The comment carrying the record (not serialised); its author decides its authority. */
+  comment?: Comment;
 }
 /** Marker plus JSON plan; `<`/`>` are escaped so the HTML comment cannot be terminated early. */
 const releaseMarker = (op: string, record: ReleaseRecord): string => {
-  const { createdAt: _, ...plan } = record;
+  const { createdAt: _, comment: __, ...plan } = record;
   const json = JSON.stringify(plan).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e");
   return op.replace(/ -->$/, ` ${json} -->`);
 };
-function releaseRecords(
-  comments: { body: string; createdAt?: string }[],
-  op: string,
-): ReleaseRecord[] {
+function releaseRecords(comments: Comment[], op: string): ReleaseRecord[] {
   const prefix = op.replace(/ -->$/, " ");
   const records: ReleaseRecord[] = [];
   for (const c of comments) {
@@ -213,15 +306,15 @@ function releaseRecords(
     try {
       const r = JSON.parse(c.body.slice(at + prefix.length, endAt)) as ReleaseRecord;
       if (r.v === 1 && Array.isArray(r.remove) && Array.isArray(r.retained))
-        records.push({ ...r, createdAt: c.createdAt ?? "" });
+        records.push({ ...r, createdAt: c.createdAt ?? "", comment: c });
     } catch {
       // Not a parsable record: never treated as authorisation.
     }
   }
   return records.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
-/** The most recent parsable release record on the issue, whoever made it. */
-function latestRelease(comments: { body: string; createdAt?: string }[]): ReleaseRecord | null {
+/** Every parsable release record on the issue, oldest first, whoever made it. */
+function allReleases(comments: Comment[]): ReleaseRecord[] {
   const records: ReleaseRecord[] = [];
   for (const c of comments) {
     for (const m of c.body.matchAll(/<!-- github-triage:release:[0-9a-f]+ /g)) {
@@ -230,14 +323,17 @@ function latestRelease(comments: { body: string; createdAt?: string }[]): Releas
       try {
         const r = JSON.parse(c.body.slice(start, end)) as ReleaseRecord;
         if (r.v === 1 && typeof r.agent === "string")
-          records.push({ ...r, createdAt: c.createdAt ?? "" });
+          records.push({ ...r, createdAt: c.createdAt ?? "", comment: c });
       } catch {
         // Not a parsable record: never treated as authorisation.
       }
     }
   }
-  return records.sort((a, b) => a.createdAt.localeCompare(b.createdAt)).at(-1) ?? null;
+  return records.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
+/** The most recent parsable release record, whoever made it: a hint only, never authority. */
+const latestRelease = (comments: Comment[]): ReleaseRecord | null =>
+  allReleases(comments).at(-1) ?? null;
 function labelSteps(
   repository: string,
   number: number,
@@ -345,7 +441,7 @@ async function commentHistory(
   for (let pageNo = 0; info?.hasPreviousPage && !enough(comments); pageNo++) {
     if (!info.startCursor || pageNo >= commentHistoryPages) return { comments, complete: false };
     const data = (await query(
-      `query($owner:String!,$name:String!,$number:Int!,$before:String!){repository(owner:$owner,name:$name){issue(number:$number){comments(last:100,before:$before){nodes{body createdAt} pageInfo{hasPreviousPage startCursor}}}}}`,
+      `query($owner:String!,$name:String!,$number:Int!,$before:String!){repository(owner:$owner,name:$name){issue(number:$number){comments(last:100,before:$before){nodes{${commentFields}} pageInfo{hasPreviousPage startCursor}}}}}`,
       { owner, name, number, before: info.startCursor },
     )) as { repository: { issue: { comments: TicketIssue["comments"] } | null } | null };
     const older = data.repository?.issue?.comments;
@@ -372,7 +468,7 @@ async function readTicket(
 ) {
   const [owner, name] = repository.split("/");
   const data = await query(
-    `query($owner:String!,$name:String!,$number:Int!,$label:String!,$question:String!,$decision:String!,$needsDesign:String!,$attention:String!${target ? ",$target:String!" : ""}){repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on PullRequest{number url} ... on Issue{number title url state updatedAt labels(first:100){nodes{name} pageInfo{hasNextPage}} issueDependenciesSummary{blockedBy} blockedBy(first:20){nodes{number url state}} closedByPullRequestsReferences(first:10,includeClosedPrs:false){nodes{number url state} pageInfo{hasNextPage}} comments(last:100){nodes{body createdAt} pageInfo{hasPreviousPage startCursor}} timelineItems(itemTypes:[LABELED_EVENT,UNLABELED_EVENT],last:50){nodes{__typename ... on LabeledEvent{createdAt label{name}} ... on UnlabeledEvent{createdAt label{name}}} pageInfo{hasPreviousPage startCursor}}}} claims:issues(first:20,states:OPEN,labels:[$label]){nodes{number title url} pageInfo{hasNextPage}} ownerLabel:label(name:$label){name} questionLabel:label(name:$question){name} decisionLabel:label(name:$decision){name} needsDesignLabel:label(name:$needsDesign){name} attentionLabel:label(name:$attention){name}${target ? " targetLabel:label(name:$target){name}" : ""}}}`,
+    `query($owner:String!,$name:String!,$number:Int!,$label:String!,$question:String!,$decision:String!,$needsDesign:String!,$attention:String!${target ? ",$target:String!" : ""}){repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on PullRequest{number url} ... on Issue{number title url state updatedAt labels(first:100){nodes{name} pageInfo{hasNextPage}} issueDependenciesSummary{blockedBy} blockedBy(first:20){nodes{number url state}} closedByPullRequestsReferences(first:10,includeClosedPrs:false){nodes{number url state} pageInfo{hasNextPage}} comments(last:100){nodes{${commentFields}} pageInfo{hasPreviousPage startCursor}} timelineItems(itemTypes:[LABELED_EVENT,UNLABELED_EVENT],last:50){nodes{__typename ... on LabeledEvent{createdAt label{name}} ... on UnlabeledEvent{createdAt label{name}}} pageInfo{hasPreviousPage startCursor}}}} claims:issues(first:20,states:OPEN,labels:[$label]){nodes{number title url} pageInfo{hasNextPage}} ownerLabel:label(name:$label){name} questionLabel:label(name:$question){name} decisionLabel:label(name:$decision){name} needsDesignLabel:label(name:$needsDesign){name} attentionLabel:label(name:$attention){name}${target ? " targetLabel:label(name:$target){name}" : ""}}}`,
     {
       owner,
       name,
@@ -438,6 +534,7 @@ export async function planClaim(
   repository: string,
   request: ClaimRequest,
   query: GraphQuery = ghQuery,
+  permission: PermissionLookup = permissionLookup(repository),
 ): Promise<ClaimPlan> {
   const { number, agent, branch = null, platform = null, rework = false } = request;
   const { item, claims, repoLabels } = await readTicket(repository, number, agent, query);
@@ -538,9 +635,23 @@ export async function planClaim(
         `${mine} is on #${number}, but ${found ? "the comments since this claim began" : "when it was added"} cannot be read within the bounded history, so whether its claim comment was posted is unknown; nothing is changed.`,
         [`${triage} --issue ${number}`, command(`who ${number}`)],
       );
-    const commented = found.comments.some(
-      (c) => c.body.includes(op) && (!since || !c.createdAt || c.createdAt >= since),
+    // Only a claim comment with write authority proves the comment step ran (#212): a forged
+    // copy of the public marker never suppresses it.
+    const posted = await newestTrusted(
+      found.comments.filter(
+        (c) => c.body.includes(op) && (!since || !c.createdAt || c.createdAt >= since),
+      ),
+      (c) => c,
+      permission,
     );
+    const commented = !!posted.trusted;
+    if (!commented && posted.unverified.length)
+      return refuse(
+        "MARKER_UNVERIFIED",
+        facts,
+        `${mine} is on #${number}, but the authority of its claim comment cannot be verified (${posted.unverified.join("; ")}), so whether the claim comment was posted is unknown; nothing is changed. Recovery: ${markerRecovery}, then retry.`,
+        [command(`who ${number}`), `${triage} --issue ${number}`],
+      );
     return {
       ok: true,
       noop: commented,
@@ -549,6 +660,7 @@ export async function planClaim(
         ? `Already claimed by ${agent}.`
         : `Claimed by ${agent}; posting the missing claim comment.`,
       changes: commented ? [] : [claimComment()],
+      ...(commented ? {} : { notes: ignoredNote(posted.ignored) }),
       // Completing a partly failed acquisition gets the same post-write ownership check.
       ...(commented ? {} : { recheck: { agent } }),
     };
@@ -562,28 +674,60 @@ export async function planClaim(
       "More than 10 linked pull requests; whether one is open cannot be verified.",
       [`${triage} --issue ${number}`],
     );
-  // The latest handoff is the newest release record: page back until one is seen (bounded).
-  // Only an explicit --rework needs that record; otherwise the window serves as a hint.
-  const releaseHistory = rework
-    ? await commentHistory(repository, number, item, (c) => latestRelease(c) !== null, query)
-    : { comments: item.comments.nodes, complete: true };
-  if (!releaseHistory.complete)
-    return refuse(
-      "EVIDENCE_INCOMPLETE",
-      facts,
-      `No handoff record found within the bounded comment history of #${number}, so the latest release (and whether it is ${agent}'s own done handoff) cannot be verified.`,
-      [`${triage} --issue ${number}`, command(`who ${number}`)],
+  // Without --rework, the newest release in the window is only a hint for suggesting --rework;
+  // it never authorises anything, so no permission is looked up.
+  let lastRelease = rework ? null : latestRelease(item.comments.nodes);
+  let claimedSince: string | null = rework ? null : (lastRelease?.claimedAt ?? null);
+  let ignored: string[] = [];
+  if (rework) {
+    // The rework reclaim is authorised only by the caller's own done handoff for the claim it
+    // released (#212): that claim began when the caller's label was last added, and its handoff
+    // was posted after that, so the comments since then hold every record that can authorise it.
+    const history = await claimStart(repository, number, mine, item, query);
+    claimedSince = history.since;
+    if (!claimedSince && !history.complete)
+      return refuse(
+        "EVIDENCE_INCOMPLETE",
+        facts,
+        `When ${mine} was last added to #${number} cannot be established from its label history, so ${agent}'s handoff cannot be tied to the claim it released.`,
+        [`${triage} --issue ${number}`, command(`who ${number}`)],
+      );
+    const releaseHistory = claimedSince
+      ? await commentHistory(repository, number, item, reaches(claimedSince), query)
+      : { comments: [], complete: true };
+    if (!releaseHistory.complete)
+      return refuse(
+        "EVIDENCE_INCOMPLETE",
+        facts,
+        `No handoff record found within the bounded comment history of #${number}, so the latest release (and whether it is ${agent}'s own done handoff) cannot be verified.`,
+        [`${triage} --issue ${number}`, command(`who ${number}`)],
+      );
+    // Only a handoff posted by a current writer counts (#212); forged ones are ignored.
+    const verdicts = await newestTrusted(
+      allReleases(releaseHistory.comments).filter((r) => r.createdAt >= claimedSince!),
+      (r) => r.comment ?? { body: "" },
+      permission,
     );
-  const lastRelease = latestRelease(releaseHistory.comments);
+    ignored = verdicts.ignored;
+    if (verdicts.unverified.length)
+      return refuse(
+        "MARKER_UNVERIFIED",
+        facts,
+        `The authority of a handoff on #${number} cannot be verified (${verdicts.unverified.join("; ")}), so the latest release cannot be established; nothing is changed. Recovery: ${markerRecovery}, then retry.`,
+        [`${triage} --issue ${number}`, command(`who ${number}`)],
+      );
+    lastRelease = verdicts.trusted;
+  }
   // Conservative authorisation: awaiting review, an open PR, and the caller's own done handoff
-  // is the latest recorded release on this issue.
+  // for the claim it released is the latest trusted release on this issue.
   const reworkable =
     label(item, claimPolicy.awaitingReview) &&
     openPrs.length > 0 &&
     lastRelease?.agent === agent &&
     lastRelease.outcome === "done" &&
-    // A handoff with no recorded claim time cannot be tied to the caller's claim.
-    !!lastRelease.claimedAt;
+    // A handoff with no recorded claim time, or another claim's, is never the caller's claim.
+    !!lastRelease.claimedAt &&
+    lastRelease.claimedAt === claimedSince;
   const reworkCommand = command(
     `claim ${number} --agent ${agent}${branch ? ` --branch ${branch}` : ""} --rework`,
   );
@@ -595,7 +739,7 @@ export async function planClaim(
         pullRequests: openPrs.map((p) => p.url),
         ...(lastRelease ? { lastReleasedBy: lastRelease.agent } : {}),
       },
-      `Review rework needs ${claimPolicy.awaitingReview}, an open pull request, and ${agent}'s own done handoff as the latest release on #${number}.`,
+      `Review rework needs ${claimPolicy.awaitingReview}, an open pull request, and ${agent}'s own done handoff, posted by a user with write access and recording the claim time of ${agent}'s last claim${claimedSince ? ` (${claimedSince})` : ""}, as the latest release on #${number}.${ignored.length ? ` ${ignoredNote(ignored)[0]}` : ""}`,
       [`${triage} --issue ${number}`, `${triage} --agent ${agent}`],
     );
   if (
@@ -716,7 +860,14 @@ export async function planClaim(
       `Claimed by \`${agent}\`${branch ? ` on branch \`${branch}\`` : ""} with \`github-triage claim\`${rework ? " for review rework" : ""}. Removed: ${remove.map((l) => `\`${l}\``).join(", ")}.\n\n${op}`,
     ],
   });
-  return { ok: true, noop: false, facts, changes, recheck: { agent } };
+  return {
+    ok: true,
+    noop: false,
+    facts,
+    changes,
+    recheck: { agent },
+    ...(ignored.length ? { notes: ignoredNote(ignored) } : {}),
+  };
 }
 
 /**
@@ -873,6 +1024,7 @@ export async function planRelease(
   repository: string,
   request: ReleaseRequest,
   query: GraphQuery = ghQuery,
+  permission: PermissionLookup = permissionLookup(repository),
 ): Promise<ClaimPlan> {
   const { number, agent, outcome, note = null, pr = null, change = null } = request;
   const triage = `github-triage --repo ${repository}`;
@@ -970,11 +1122,26 @@ export async function planRelease(
   const removed = (e: (typeof events)[number]): boolean => e.__typename === "UnlabeledEvent";
   const op = marker("release", [repository, number, agent, since]);
   // A record with no claim time can never be tied to a particular claim, so it never matches.
-  const record = since
-    ? releaseRecords(recorded.comments, op)
-        .filter((r) => r.agent === agent && r.claimedAt !== null && r.claimedAt === since)
-        .at(-1)
-    : undefined;
+  // The marker's hash is of public values, so only a record posted by a current writer is the
+  // recorded intent (#212); a forged one is ignored and named, an unverifiable one refused.
+  const verdicts = await newestTrusted(
+    since
+      ? releaseRecords(recorded.comments, op).filter(
+          (r) => r.agent === agent && r.claimedAt !== null && r.claimedAt === since,
+        )
+      : [],
+    (r) => r.comment ?? { body: "" },
+    permission,
+  );
+  if (verdicts.unverified.length)
+    return refuse(
+      "MARKER_UNVERIFIED",
+      facts,
+      `A handoff recorded for ${agent}'s claim on #${number} cannot be verified (${verdicts.unverified.join("; ")}), so whether its label plan applies is unknown; nothing is changed. Recovery: ${markerRecovery}, then retry.`,
+      [command(`who ${number}`), `${triage} --issue ${number}`],
+    );
+  const record = verdicts.trusted ?? undefined;
+  const ignored = ignoredNote(verdicts.ignored);
   const holds = label(item, mine);
   const others = facts.owners.filter((o) => o !== mine);
   if (record) {
@@ -993,6 +1160,7 @@ export async function planRelease(
         facts: recorded,
         reason: `Handoff already recorded and ${agent}'s claim already released.`,
         changes: [],
+        notes: ignored,
       };
     // Anything another party did after the record (a new owner, a readiness label other than
     // the recorded target) means the recorded plan no longer describes the ticket.
@@ -1028,7 +1196,10 @@ export async function planRelease(
       facts: recorded,
       reason: "Handoff comment already recorded; applying its recorded label changes.",
       changes: labelSteps(repository, number, add, remove, repoLabels),
-      notes: record.retained.length ? [`Other owners kept: ${record.retained.join(", ")}.`] : [],
+      notes: [
+        ...ignored,
+        ...(record.retained.length ? [`Other owners kept: ${record.retained.join(", ")}.`] : []),
+      ],
       recheck: { agent, release: { target: record.target } },
       retry: recordedRetry,
     };
@@ -1051,7 +1222,7 @@ export async function planRelease(
         ),
       ],
     );
-  const notes: string[] = [];
+  const notes: string[] = [...ignored];
   if (!note) notes.push("No handoff note supplied; release proceeds, but a note is expected.");
   if (others.length) notes.push(`Other owners kept: ${others.join(", ")}.`);
   if (pr && !prState)

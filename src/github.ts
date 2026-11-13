@@ -679,3 +679,74 @@ async function ghGraphql(query: string, variables: Record<string, string>): Prom
 
 /** Production GraphQL boundary through the existing authenticated `gh` (no shell). */
 export const ghGraphqlApi: GraphqlApi = { query: ghGraphql, mutate: ghGraphql };
+
+/**
+ * A user's current permission on a repository (#212), as GitHub's REST collaborator-permission
+ * endpoint reports it, or `unknown` when it cannot be established.
+ */
+export type RepositoryPermission =
+  | "admin"
+  | "maintain"
+  | "write"
+  | "triage"
+  | "read"
+  | "none"
+  | "unknown";
+/** Looks up one login's current repository permission; never throws. */
+export type PermissionLookup = (login: string) => Promise<RepositoryPermission>;
+const rolePermissions = new Set<RepositoryPermission>([
+  "admin",
+  "maintain",
+  "write",
+  "triage",
+  "read",
+  "none",
+]);
+/** Permissions that may drive workflow writes through a comment marker (#212). */
+export const writePermissions: ReadonlySet<RepositoryPermission> = new Set([
+  "admin",
+  "maintain",
+  "write",
+]);
+
+/**
+ * A per-run permission lookup over the injected read-only REST boundary:
+ * `GET /repos/{owner}/{repo}/collaborators/{username}/permission`, one request per distinct login
+ * (case-insensitive) for the lifetime of the returned function, never persisted across runs.
+ * `role_name` is preferred; a custom role falls back on the legacy `permission` field. A non-200
+ * answer (404, missing access, rate limit), a transport error, a body for another user or an
+ * unrecognised value is `unknown`, which grants nothing.
+ */
+export function permissionLookup(repository: string, rest: Rest = ghRest): PermissionLookup {
+  const cache = new Map<string, Promise<RepositoryPermission>>();
+  const lookup = async (login: string): Promise<RepositoryPermission> => {
+    // A GitHub user login; anything else (an app's `name[bot]`, a malformed value) is never asked.
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(login)) return "unknown";
+    try {
+      const answer = await rest(
+        `repos/${repository}/collaborators/${encodeURIComponent(login)}/permission`,
+      );
+      if (answer.status !== 200 || !isRecord(answer.body)) return "unknown";
+      const user = prop(answer.body, "user", "login");
+      if (typeof user === "string" && user.toLowerCase() !== login.toLowerCase()) return "unknown";
+      const role = prop(answer.body, "role_name");
+      if (typeof role === "string" && rolePermissions.has(role as RepositoryPermission))
+        return role as RepositoryPermission;
+      const legacy = prop(answer.body, "permission");
+      return typeof legacy === "string" && ["admin", "write", "read", "none"].includes(legacy)
+        ? (legacy as RepositoryPermission)
+        : "unknown";
+    } catch {
+      return "unknown";
+    }
+  };
+  return (login) => {
+    const key = login.toLowerCase();
+    let answer = cache.get(key);
+    if (!answer) {
+      answer = lookup(login);
+      cache.set(key, answer);
+    }
+    return answer;
+  };
+}
