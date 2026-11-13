@@ -24,6 +24,8 @@ Test built-in `gh` caching and conditional requests before custom infrastructure
 
 Study local storage location, format, host/repository/authorization-context separation, schema, retention, concurrency and corruption recovery. Cache data is not project configuration. Following the bounded research, refine two isolated test features: manifest/conditional refresh and local evidence storage/recovery. Neither implies production rollout, a daemon or a database choice.
 
+Research result: [incremental cache research](../reports/incremental-cache-research.md) records measurements, a per-fact cacheability table and the refined scope of #202 and #203.
+
 ## Issue creation: CLI first (#199, #204)
 
 Add a focused CLI operation with explicit repository targeting and a clear current-checkout default. Validate structured inputs, make the target visible, preserve local config during remote operations and report ambiguous creation/retry outcomes honestly. Reuse authenticated boundaries; tests do not create live tickets.
