@@ -24,6 +24,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { parse, stringify, TomlError } from "smol-toml";
 import { ConfigError, githubRepositories, nodeFileSystem, nodeGit } from "./config.js";
 import type { ConfigFileSystem, GitRunner } from "./config.js";
+import { acquireFileLock, type LockFs, type LockTiming } from "./filelock.js";
 
 /** Root-relative identity file name (shared format with the agent-inbox tooling). */
 export const IDENTITY_FILE = "agent-inbox.toml";
@@ -385,6 +386,15 @@ export async function identityGitState(
 /** Exclude rules this tool may add: the identity file and its same-directory temporary copies. */
 const IDENTITY_RULE = `/${IDENTITY_FILE}`;
 const TEMPORARY_RULE = `/${IDENTITY_FILE}.*.tmp`;
+/** Root-relative lock serialising writers of the identity file (#165 review). */
+export const IDENTITY_LOCK_FILE = `${IDENTITY_FILE}.lock`;
+const LOCK_RULE = `/${IDENTITY_LOCK_FILE}`;
+/**
+ * Writers hold the lock only for local file reads and one rename (Git runs before it), so a
+ * few seconds is ample for an interactive command; a lock older than the stale threshold is
+ * from a crashed process and is broken.
+ */
+export const IDENTITY_LOCK_TIMING: LockTiming = { waitMs: 5_000, staleMs: 15_000, pollMs: 25 };
 
 /** Root-relative temporary copy name; always matched by `TEMPORARY_RULE`. */
 export const temporaryIdentityName = (token: string): string => `${IDENTITY_FILE}.${token}.tmp`;
@@ -395,7 +405,7 @@ async function ignoredByGit(git: GitRunner, root: string, name: string): Promise
 }
 
 /**
- * Ensure the identity file AND its temporary copy are Git-ignored before any write. Reuses
+ * Ensure the identity file, its temporary copy AND its lock file are Git-ignored before any write. Reuses
  * existing ignore coverage; otherwise appends rules to the repository-local `info/exclude`
  * resolved by Git. The temporary copy holds the whole document (possibly other tools'
  * credentials) and lives beside the identity file so the final rename stays atomic on one
@@ -419,7 +429,13 @@ export async function ensureExcluded(
     );
   }
   const temporaryIgnored = await ignoredByGit(git, root, temporaryName);
-  if (state.tracked === null || state.ignored === null || temporaryIgnored === null) {
+  const lockIgnored = await ignoredByGit(git, root, IDENTITY_LOCK_FILE);
+  if (
+    state.tracked === null ||
+    state.ignored === null ||
+    temporaryIgnored === null ||
+    lockIgnored === null
+  ) {
     throw new ConfigError(
       "filesystem",
       `Could not determine whether ${IDENTITY_FILE} is tracked or ignored by Git; nothing was changed.`,
@@ -429,6 +445,7 @@ export async function ensureExcluded(
   const missing = [
     ...(state.ignored ? [] : [IDENTITY_RULE]),
     ...(temporaryIgnored ? [] : [TEMPORARY_RULE]),
+    ...(lockIgnored ? [] : [LOCK_RULE]),
   ];
   if (missing.length === 0) return false;
   if (!fs.appendText) {
@@ -449,11 +466,15 @@ export async function ensureExcluded(
     await fs.appendText(excludePath, `${separator}${rules.join("\n")}\n`);
   }
   const after = await identityGitState(root, git);
-  if (after.ignored !== true || (await ignoredByGit(git, root, temporaryName)) !== true) {
+  if (
+    after.ignored !== true ||
+    (await ignoredByGit(git, root, temporaryName)) !== true ||
+    (await ignoredByGit(git, root, IDENTITY_LOCK_FILE)) !== true
+  ) {
     throw new ConfigError(
       "not-ignored",
-      `${IDENTITY_FILE} or its temporary copy is still not ignored after adding a local exclude rule (a negated ignore pattern may re-include it); nothing was written.`,
-      `Remove the rule that re-includes ${IDENTITY_FILE} or ${TEMPORARY_RULE} from your ignore files, then retry.`,
+      `${IDENTITY_FILE}, its temporary copy or its lock is still not ignored after adding a local exclude rule (a negated ignore pattern may re-include it); nothing was written.`,
+      `Remove the rule that re-includes ${IDENTITY_FILE}, ${TEMPORARY_RULE} or ${LOCK_RULE} from your ignore files, then retry.`,
     );
   }
   return true;
@@ -486,6 +507,8 @@ export interface IdentityWriteOptions {
   readonly token?: () => string;
   /** Optional precondition: the raw text (null when absent) the caller observed earlier. */
   readonly expectedRaw?: string | null;
+  /** Lock wait/stale bounds; injected for tests. */
+  readonly lockTiming?: LockTiming;
 }
 
 export interface IdentityWriteResult {
@@ -499,6 +522,41 @@ export interface IdentityWriteResult {
   readonly record: IdentityRecord;
 }
 
+const busy = (): ConfigError =>
+  new ConfigError(
+    "conflict",
+    `Another update to ${IDENTITY_FILE} is in progress (${IDENTITY_LOCK_FILE} is held); nothing was changed.`,
+    `Retry the command. If no other update is running, the lock is broken automatically once older than ${IDENTITY_LOCK_TIMING.staleMs / 1000} seconds.`,
+  );
+
+/** Lock operations over the identity filesystem boundary (exclusive create via writeText). */
+function lockFs(fs: ConfigFileSystem): LockFs {
+  const missing = () => Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+  return {
+    async readFile(path) {
+      const text = await fs.readText(path);
+      if (text === null) throw missing();
+      return text;
+    },
+    writeFile: (path, data) => fs.writeText(path, data),
+    unlink: (path) => fs.remove(path),
+    async stat(path) {
+      const at = await fs.modifiedAt?.(path);
+      if (at === null) throw missing();
+      if (at !== undefined) return { mtimeMs: at };
+      // No mtime available (test doubles): use the holder's own timestamp.
+      const text = await fs.readText(path);
+      if (text === null) throw missing();
+      try {
+        const parsed = JSON.parse(text) as { at?: unknown };
+        return { mtimeMs: typeof parsed.at === "number" ? parsed.at : 0 };
+      } catch {
+        return { mtimeMs: 0 };
+      }
+    },
+  };
+}
+
 const conflict = (): ConfigError =>
   new ConfigError(
     "conflict",
@@ -510,7 +568,14 @@ const conflict = (): ConfigError =>
  * Set one registered identity setting on the selected entry, preserving all other data.
  * Setting `identity.triage_role` on an absent file/entry runs the shared initializer: it
  * creates the entry with a generated, locally unique name once. A valid existing name is never
- * regenerated. Equal writes are no-ops. Writes are atomic and refuse intervening edits.
+ * regenerated. Equal writes are no-ops. Writes are atomic.
+ *
+ * Several agents share one file, so read → validate → write → rename runs under a
+ * repository-local cross-process lock (`agent-inbox.toml.lock`, Git-ignored before it is
+ * created). The document is read only after the lock is taken, so a concurrent update to
+ * another entry is merged rather than reverted or refused; only this call's change is applied.
+ * The unchanged-since-read check before the rename stays as a second guard. A lock held beyond
+ * the wait bound refuses with a `conflict` (busy) error and "retry"; the lock is always released.
  */
 export async function setIdentity(
   target: IdentityTarget,
@@ -528,81 +593,97 @@ export async function setIdentity(
     options.token ?? (() => `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`);
   const path = join(target.root, IDENTITY_FILE);
 
-  const raw = await fs.readText(path);
-  if (options.expectedRaw !== undefined && raw !== options.expectedRaw) throw conflict();
-  const document: Table = raw === null ? Object.create(null) : parseIdentityDocument(raw);
-  const before = recordFor(raw === null ? null : document, entry);
-  if (before.entryExists && !isTable((document.agents as Table)[entry])) {
-    throw malformed(`agents.${entry} is not a table.`);
-  }
-  if (field === "name" && namesInUse(document, entry).has(value.toLowerCase())) {
-    throw new ConfigError(
-      "conflict",
-      `Another local agent entry already uses the name ${JSON.stringify(value)}.`,
-      "Choose a different name; names identify one logical agent each.",
-    );
-  }
-  if (identityValue(before, key) === value) {
-    // An unchanged value still refuses a tracked file and establishes missing exclusion; the
-    // identity contents are left untouched.
-    const excludedOnly = await ensureExcluded(target.root, git, fs, temporaryIdentityName(token()));
-    return {
-      changed: false,
-      createdFile: false,
-      createdEntry: false,
-      generatedName: null,
-      excluded: excludedOnly,
-      record: before,
-    };
-  }
-
-  if (!isTable(document.agents)) document.agents = Object.create(null);
-  const agents = document.agents as Table;
-  let generatedName: string | null = null;
-  if (!before.entryExists) {
-    const table: Table = Object.create(null);
-    if (field === "triage_role") {
-      generatedName = generateName(namesInUse(document, entry), options.random ?? Math.random);
-      table.name = generatedName;
-    }
-    agents[entry] = table;
-  }
-  (agents[entry] as Table)[field] = value;
-  const text = serializeIdentityDocument(document);
-  assertLosslessRewrite(raw, text);
-
-  // Exclusion of the file and its temporary copy is established before either is written.
+  // Exclusion of the file, its temporary copy and the lock is established before any of them
+  // is written, and before the lock is taken (Git is slow; the lock is held only briefly).
   const temporaryName = temporaryIdentityName(token());
   const excluded = await ensureExcluded(target.root, git, fs, temporaryName);
-  // The file may hold other tools' credentials: keep it private. A new file is 0600; a
-  // replaced file keeps its original mode, and the temporary copy is never more permissive
-  // than either. Mode handling is a no-op where unsupported (Windows).
-  const originalMode = raw === null ? null : ((await fs.fileMode?.(path)) ?? null);
-  const finalMode = originalMode ?? PRIVATE_FILE_MODE;
-  const temporary = join(target.root, temporaryName);
+  const release = await acquireFileLock(
+    lockFs(fs),
+    join(target.root, IDENTITY_LOCK_FILE),
+    options.lockTiming ?? IDENTITY_LOCK_TIMING,
+    Date.now,
+    (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  );
+  if (release === null) throw busy();
   try {
-    await fs.writeText(temporary, text, finalMode & PRIVATE_FILE_MODE);
-  } catch (error) {
-    // A failed or partial write must not leave a copy behind; an existing file is not ours.
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-      await fs.remove(temporary).catch(() => undefined);
+    return await writeLocked();
+  } finally {
+    await release();
+  }
+
+  async function writeLocked(): Promise<IdentityWriteResult> {
+    const raw = await fs.readText(path);
+    if (options.expectedRaw !== undefined && raw !== options.expectedRaw) throw conflict();
+    const document: Table = raw === null ? Object.create(null) : parseIdentityDocument(raw);
+    const before = recordFor(raw === null ? null : document, entry);
+    if (before.entryExists && !isTable((document.agents as Table)[entry])) {
+      throw malformed(`agents.${entry} is not a table.`);
     }
-    throw error;
+    if (field === "name" && namesInUse(document, entry).has(value.toLowerCase())) {
+      throw new ConfigError(
+        "conflict",
+        `Another local agent entry already uses the name ${JSON.stringify(value)}.`,
+        "Choose a different name; names identify one logical agent each.",
+      );
+    }
+    if (identityValue(before, key) === value) {
+      // An unchanged value still refused a tracked file and established missing exclusion
+      // above; the identity contents are left untouched.
+      return {
+        changed: false,
+        createdFile: false,
+        createdEntry: false,
+        generatedName: null,
+        excluded,
+        record: before,
+      };
+    }
+
+    if (!isTable(document.agents)) document.agents = Object.create(null);
+    const agents = document.agents as Table;
+    let generatedName: string | null = null;
+    if (!before.entryExists) {
+      const table: Table = Object.create(null);
+      if (field === "triage_role") {
+        generatedName = generateName(namesInUse(document, entry), options.random ?? Math.random);
+        table.name = generatedName;
+      }
+      agents[entry] = table;
+    }
+    (agents[entry] as Table)[field] = value;
+    const text = serializeIdentityDocument(document);
+    assertLosslessRewrite(raw, text);
+
+    // The file may hold other tools' credentials: keep it private. A new file is 0600; a
+    // replaced file keeps its original mode, and the temporary copy is never more permissive
+    // than either. Mode handling is a no-op where unsupported (Windows).
+    const originalMode = raw === null ? null : ((await fs.fileMode?.(path)) ?? null);
+    const finalMode = originalMode ?? PRIVATE_FILE_MODE;
+    const temporary = join(target.root, temporaryName);
+    try {
+      await fs.writeText(temporary, text, finalMode & PRIVATE_FILE_MODE);
+    } catch (error) {
+      // A failed or partial write must not leave a copy behind; an existing file is not ours.
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        await fs.remove(temporary).catch(() => undefined);
+      }
+      throw error;
+    }
+    try {
+      if ((await fs.readText(path)) !== raw) throw conflict();
+      await fs.rename(temporary, path);
+    } catch (error) {
+      await fs.remove(temporary).catch(() => undefined);
+      throw error;
+    }
+    await fs.setFileMode?.(path, finalMode);
+    return {
+      changed: true,
+      createdFile: raw === null,
+      createdEntry: !before.entryExists,
+      generatedName,
+      excluded,
+      record: recordFor(parseIdentityDocument(text), entry),
+    };
   }
-  try {
-    if ((await fs.readText(path)) !== raw) throw conflict();
-    await fs.rename(temporary, path);
-  } catch (error) {
-    await fs.remove(temporary).catch(() => undefined);
-    throw error;
-  }
-  await fs.setFileMode?.(path, finalMode);
-  return {
-    changed: true,
-    createdFile: raw === null,
-    createdEntry: !before.entryExists,
-    generatedName,
-    excluded,
-    record: recordFor(parseIdentityDocument(text), entry),
-  };
 }

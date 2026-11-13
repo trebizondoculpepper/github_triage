@@ -13,6 +13,7 @@ import { randomBytes } from "node:crypto";
 import * as nodeFs from "node:fs/promises";
 import { join } from "node:path";
 import envPaths from "env-paths";
+import { acquireFileLock, type LockFs } from "./filelock.js";
 import {
   checkForUpdate,
   type CheckOptions,
@@ -110,80 +111,26 @@ async function writeCache(fs: CacheFs, file: string, cache: UpdateCache): Promis
 }
 
 /**
- * Take the exclusive lock, waiting at most `lockWaitMs` and breaking a lock older than
+ * Take the cache lock, waiting at most `lockWaitMs` and breaking a lock older than
  * `lockStaleMs`. Returns a release function, or null when the lock could not be taken safely
- * (the caller then skips the optional check).
- *
- * Ownership is explicit: the lock file holds a random token. A contender breaks a stale lock
- * only if the token it judged stale is still there immediately before unlinking, proceeds only
- * if the lock it created still holds its own token, and releases only a lock holding its token.
- * The deadline is checked on every iteration, and any unexpected filesystem error (for example
- * a directory at the lock path) gives up at once instead of retrying.
- *
- * Remaining race, accepted: between the final token re-read and the unlink of a stale lock,
- * another contender can break the same lock and create its own, which this unlink then removes.
- * Both may then believe they hold the lock. Each verifies its token after creating, and release
- * only removes its own token, so the worst case is a duplicate registry request and notice with
- * last-writer-wins atomic cache replacement: never a corrupt cache, a stuck CLI, or a release
- * that deletes another live holder's lock.
+ * (the caller then skips the optional check). Semantics: `src/filelock.ts`; the worst case of
+ * its accepted race here is a duplicate registry request and notice with last-writer-wins
+ * atomic cache replacement.
  */
-export async function acquireLock(
-  fs: CacheFs,
+export function acquireLock(
+  fs: LockFs,
   lock: string,
   now: () => number,
   sleep: (ms: number) => Promise<void>,
 ): Promise<(() => Promise<void>) | null> {
-  const token = randomBytes(16).toString("hex");
-  const deadline = now() + lockWaitMs;
-  const holder = async (): Promise<string | undefined> => {
-    const text = await fs.readFile(lock, "utf8"); // filesystem errors propagate
-    try {
-      const parsed: unknown = JSON.parse(text);
-      return isRecord(parsed) && typeof parsed.token === "string" ? parsed.token : text;
-    } catch {
-      return text; // a torn or foreign lock is identified by its content
-    }
-  };
-  const release = async () => {
-    try {
-      if ((await holder()) === token) await fs.unlink(lock);
-    } catch {
-      // Already gone or replaced: nothing of ours to remove.
-    }
-  };
-  for (;;) {
-    try {
-      await fs.writeFile(lock, JSON.stringify({ token, pid: process.pid, at: now() }), {
-        flag: "wx",
-      });
-      // Proceed only if the lock still holds our token (see the race note above).
-      try {
-        return (await holder()) === token ? release : null;
-      } catch {
-        return null;
-      }
-    } catch (error) {
-      if (code(error) !== "EEXIST") return null;
-    }
-    try {
-      if (now() - (await fs.stat(lock)).mtimeMs > lockStaleMs) {
-        const stale = await holder();
-        // Confirm staleness, then re-read immediately before unlinking: another contender may
-        // have broken it and taken the lock already, and that fresh lock must survive.
-        if (now() - (await fs.stat(lock)).mtimeMs > lockStaleMs && (await holder()) === stale)
-          await fs.unlink(lock);
-      } else if (now() < deadline) {
-        await sleep(lockPollMs);
-      }
-    } catch (error) {
-      // Released between our attempt and the stat: try again. Anything else: give up.
-      if (code(error) !== "ENOENT") return null;
-    }
-    if (now() >= deadline) return null;
-  }
+  return acquireFileLock(
+    fs,
+    lock,
+    { waitMs: lockWaitMs, staleMs: lockStaleMs, pollMs: lockPollMs },
+    now,
+    sleep,
+  );
 }
-
-const code = (error: unknown) => (isRecord(error) ? error.code : undefined);
 
 const within = (iso: string | undefined, now: number) => {
   const at = iso === undefined ? NaN : Date.parse(iso);

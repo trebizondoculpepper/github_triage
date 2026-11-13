@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vite-plus/test";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
@@ -82,6 +92,7 @@ import type { CorrectionStep } from "./doctorplans.js";
 import {
   generateName,
   IDENTITY_FILE,
+  IDENTITY_LOCK_FILE,
   parseIdentityDocument,
   readIdentity,
   resolveIdentityTarget,
@@ -8074,7 +8085,7 @@ x = 1
       if (args[0] === "check-ignore") {
         const rules = (files.get(exclude) ?? "").split("\n");
         const name = args.at(-1)!;
-        const rule = name === IDENTITY_FILE ? `/${IDENTITY_FILE}` : `/${IDENTITY_FILE}.*.tmp`;
+        const rule = name.endsWith(".tmp") ? `/${IDENTITY_FILE}.*.tmp` : `/${name}`;
         if (options.ignored || rules.includes(rule)) return "";
         throw fail(1);
       }
@@ -8166,7 +8177,9 @@ x = 1
     const first = t.json();
     expect(first).toMatchObject({ createdFile: true, createdEntry: true, excludeRuleAdded: true });
     expect(first.generatedName).toMatch(/^[a-z]+_[a-z]+$/);
-    expect(t.files.get(exclude)).toBe(`/${IDENTITY_FILE}\n/${IDENTITY_FILE}.*.tmp\n`);
+    expect(t.files.get(exclude)).toBe(
+      `/${IDENTITY_FILE}\n/${IDENTITY_FILE}.*.tmp\n/${IDENTITY_FILE}.lock\n`,
+    );
     expect(t.calls.indexOf("rev-parse --git-path info/exclude")).toBeGreaterThan(-1);
     expect(
       await t.call("set", "identity.triage_role", "implementer", "--entry", "claude", "--json"),
@@ -8265,7 +8278,9 @@ x = 1
     const original = t.fs.writeText;
     t.fs.writeText = async (path, text) => {
       await original(path, text);
-      t.files.set(file, sample + '\n[agents.late]\nname = "late_comer"\n');
+      // An editor that ignores the lock: the unchanged-since-read guard still refuses.
+      if (path.endsWith(".tmp"))
+        t.files.set(file, sample + '\n[agents.late]\nname = "late_comer"\n');
     };
     await expect(
       setIdentity({ root, repository: null }, "codex", "identity.triage_role", "designer", {
@@ -8304,7 +8319,9 @@ x = 1
       { fs: unignored.fs, git: unignored.git },
     );
     expect(write).toMatchObject({ changed: false, excluded: true });
-    expect(unignored.files.get(exclude)).toBe(`/${IDENTITY_FILE}\n/${IDENTITY_FILE}.*.tmp\n`);
+    expect(unignored.files.get(exclude)).toBe(
+      `/${IDENTITY_FILE}\n/${IDENTITY_FILE}.*.tmp\n/${IDENTITY_FILE}.lock\n`,
+    );
     expect(unignored.files.get(file)).toBe(equal);
   });
 
@@ -8384,7 +8401,9 @@ x = 1
 
   it("removes a partially written temporary copy when the write fails (#165 review)", async () => {
     const t = setup(sample, { ignored: true });
+    const original = t.fs.writeText;
     t.fs.writeText = async (path, text) => {
+      if (!path.endsWith(".tmp")) return original(path, text);
       t.files.set(path, text.slice(0, 10));
       throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
     };
@@ -8433,6 +8452,138 @@ x = 1
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  describe("concurrent writers share one file under a lock (#165 review, Codex P1)", () => {
+    async function withRepo(
+      body: (dir: string, run: (...a: string[]) => Promise<string>) => Promise<void>,
+    ) {
+      const dir = await mkdtemp(join(tmpdir(), "triage-identity-lock-"));
+      const run = (...args: string[]) =>
+        new Promise<string>((resolve, reject) =>
+          execFile("git", args, { cwd: dir }, (error, stdout) =>
+            error ? reject(error) : resolve(stdout),
+          ),
+        );
+      try {
+        await run("init", "-q");
+        await body(dir, run);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    }
+    const initial = '[agents.codex]\nname = "stable_one"\n\n[agents.ori]\nname = "other_agent"\n';
+    /**
+     * Writer A pauses before its rename until writer B has made its final unchanged-since-read
+     * check (or 300 ms pass). Without the lock, B passes that check against the same document
+     * and its rename reverts A's change; with it, B cannot read until A has released.
+     */
+    function interleaved(path: string) {
+      let signal: () => void = () => undefined;
+      const bChecked = new Promise<void>((resolve) => (signal = resolve));
+      let bReads = 0;
+      const a: ConfigFileSystem = {
+        ...nodeFileSystem,
+        rename: async (from, to) => {
+          await Promise.race([bChecked, new Promise((r) => setTimeout(r, 300))]);
+          await nodeFileSystem.rename(from, to);
+        },
+      };
+      const b: ConfigFileSystem = {
+        ...nodeFileSystem,
+        readText: async (file) => {
+          const text = await nodeFileSystem.readText(file);
+          if (file === path && ++bReads === 2) signal();
+          return text;
+        },
+      };
+      return { a, b };
+    }
+
+    it("keeps both agents' changes to different entries", async () => {
+      await withRepo(async (dir) => {
+        const target = await resolveIdentityTarget(dir, undefined);
+        const path = join(target.root, IDENTITY_FILE);
+        await writeFile(path, initial);
+        const { a, b } = interleaved(path);
+        const first = setIdentity(target, "codex", "identity.triage_role", "designer", { fs: a });
+        await new Promise((r) => setTimeout(r, 50));
+        const second = setIdentity(target, "ori", "identity.triage_role", "implementer", { fs: b });
+        await Promise.all([first, second]);
+        const after = await readFile(path, "utf8");
+        expect(after).toMatch(/\[agents\.codex\][^[]*triage_role = "designer"/);
+        expect(after).toMatch(/\[agents\.ori\][^[]*triage_role = "implementer"/);
+        expect(await readdir(dir)).not.toContain(IDENTITY_LOCK_FILE);
+      });
+    });
+
+    it("applies concurrent writes of the same key in lock order, never corrupting the file", async () => {
+      await withRepo(async (dir) => {
+        const target = await resolveIdentityTarget(dir, undefined);
+        const path = join(target.root, IDENTITY_FILE);
+        await writeFile(path, initial);
+        const { a, b } = interleaved(path);
+        const first = setIdentity(target, "codex", "identity.triage_role", "designer", { fs: a });
+        await new Promise((r) => setTimeout(r, 50));
+        const second = setIdentity(target, "codex", "identity.triage_role", "implementer", {
+          fs: b,
+        });
+        expect(await Promise.all([first, second])).toMatchObject([
+          { changed: true },
+          { changed: true },
+        ]);
+        const record = await readIdentity(target.root, "codex");
+        expect(record).toMatchObject({ name: "stable_one", triageRole: "implementer" });
+        expect(await readFile(path, "utf8")).toContain('name = "other_agent"');
+      });
+    });
+
+    it("recovers a stale lock left by a crashed writer", async () => {
+      await withRepo(async (dir) => {
+        const target = await resolveIdentityTarget(dir, undefined);
+        const lock = join(target.root, IDENTITY_LOCK_FILE);
+        await writeFile(lock, '{"token":"crashed"}');
+        const old = new Date(Date.now() - 60_000);
+        await utimes(lock, old, old);
+        await setIdentity(target, "codex", "identity.triage_role", "designer", {
+          random: () => 0.1,
+          lockTiming: { waitMs: 2_000, staleMs: 10_000, pollMs: 10 },
+        });
+        expect((await readIdentity(target.root, "codex")).triageRole).toBe("designer");
+        expect(await readdir(dir)).not.toContain(IDENTITY_LOCK_FILE);
+      });
+    });
+
+    it("refuses as busy, leaving the file and the holder's lock alone, when the lock is held too long", async () => {
+      await withRepo(async (dir) => {
+        const target = await resolveIdentityTarget(dir, undefined);
+        const path = join(target.root, IDENTITY_FILE);
+        const lock = join(target.root, IDENTITY_LOCK_FILE);
+        await writeFile(path, initial);
+        await writeFile(lock, '{"token":"live-holder"}');
+        await expect(
+          setIdentity(target, "codex", "identity.triage_role", "designer", {
+            lockTiming: { waitMs: 150, staleMs: 60_000, pollMs: 10 },
+          }),
+        ).rejects.toMatchObject({ code: "conflict", recovery: expect.stringMatching(/^Retry/) });
+        expect(await readFile(path, "utf8")).toBe(initial);
+        expect(await readFile(lock, "utf8")).toBe('{"token":"live-holder"}');
+      });
+    });
+
+    it("keeps the lock file out of git status", async () => {
+      await withRepo(async (dir, run) => {
+        const target = await resolveIdentityTarget(dir, undefined);
+        await setIdentity(target, "codex", "identity.triage_role", "designer", {
+          random: () => 0.1,
+        });
+        // A lock left behind (crash, or a writer mid-update) is ignored too.
+        await writeFile(join(target.root, IDENTITY_LOCK_FILE), '{"token":"crashed"}');
+        expect(await run("status", "--porcelain", "--untracked-files=all", "--ignored=no")).toBe(
+          "",
+        );
+      });
+    });
   });
 
   it("resolves the working-tree root from nested directories and linked worktrees", async () => {

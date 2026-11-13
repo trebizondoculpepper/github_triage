@@ -131,6 +131,8 @@ export interface ConfigFileSystem {
   fileMode?(path: string): Promise<number | null>;
   /** Set POSIX permission bits; a no-op where unsupported (Windows). */
   setFileMode?(path: string, mode: number): Promise<void>;
+  /** Modification time in epoch ms, or null when missing; used to judge stale locks. */
+  modifiedAt?(path: string): Promise<number | null>;
   remove(path: string): Promise<void>;
   makeDirectory(path: string): Promise<void>;
 }
@@ -159,6 +161,14 @@ export const nodeFileSystem: ConfigFileSystem = {
   },
   async setFileMode(path, mode) {
     if (process.platform !== "win32") await chmod(path, mode);
+  },
+  async modifiedAt(path) {
+    try {
+      return (await stat(path)).mtimeMs;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
   },
   remove: (path) => unlink(path),
   async makeDirectory(path) {
