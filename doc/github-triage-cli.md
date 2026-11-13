@@ -2,6 +2,10 @@
 
 # Read-only GitHub action briefing CLI (#626)
 
+## Current design handoff
+
+[Consolidated owner decisions](design/README.md) define proposed briefings, ranking, identity, handoff, diagnostics and update checks. Those focused contracts supersede conflicting historical proposals below for their stated scope; they do not claim implementation or adopt all proposed process policies.
+
 ## Purpose and ownership
 
 `npm run triage` gives an LLM a single current briefing for this repository: suggested next actions, evidence, ready/unclaimed work, active owners, design/question/blocker context, PR checks/review findings, label inconsistencies and known dependency states. `--json` produces the same versioned structured information; `--issue N` includes the full issue body/comments and linked PR information for intake. This is a plain JavaScript ES-module CLI under `scripts/triage/`, launched as `node scripts/triage/cli.js` by npm and never imported into production. It needs no TypeScript loader, build step or GitHub SDK. The user explicitly authorized implementation after this design merges.

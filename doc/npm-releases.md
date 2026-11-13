@@ -8,11 +8,11 @@ Distribute the CLI as `@trebizondoculpepper/github-triage` so projects can insta
 
 Publish the built ESM CLI, with the package bin pointing to `dist/cli.mjs`. Explicitly allowlist the runtime artifact, README, and license. Include any additional runtime files only if the bundle needs them. Do not publish project identity files, caches, credentials, agent settings, or tests. Consumer installation must not invoke development tooling or install contributor Git hooks. Preserve the supported CLI runtime; build tooling can use its own supported Node version.
 
-Consumers install official releases with:
+Recommend one global CLI installation per user/machine, serving all project checkouts. Project identity remains local. Install official releases with:
 
 ```sh
-npm install --save-dev @trebizondoculpepper/github-triage
-npx github-triage --help
+npm install -g @trebizondoculpepper/github-triage
+github-triage --help
 ```
 
 An installed, authenticated GitHub CLI remains a runtime prerequisite for live queries. This installation example describes the target release, not a package already available.
@@ -27,11 +27,11 @@ An installed, authenticated GitHub CLI remains a runtime prerequisite for live q
 
 The prerelease counter comes from successful publication history, not edits committed back to main. A rerun for the same commit must recognize an already published artifact rather than assign another version. Serialize publication and prevent a delayed main run from moving `next` backwards. Main builds never move `latest`. Pull-request jobs never publish.
 
-Consumers opt into development builds with `npm install --save-dev @trebizondoculpepper/github-triage@next`; lockfiles record the resolved version.
+Consumers opt into development builds with `npm install -g @trebizondoculpepper/github-triage@next`. An explicit @VERSION can pin a global installation.
 
 ## Verification and publication
 
-Before either channel publishes, run formatting/lint/type checks, credential-free tests, and the build. Run `npm pack`, inspect the archive contents, install that exact archive into a clean temporary consumer, and exercise the installed executable: help, invalid arguments, and offline fixtures. Verify npm’s linked executable behavior (#11); direct source execution alone is insufficient.
+Before either channel publishes, run formatting/lint/type checks, credential-free tests, and the build. Run `npm pack`, inspect the archive contents, install that exact archive globally into an isolated temporary npm prefix, and exercise the installed executable: help, invalid arguments, and offline fixtures. Verify npm’s linked executable behavior (#11); direct source execution alone is insufficient.
 
 Use npm trusted publishing from the designated GitHub Actions workflow. Bootstrap the initial npm package/account authorization separately if required by npm; confirm current prerequisites against official documentation. GitHub and npm permissions govern publication, not a new triage-specific authority model. No credentials are committed or passed to untrusted PR jobs.
 
