@@ -80,6 +80,8 @@ jobs:
           run: |
             set -e
             node --version
+            npm --version
+            npm pack --json --dry-run --ignore-scripts | head -c 400; echo
             npm ci
             node dist/cli.mjs --help
             npx tsx src/cli.ts --help
