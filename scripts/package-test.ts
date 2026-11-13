@@ -13,13 +13,15 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { Client } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
 const run = promisify(execFile);
 const windows = process.platform === "win32";
 const npm = (args: string[], cwd: string) =>
   run(windows ? "npm.cmd" : "npm", args, { cwd, shell: windows });
 const root = resolve(".");
-const expected = ["LICENSE", "README.md", "dist/cli.mjs", "package.json"];
+const expected = ["LICENSE", "README.md", "dist/cli.mjs", "dist/mcp.mjs", "package.json"];
 
 interface PackResult {
   filename: string;
@@ -130,6 +132,46 @@ try {
   }
   console.log(
     "ok   global bin works from separate working directories (help, guidance, invalid args, smoke)",
+  );
+  // The second bin (#25): a real SDK client completes a stdio round trip with the installed
+  // MCP server. Listing tools needs no GitHub access or credentials.
+  const mcpBin = windows
+    ? join(prefix, "github-triage-mcp.cmd")
+    : join(prefix, "bin", "github-triage-mcp");
+  const transport = new StdioClientTransport({
+    command: windows ? process.execPath : mcpBin,
+    args: windows
+      ? [join(packageDir, "dist", "mcp.mjs"), "--repo", "example/example"]
+      : ["--repo", "example/example"],
+    cwd: checkouts[0],
+    stderr: "pipe",
+  });
+  const client = new Client({ name: "package-test", version: "1.0.0" });
+  await client.connect(transport);
+  try {
+    const { tools } = await client.listTools();
+    const names = tools.map((t) => t.name).sort();
+    const want = ["triage_briefing", "triage_dependencies", "triage_issue"];
+    if (JSON.stringify(names) !== JSON.stringify(want))
+      throw new Error(
+        `Installed MCP bin listed ${JSON.stringify(names)}, not ${JSON.stringify(want)}.`,
+      );
+    if (!tools.every((t) => t.annotations?.readOnlyHint === true))
+      throw new Error("Installed MCP tools must all be annotated read-only.");
+  } finally {
+    await client.close();
+  }
+  const mcpHelp = await run(
+    windows ? `"${join(prefix, "github-triage-mcp.cmd")}"` : mcpBin,
+    ["--help"],
+    {
+      shell: windows,
+    },
+  );
+  if (!mcpHelp.stdout.startsWith("Usage: github-triage-mcp"))
+    throw new Error("Installed MCP bin printed no help.");
+  console.log(
+    "ok   installed github-triage-mcp completes a stdio round trip (three read-only tools)",
   );
   console.log("Package test passed.");
 } finally {

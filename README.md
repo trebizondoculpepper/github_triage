@@ -93,6 +93,18 @@ github-triage claim 42 --repo owner/repository \
 
 Briefings and diagnostic commands are read-only. Explicit commands such as `claim`, `needs-human` and `deps add/remove` change GitHub; inspect their help and dry-run output before applying changes. Claiming means current work, with one active claim per agent.
 
+## MCP server (read-only)
+
+The package also installs `github-triage-mcp`, a stdio MCP server exposing three read-only tools over the same services as the CLI: `triage_briefing`, `triage_issue` and `triage_dependencies`. Each returns readable text plus a versioned envelope whose `result` is the CLI's `--json` output. It never changes GitHub. Contract: [doc/design/mcp.md](doc/design/mcp.md).
+
+Generic stdio configuration (install globally first; nothing registers a host automatically):
+
+```json
+{ "command": "github-triage-mcp", "args": ["--project", "/absolute/project/path"] }
+```
+
+`--repo owner/name` and `--agent NAME` set defaults; a tool's own `repo`/`agent` arguments win for that call. Without an agent, reads are unfocused. Automatic identity lookup from `agent-inbox.toml` and client roots are not implemented yet (#25).
+
 ## Repository settings and sizing
 
 Use the configuration commands from the target checkout instead of editing configuration files directly:

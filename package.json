@@ -11,10 +11,12 @@
     "url": "git+https://github.com/trebizondoculpepper/github_triage.git"
   },
   "bin": {
-    "github-triage": "dist/cli.mjs"
+    "github-triage": "dist/cli.mjs",
+    "github-triage-mcp": "dist/mcp.mjs"
   },
   "files": [
-    "dist/cli.mjs"
+    "dist/cli.mjs",
+    "dist/mcp.mjs"
   ],
   "type": "module",
   "publishConfig": {
@@ -22,7 +24,7 @@
   },
   "scripts": {
     "triage": "tsx src/cli.ts",
-    "build": "vp pack src/cli.ts --format esm --out-dir dist",
+    "build": "vp pack src/cli.ts --format esm --out-dir dist && vp pack src/mcp.ts --format esm --out-dir dist --no-clean",
     "check": "vp check && tsc -p doc/reports/examples",
     "lint": "vp lint",
     "fmt": "vp fmt",
@@ -32,9 +34,15 @@
     "prepack": "npm run build",
     "package-test": "tsx scripts/package-test.ts",
     "release": "tsx scripts/release.ts",
-    "make-prerelease": "tsx scripts/make-prerelease.ts"
+    "make-prerelease": "tsx scripts/make-prerelease.ts",
+    "mcp": "tsx src/mcp.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.4.0",
+    "zod": "4.6.7"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "2.4.0",
     "@types/node": "^26.6.6",
     "tsx": "^4.23.15",
     "typescript": "~7.0.2",
