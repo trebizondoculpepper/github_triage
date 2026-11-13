@@ -4323,6 +4323,21 @@ describe("estimate N records a size with provenance (#121)", () => {
     expect(await t.call(...base, "--agent", "kavya")).toBe(0);
     expect(t.json().status).toBe("unchanged");
   });
+  it("reports the stored provenance, not a new timestamp or revision, when unchanged", async () => {
+    const t = harness();
+    await t.call(...base);
+    const stored = t.remote.comments.at(-1)!;
+    const first = parseProvenance(stored)!;
+    expect(first.revision).toBe(sha);
+    const older = stored
+      .replaceAll(first.recordedAt, "2026-01-01T00:00:00.000Z")
+      .replaceAll(sha, "b".repeat(40));
+    t.remote.comments[t.remote.comments.length - 1] = older;
+    expect(await t.call(...base)).toBe(0);
+    expect(t.json().status).toBe("unchanged");
+    expect(t.json().provenance).toEqual(parseProvenance(older));
+    expect(JSON.stringify(t.json().provenance)).not.toContain(sha);
+  });
   it("reports API denial of the value write without claiming success", async () => {
     const t = harness({ failSet: { data: null, errors: [{ type: "FORBIDDEN", message: "no" }] } });
     expect(await t.call(...base)).toBe(1);

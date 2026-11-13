@@ -395,6 +395,8 @@ export async function runEstimate(
       sameList(recorded.assumptions, assumptions) &&
       sameList(recorded.references, references);
     if (before.current === size && provenanceMatches) {
+      // Nothing is written, so report the stored provenance (its real time and revision).
+      result.provenance = recorded;
       lines.push("Unchanged: the same size and provenance are already recorded.");
       return await finish("unchanged", 0);
     }
