@@ -93,7 +93,13 @@ When the CLI runs from an npm installation, an ordinary invocation (except `--he
 
 ## Doctor: check local configuration
 
-`github-triage doctor [--agent NAME] [--role NAME] [--repo owner/name] [--json]` provides independent read-only runtime, CLI/authentication, checkout and explicit identity/role checks. Stable statuses and recovery guidance are returned in-band. Local identity behavior is under design reconciliation in #25/#64; existing checks do not imply that another service must be installed or contacted. Do not remove a local identity file solely because external check-ins were withdrawn. Explicit selection remains supported. The earlier field-specific permission proposal is withdrawn; labels-only replacement behavior is specified in [complexity-estimation.md](design/complexity-estimation.md) and remains implementation work. Doctor never repairs configuration, creates fields or refreshes credentials implicitly.
+`github-triage doctor [--agent NAME] [--role NAME] [--repo owner/name] [--json]` runs independent read-only checks. Current stable IDs are `runtime.node`, `gh.available`, `gh.auth`, `project.checkout`, `identity.file`, `identity.git-ignored`, `identity.git-tracked`, `identity.entry`, `identity.compatibility`, `identity.agent` and `triage.role`. File presence, ignored-versus-already-tracked state and unimplemented lookup are distinct. Explicit `--agent` supplies attribution; `--role` is validated against registered views. Neither a GitHub login nor a host's generic role identifies an agent.
+
+Each check has `id`, `status`, `source`, `detail` and `next` (supported recovery commands). Statuses are `ok`, `missing`, `invalid`, `access`, `unsupported` (this version cannot determine it) and `unknown` (evidence unavailable). JSON schema version 1 contains `scope: "local-configuration"`, `repository`, `agent`, `role`, `checks` and per-status `summary` counts. Paths in results are relative to the checkout; credentials and raw auth output are not returned.
+
+Current exit behavior is `1` for any missing/invalid/access finding; otherwise `2` if any unknown remains; otherwise `0`. Unsupported checks do not currently change that exit code, so exit 0 alone is not proof that every capability was verified: inspect statuses and summary. Doctor never repairs configuration, creates fields, refreshes credentials or changes Git tracking implicitly.
+
+Local identity behavior is under design reconciliation in #25/#64. Keep current checks until that contract is resolved; withdrawing external service/check-in requirements does not by itself remove a local identity file. Explicit selection remains supported. The earlier field-permission proposal is withdrawn; [labels-only complexity](design/complexity-estimation.md) is separate pending implementation work.
 
 ## Ticket Doctor: check ticket consistency
 

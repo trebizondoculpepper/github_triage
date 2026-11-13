@@ -41,7 +41,7 @@ Label creation, label changes and the comment can be separate remote operations.
 
 Reuse the authenticated GitHub boundary. Applying labels and creating a missing repository label still require the appropriate GitHub permissions. Report denied/unknown access with the requested operation and useful recovery; no account-level native-field permissions or automatic credential refresh is required. Missing size-label definitions are normal until the first explicit estimate, not a repository setup defect.
 
-Keep general local Doctor diagnostics for runtime, authentication and checkout, and retain the independent cleanup of retired identity checks (#64). Remove the complexity field/mapping/creation-permission Doctor work (#150). Ticket Doctor may report conflicting recognized size labels and incomplete label evidence through the shared classifier, without repairing them or making unestimated tickets errors.
+Keep general local Doctor diagnostics for runtime, authentication and checkout, and keep the unresolved local-identity reconciliation (#64) independent. Remove the complexity field/mapping/creation-permission Doctor work (#150). Ticket Doctor may report conflicting recognized size labels and incomplete label evidence through the shared classifier, without repairing them or making unestimated tickets errors.
 
 ## Estimation as implementer work
 
@@ -59,7 +59,7 @@ Read-only output distinguishes estimated/unestimated/stale/conflicting/unknown a
 
 ## Focused delivery and future work
 
-A shared label classifier/queue slice can proceed independently of the mutation slice. The writer consumes that classifier. Remove obsolete field modules, configuration and help only after both read/write replacements are delivered, so intermediate main remains buildable. Each ticket has its own Why, acceptance and native implementation dependencies. This documentation must merge before behavior changes.
+The shared label classifier/read-side slice (#151) can be implemented and tested independently, but it must not activate label-backed queue/briefing reads while the writer still uses fields. Keep the existing read route until #152 switches both production reads and writes to labels together, consuming the prepared classifier/reader. Do not introduce a user-visible backend selector, dual active authority or migration. Remove obsolete field modules, configuration and help only after both read/write replacements are delivered, so intermediate main remains buildable. Each ticket has its own Why, acceptance and native implementation dependencies. This documentation must merge before behavior changes.
 
 Historical recalibration (#123) stays deferred until labels and estimates provide sufficient repository-specific examples. Guidance defaults work without historical benchmarks. Closed field-era tickets remain delivery history and are superseded by the replacement tickets; no issue is reopened merely to erase completed work. No field migration or compatibility backend is in scope.
 
