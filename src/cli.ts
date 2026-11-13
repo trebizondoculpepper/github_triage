@@ -39,6 +39,8 @@ import { defaultStaleHours, teamText, teamView } from "./team.js";
 import { ticketOwnership, ticketOwnershipText } from "./who.js";
 import { migrationPlanText, planMigration } from "./migration.js";
 import { presentBriefing, unavailableText } from "./service.js";
+import { runBriefing } from "./catchupcli.js";
+import type { BriefingFiles } from "./catchupcli.js";
 import {
   briefingProcess,
   fullGuideJson,
@@ -105,6 +107,8 @@ export interface Runtime {
   estimation?: LabelEstimationRuntime;
   /** Filesystem, git and working directory for the workflow-guide setting (#71). */
   guide?: GuideRuntime;
+  /** Checkpoint/cache files for `briefing` (#170); tests inject failures per phase. */
+  briefingFiles?: BriefingFiles;
 }
 
 type Output = (text: string) => Promise<void>;
@@ -112,6 +116,8 @@ type Output = (text: string) => Promise<void>;
 export const help = `Usage: github-triage [options]
        (from a source checkout: npm run triage -- [options])
 Read-only LLM action briefing. Requires authenticated gh and Node 26+.
+  briefing [--last 24h | --since ISO | --checkpoint PATH]  Read-only repository catch-up:
+                        what changed and what needs attention (briefing --help)
   deps N [--tree]       Read native upstream/downstream dependencies (deps --help)
   deps add|remove N --on M --note WHY [--dry-run]  Change native dependencies
   estimate --help       Complexity sizing guidance (XS..XXL)
@@ -564,6 +570,11 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
     await output(values.json ? JSON.stringify(fullGuideJson(), null, 2) + "\n" : fullGuideText());
     return 0;
   }
+  if (args[0] === "briefing")
+    return runBriefing(args.slice(1), output, {
+      ...runtime,
+      files: runtime.briefingFiles ?? { atomicJson, cachedSnapshot, checkpointSince },
+    });
   if (args[0] === "config") return runConfig(args.slice(1), output, runtime.config);
   if (args[0] === "doctor") {
     const { values } = parseArgs({

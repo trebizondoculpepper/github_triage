@@ -1,5 +1,12 @@
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 import { catchUp, catchUpJson, catchUpText } from "./catchup.js";
+import type { CatchUpReport } from "./catchup.js";
+import { briefingArgumentsFor, fileIdentity, sameDestination } from "./catchupcli.js";
+import { help as cliHelp, main } from "./cli.js";
+import type { Runtime } from "./cli.js";
 import { changeSubject, resolveWindow } from "./changes.js";
 import type { ChangeEvidence, EvidenceIssue, EvidencePullRequest } from "./changes.js";
 import { collect } from "./github.js";
@@ -412,6 +419,25 @@ describe("repository catch-up aggregation (#169)", () => {
     expect(report.sections.progress.total).toBe(
       catchUp(current(), { now: clock, limit: 100 }).sections.progress.total,
     );
+  });
+
+  it("bounds each notice and dynamic field so essential lines always fit the minimum budget", () => {
+    const warnings = Array.from(
+      { length: 40 },
+      (_, n) => `Collection warning ${n}: ${"x".repeat(900)}`,
+    );
+    const data = snap(current().issues, current().pullRequests, evidence(subjects), warnings);
+    const report = {
+      ...catchUp(data, { now: clock, limit: 100 }),
+      repository: `o/${"r".repeat(5000)}`,
+    };
+    for (const notice of ["n".repeat(250), "n".repeat(1000), "n".repeat(5000)]) {
+      const text = catchUpText(report, 1000, [notice, notice]);
+      expect(text.length).toBeLessThanOrEqual(1000);
+      expect(text).toMatch(/^Window /m);
+      expect(text).toContain("Scope: ");
+      expect(text).toContain(`INCOMPLETE: ${report.completeness.warnings.length} collection`);
+    }
   });
 
   it("keeps the whole text, header and footer included, within every allowed budget", () => {
@@ -975,5 +1001,392 @@ describe("repository catch-up aggregation (#169)", () => {
     expect(blockers.find((r) => r.subject.number === 92)?.kind).toBe("native-evidence-unknown");
     expect(blockers.find((r) => r.subject.number === 93)?.kind).toBe("unknown-checks");
     expect(catchUpText(report)).toContain("Native blocker closed as not planned");
+  });
+});
+
+describe("briefing command: CLI, checkpoint and offline cache (#170)", () => {
+  type Files = NonNullable<Runtime["briefingFiles"]>;
+  /** In-memory checkpoint/cache files: tests never touch a real checkpoint. */
+  const harness = (options: { collect?: Runtime["collect"]; files?: Partial<Files> } = {}) => {
+    const disk = new Map<string, string>();
+    const calls: string[] = [];
+    const errors: string[] = [];
+    const stdout: string[] = [];
+    const files: Files = {
+      checkpointSince: async (path, repository) => {
+        const text = disk.get(path);
+        if (text === undefined) return undefined;
+        const data = JSON.parse(text) as { repository?: string; through?: string };
+        if (data.repository !== repository)
+          throw new Error("Checkpoint schema/repository is invalid.");
+        return data.through;
+      },
+      cachedSnapshot: async (path) => {
+        const text = disk.get(path);
+        if (text === undefined) throw Object.assign(new Error("missing"), { code: "ENOENT" });
+        return JSON.parse(text) as Snapshot;
+      },
+      atomicJson: async (path, value) => {
+        calls.push(`write ${path}`);
+        disk.set(path, JSON.stringify(value));
+      },
+      ...options.files,
+    };
+    const runtime: Runtime = {
+      collect:
+        options.collect ??
+        (async (_repository, collectOptions) => {
+          calls.push("collect");
+          const window = collectOptions?.changeWindow;
+          if (!window) throw new Error("briefing must pass a change window");
+          const data = current();
+          return window.from === null
+            ? { ...data, since: null, changeEvidence: { ...evidence([]), coverage: [], window } }
+            : { ...data, changeEvidence: { ...evidence(subjects), window } };
+        }),
+      currentRepository: async () => repo,
+      now: clock,
+      stderr: (text) => errors.push(text),
+      updateCheck: async () => ({ status: "skipped", reason: "test" }) as never,
+      briefingFiles: files,
+    };
+    const run = (args: string[], output?: (text: string) => Promise<void>) =>
+      main(
+        ["briefing", "--no-update-check", ...args],
+        output ??
+          (async (text) => {
+            stdout.push(text);
+          }),
+        runtime,
+      );
+    return { disk, calls, errors, stdout, run };
+  };
+
+  it("documents the mode in installed and subcommand help", async () => {
+    expect(cliHelp).toContain("briefing [--last 24h | --since ISO | --checkpoint PATH]");
+    const h = harness();
+    expect(await h.run(["--help"])).toBe(0);
+    const text = h.stdout.join("");
+    for (const term of ["--last", "--since", "--checkpoint", "--offline", "--cache", "Scope:"])
+      expect(text).toContain(term);
+    expect(text).toContain("never on incomplete, failed");
+    expect(text).not.toMatch(/#\s/);
+    expect(h.calls).toEqual([]);
+  });
+
+  it("rejects invalid or combined windows before reading files or GitHub", async () => {
+    for (const args of [
+      ["--last", "1h", "--since", "2026-11-13T00:00:00Z"],
+      ["--last", "1h", "--checkpoint", "c.json"],
+      ["--since", "2026-11-13T00:00:00Z", "--checkpoint", "c.json"],
+      ["--last", "0h"],
+      ["--last", "24"],
+      ["--last", "99999999999d"],
+      ["--since", "yesterday"],
+      ["--since", "2026-11-13"],
+      ["--limit", "0"],
+      ["--limit", "101"],
+      ["--max-chars", "999"],
+      ["--max-chars", "40001"],
+      ["--offline"],
+      ["--offline", "--cache", "x.json", "--last", "1h"],
+      ["--offline", "--cache", "x.json", "--checkpoint", "c.json"],
+      ["--repo", "bad"],
+      ["--unknown"],
+    ])
+      expect(briefingArgumentsFor.bind(null, args), args.join(" ")).toThrow();
+    const h = harness();
+    await expect(h.run(["--since", "2027-01-01T00:00:00Z"])).rejects.toThrow("after");
+    expect(h.calls).toEqual([]);
+  });
+
+  it("establishes a baseline from a missing checkpoint, then advances only to the candidate", async () => {
+    const h = harness();
+    expect(await h.run(["--checkpoint", "cp.json", "--json"])).toBe(0);
+    const report = JSON.parse(h.stdout.join("")) as CatchUpReport;
+    expect(report.window).toMatchObject({ source: "baseline", from: null, through: t0 });
+    expect(report.checkpoint.candidate).toBe(t0);
+    expect(JSON.stringify(report)).not.toContain("advanced");
+    // The write comes after delivery and records exactly the report's candidate.
+    expect(h.calls).toEqual(["collect", "write cp.json"]);
+    expect(JSON.parse(h.disk.get("cp.json")!)).toEqual({
+      schemaVersion: 1,
+      repository: repo,
+      through: t0,
+    });
+    // The next run reads the recorded checkpoint as its window start.
+    h.disk.set(
+      "cp.json",
+      JSON.stringify({ schemaVersion: 1, repository: repo, through: inside(24) }),
+    );
+    h.stdout.length = 0;
+    expect(await h.run(["--checkpoint", "cp.json"])).toBe(0);
+    expect(h.stdout.join("")).toContain(`Window ${inside(24)} → ${t0} (checkpoint)`);
+    expect(h.stdout.join("")).toContain("written only after this report is delivered");
+  });
+
+  it.each([250, 1000, 5000])(
+    "keeps window, scope and completeness under --max-chars 1000 with a %i-character checkpoint path",
+    async (length) => {
+      const path = `/${"d".repeat(length - 12)}/state.json`;
+      expect(path.length).toBe(length);
+      // A complete empty report: the missing checkpoint establishes a baseline and advances.
+      const h = harness();
+      expect(await h.run(["--checkpoint", path, "--max-chars", "1000"])).toBe(0);
+      const text = h.stdout.join("");
+      expect(text.length).toBeLessThanOrEqual(1000);
+      expect(text).toMatch(/^Window /m);
+      expect(text).toContain("Scope: ");
+      expect(text).toContain("Changes: ");
+      expect(text).toContain("state.json");
+      if (length > 80) expect(text).toContain("path truncated; see --json");
+      expect(h.calls).toEqual(["collect", `write ${path}`]);
+
+      // An incomplete report keeps its completeness lines and never advances.
+      const partial = harness({
+        collect: async (_r, o) => ({
+          ...current(),
+          changeEvidence: { ...evidence(subjects, false), window: o!.changeWindow! },
+        }),
+      });
+      expect(await partial.run(["--checkpoint", path, "--max-chars", "1000"])).toBe(2);
+      const incomplete = partial.stdout.join("");
+      expect(incomplete.length).toBeLessThanOrEqual(1000);
+      expect(incomplete).toMatch(/^Window /m);
+      expect(incomplete).toContain("Scope: ");
+      expect(incomplete).toMatch(/history [A-Z]+; counts below are not a complete account/);
+      expect(incomplete).toContain("NOT advanced (incomplete evidence)");
+      expect(partial.disk.size).toBe(0);
+    },
+  );
+
+  it("never advances on output failure, collection failure or incomplete evidence", async () => {
+    const h = harness();
+    await expect(
+      h.run(["--checkpoint", "cp.json"], async () => {
+        throw new Error("broken stdout");
+      }),
+    ).rejects.toThrow("broken stdout");
+    expect(h.disk.has("cp.json")).toBe(false);
+
+    const failing = harness({
+      collect: async () => {
+        throw new Error("API unavailable");
+      },
+    });
+    await expect(failing.run(["--checkpoint", "cp.json"])).rejects.toThrow("API unavailable");
+    expect(failing.disk.size).toBe(0);
+
+    const partial = harness({
+      collect: async (_r, o) => ({
+        ...current(),
+        changeEvidence: { ...evidence(subjects, false), window: o!.changeWindow! },
+      }),
+    });
+    expect(await partial.run(["--checkpoint", "cp.json", "--json"])).toBe(2);
+    expect(JSON.parse(partial.stdout.join("")).checkpoint.candidate).toBeNull();
+    expect(partial.disk.size).toBe(0);
+  });
+
+  it.each([
+    ["the same path", "state.json", "state.json"],
+    ["a relative and an absolute path", "state.json", `${process.cwd()}/state.json`],
+    ["a path containing ..", "state.json", "sub/../state.json"],
+  ])(
+    "refuses --cache and --checkpoint naming one file via %s, before any read or write",
+    async (_case, cache, checkpoint) => {
+      const h = harness();
+      expect(await h.run(["--cache", cache, "--checkpoint", checkpoint, "--json"])).toBe(1);
+      expect(JSON.parse(h.stdout.join(""))).toMatchObject({
+        kind: "repository-briefing-refusal",
+        file: "cache",
+        checkpointAdvanced: false,
+      });
+      expect(JSON.parse(h.stdout.join("")).next).toContain("different file paths");
+      expect(h.calls).toEqual([]);
+      expect(h.disk.size).toBe(0);
+    },
+  );
+
+  it("refuses a --cache symlink to the checkpoint, on stderr without --json", async () => {
+    const identity = async (path: string) => ({
+      resolved: `/work/${path}`,
+      real: path === "link.json" ? "/work/state.json" : `/work/${path}`,
+    });
+    const h = harness({ files: { identity } });
+    h.disk.set("state.json", "{}");
+    expect(await h.run(["--cache", "link.json", "--checkpoint", "state.json"])).toBe(1);
+    expect(h.errors.join("")).toContain("--cache and --checkpoint resolve to the same file");
+    expect(h.errors.join("")).toContain("Next: Give --cache and --checkpoint different");
+    expect(h.calls).toEqual([]);
+    expect(h.disk.get("state.json")).toBe("{}");
+  });
+
+  it("refuses paths that differ only by case when the filesystem says they are one file", async () => {
+    const identity = async (path: string) => ({
+      resolved: `/work/${path}`,
+      real: `/work/${path}`,
+      inode: { dev: 1, ino: 42 },
+    });
+    const h = harness({ files: { identity } });
+    expect(await h.run(["--cache", "State.json", "--checkpoint", "state.json", "--json"])).toBe(1);
+    expect(h.calls).toEqual([]);
+    expect(h.disk.size).toBe(0);
+  });
+
+  it("identifies a real symlink, a symlinked parent and .. as the same destination", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "briefing-identity-"));
+    try {
+      await writeFile(join(dir, "state.json"), "{}");
+      const target = await fileIdentity(join(dir, "state.json"));
+      let linked = true;
+      try {
+        await symlink(join(dir, "state.json"), join(dir, "link.json"));
+      } catch {
+        linked = false; // Windows without symlink privilege.
+      }
+      if (linked)
+        expect(sameDestination(await fileIdentity(join(dir, "link.json")), target)).toBe(true);
+      expect(sameDestination(await fileIdentity(join(dir, "x", "..", "state.json")), target)).toBe(
+        true,
+      );
+      expect(sameDestination(await fileIdentity(join(dir, "other.json")), target)).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves a symlinked ancestor above a missing directory", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "briefing-identity-"));
+    try {
+      await mkdir(join(dir, "real"));
+      try {
+        await symlink(join(dir, "real"), join(dir, "link"), "dir");
+      } catch {
+        return; // Windows without symlink privilege.
+      }
+      const viaLink = await fileIdentity(join(dir, "link", "new", "state.json"));
+      const direct = await fileIdentity(join(dir, "real", "new", "state.json"));
+      expect(sameDestination(viaLink, direct)).toBe(true);
+      const dotted = await fileIdentity(join(dir, "link", "new", ".", "x", "..", "state.json"));
+      expect(sameDestination(dotted, direct)).toBe(true);
+      const other = await fileIdentity(join(dir, "real", "other", "state.json"));
+      expect(sameDestination(viaLink, other)).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("walks up to the nearest existing ancestor through the realpath boundary", async () => {
+    const root = resolve("/");
+    const realpathOf = async (path: string): Promise<string> => {
+      if (path === join(root, "work", "link")) return join(root, "work", "real");
+      if (path === join(root, "work") || path === root) return path;
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    };
+    const viaLink = await fileIdentity(join(root, "work", "link", "new", "state.json"), realpathOf);
+    const direct = await fileIdentity(join(root, "work", "real", "new", "state.json"), realpathOf);
+    expect(viaLink.real).toBe(join(root, "work", "real", "new", "state.json"));
+    expect(sameDestination(viaLink, direct)).toBe(true);
+  });
+
+  it("allows distinct --cache and --checkpoint files", async () => {
+    const h = harness();
+    expect(await h.run(["--cache", "cache.json", "--checkpoint", "cp.json", "--json"])).toBe(0);
+    expect(h.calls).toContain("write cache.json");
+  });
+
+  it("reports a checkpoint write failure on stderr only, with exit 1 and one JSON object", async () => {
+    const h = harness({
+      files: {
+        atomicJson: async () => {
+          throw Object.assign(new Error("/secret/path EACCES"), { code: "EACCES" });
+        },
+      },
+    });
+    expect(await h.run(["--checkpoint", "cp.json", "--json"])).toBe(1);
+    expect(h.stdout).toHaveLength(1);
+    expect(JSON.parse(h.stdout[0]!).kind).toBe("repository-briefing");
+    expect(h.errors.join("")).toContain("was not advanced (filesystem error EACCES)");
+    expect(h.errors.join("")).not.toContain("/secret/path");
+  });
+
+  it("refuses malformed or mismatched checkpoints without collecting or resetting them", async () => {
+    const h = harness();
+    h.disk.set("cp.json", "{not json");
+    expect(await h.run(["--checkpoint", "cp.json", "--json"])).toBe(1);
+    expect(JSON.parse(h.stdout.join(""))).toMatchObject({
+      kind: "repository-briefing-refusal",
+      file: "checkpoint",
+      reason: "not valid JSON",
+      checkpointAdvanced: false,
+    });
+    expect(h.disk.get("cp.json")).toBe("{not json");
+    h.disk.set(
+      "cp.json",
+      JSON.stringify({ schemaVersion: 1, repository: "other/repo", through: old }),
+    );
+    h.stdout.length = 0;
+    expect(await h.run(["--checkpoint", "cp.json"])).toBe(1);
+    expect(h.errors.join("")).toContain("briefing refused: checkpoint cp.json");
+    expect(h.errors.join("")).toContain(`--repo ${repo}`);
+    h.disk.set(
+      "cp.json",
+      JSON.stringify({ schemaVersion: 1, repository: repo, through: "2027-01-01T00:00:00Z" }),
+    );
+    await expect(h.run(["--checkpoint", "cp.json"])).rejects.toThrow("after the collection start");
+    expect(h.calls).toEqual([]);
+  });
+
+  it("stores the window with the cache and replays it offline without calls or advancement", async () => {
+    const h = harness();
+    expect(await h.run(["--last", "24h", "--cache", "cache.json"])).toBe(0);
+    expect(h.calls).toEqual(["collect", "write cache.json"]);
+    h.calls.length = 0;
+    h.stdout.length = 0;
+    expect(await h.run(["--offline", "--cache", "cache.json", "--json"])).toBe(0);
+    const report = JSON.parse(h.stdout.join(""));
+    expect(report.offline.notice).toContain("cannot advance live checkpoints");
+    expect(report.window.from).toBe(window.from);
+    expect(report.checkpoint.candidate).toBeNull();
+    expect(h.calls).toEqual([]);
+    h.stdout.length = 0;
+    expect(await h.run(["--offline", "--cache", "cache.json"])).toBe(0);
+    expect(h.stdout.join("").split("\n")[1]).toMatch(/^OFFLINE: cache from .*cannot advance/);
+  });
+
+  it("reports a legacy cache without retained history as unavailable, not as no changes", async () => {
+    const h = harness();
+    const { changeEvidence: _, ...legacy } = current();
+    h.disk.set("old.json", JSON.stringify(legacy));
+    expect(await h.run(["--offline", "--cache", "old.json", "--json"])).toBe(2);
+    const report = JSON.parse(h.stdout.join(""));
+    expect(report.completeness.history).toBe("unavailable");
+    expect(h.calls).toEqual([]);
+    h.stdout.length = 0;
+    expect(await h.run(["--offline", "--cache", "missing.json", "--json"])).toBe(1);
+    expect(JSON.parse(h.stdout.join(""))).toMatchObject({
+      file: "cache",
+      reason: "filesystem error ENOENT",
+    });
+  });
+
+  it("refuses a failed cache write before output and leaves the checkpoint alone", async () => {
+    const h = harness({
+      files: {
+        atomicJson: async (path) => {
+          if (path === "cache.json") throw Object.assign(new Error("full"), { code: "ENOSPC" });
+        },
+      },
+    });
+    expect(await h.run(["--checkpoint", "cp.json", "--cache", "cache.json"])).toBe(1);
+    expect(h.stdout).toEqual([]);
+    expect(h.errors.join("")).toContain("no checkpoint was advanced");
+  });
+
+  it("keeps text within the budget", async () => {
+    const h = harness();
+    expect(await h.run(["--max-chars", "1000", "--checkpoint", "cp.json"])).toBe(0);
+    expect(h.stdout.join("").length).toBeLessThanOrEqual(1000);
   });
 });

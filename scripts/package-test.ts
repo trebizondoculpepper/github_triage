@@ -117,6 +117,15 @@ try {
       throw new Error(`Installed complexity guidance does not describe size labels in ${cwd}.`);
     if (/setup complexity|issue field|fieldId/.test(help.stdout + guidance.stdout))
       throw new Error(`Installed bin still advertises retired native-field setup in ${cwd}.`);
+    // Repository briefing mode (#170): the installed help documents the mode and its windows.
+    const catchUpHelp = await cli(["briefing", "--help"]);
+    if (
+      !help.stdout.includes("briefing [--last 24h") ||
+      !["--last", "--since", "--checkpoint", "--offline", "Scope:"].every((term) =>
+        catchUpHelp.stdout.includes(term),
+      )
+    )
+      throw new Error(`Installed bin does not document briefing mode in ${cwd}.`);
     const invalid = await cli(["--no-such-option"]).then(
       () => null,
       (error: { code?: unknown }) => error,
