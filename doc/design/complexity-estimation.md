@@ -1,6 +1,6 @@
 # Repository-relative complexity: initial guidance and rollout
 
-Owner-approved delivery direction; architecture review is pending. The first delivery is complexity only: optional T-shirt estimation using bundled guidance, native GitHub storage and CLI/MCP help. Repository-history recalibration is also deferred until estimates exist. Designer escalation, automatic splitting and new ranking weights are not decided here. No fields, labels or runtime features are created by this document.
+Owner-approved architecture, merged in PR #114. Focused implementation tickets are design-ready; native blockers and current ownership still govern pickup. The first delivery is complexity only: optional T-shirt estimation using bundled guidance, native GitHub storage and CLI/MCP help. Repository-history recalibration is also deferred until estimates exist. Designer escalation, automatic splitting and new ranking weights are not decided here. No fields, labels or runtime features are created by this document.
 
 ## Default complexity guidance
 
