@@ -8,6 +8,8 @@ import {
 } from "./dependencies.js";
 import { pickupEligibility, rankPickup, urgencyBand } from "./ranking.js";
 import type { PickupOrder } from "./ranking.js";
+import { estimationReport, estimationText } from "./estimation.js";
+import type { EstimationInput } from "./estimation.js";
 import type { Action, Dependency, Issue, PullRequest, Snapshot } from "./types.js";
 
 export { urgencyBand };
@@ -522,6 +524,10 @@ export interface BriefingOptions {
   order?: PickupOrder;
   /** Stale-claim threshold in hours; default two days. */
   staleHours?: number;
+  /** Collected complexity configuration and native values (#122); absent means unknown. */
+  estimation?: EstimationInput;
+  /** Explicit request to estimate: present the estimation queue first. */
+  estimate?: boolean;
 }
 /** A bounded list: the first `limit` items plus how many were left out. */
 export interface Bounded<T> {
@@ -629,6 +635,13 @@ export function briefing(snapshot: Snapshot, options: BriefingOptions, now: Date
         }),
       ),
     ),
+    // Optional estimation queue (#122): separate eligibility from implementation pickup.
+    estimation: estimationReport(issues, options.estimation, {
+      prs,
+      platform: options.platform,
+      limit: options.limit,
+      requested: options.estimate,
+    }),
     claimed: limit(issues.filter((issue) => owners(issue).length).map(context)),
     attention: limit(
       issues
@@ -689,6 +702,9 @@ export function textReport(report: Briefing): string {
     lines.push(`\n${title}`, ...rows.map((row) => `- ${row}`));
     if (omitted) lines.push(`- ${omitted} more omitted; increase --limit or use --issue N.`);
   };
+  // An explicit --estimate request puts estimation before all other work, as in compact output.
+  if (report.estimation.requested)
+    section("ESTIMATION (requested)", estimationText(report.estimation));
   section(
     "NEXT ACTIONS",
     report.actions.items.map(
@@ -727,6 +743,8 @@ export function textReport(report: Briefing): string {
     report.parked.items.map((item) => `#${item.number} ${item.title} ${item.url}`),
     report.parked.omitted,
   );
+  if (!report.estimation.requested && report.estimation.status !== "disabled")
+    section("ESTIMATION (optional, after the work above)", estimationText(report.estimation));
   section(
     "NATIVE DEPENDENCIES BY TICKET",
     report.dependencies

@@ -4879,3 +4879,291 @@ describe("Ticket Doctor: complexity configuration (#120)", () => {
     expect(lines).toContain("next: github-triage setup complexity --select IF_good");
   });
 });
+
+describe("estimation queue and briefing visibility (#122)", () => {
+  const root = "/repo";
+  const path = join(root, CONFIG_PATH);
+  const field = "IF_size";
+  const config = (text: string | null): ConfigFileSystem => ({
+    readText: async (file) => (file === path ? text : null),
+    writeText: async () => undefined,
+    rename: async () => undefined,
+    remove: async () => undefined,
+    makeDirectory: async () => undefined,
+  });
+  const git: GitRunner = async (args) =>
+    args[0] === "rev-parse" ? `${root}\n` : `origin\thttps://github.com/${repo}.git (fetch)\n`;
+  const mapped = `{"schemaVersion":1,"complexity":{"fieldId":"${field}"}}\n`;
+  const valuesAnswer = (values: Record<number, string | null>) => ({
+    data: {
+      repository: {
+        issues: {
+          pageInfo: { hasNextPage: false, endCursor: null },
+          nodes: Object.entries(values).map(([number, name]) => ({
+            number: Number(number),
+            issueFieldValues: {
+              nodes: name
+                ? [{ __typename: "IssueFieldSingleSelectValue", name, field: { id: field } }]
+                : [],
+            },
+          })),
+        },
+      },
+    },
+    errors: [],
+  });
+  const sizeOptions = ["XS", "S", "M", "L", "XL", "XXL"].map((name) => ({ name }));
+  const sizeField = {
+    __typename: "IssueFieldSingleSelect",
+    id: field,
+    name: "Complexity",
+    dataType: "SINGLE_SELECT",
+    visibility: "ALL",
+    options: sizeOptions,
+  };
+  /** Owner issue-field discovery answer (Ticket Doctor's verification query). */
+  const discoveryOf = (
+    fields: unknown[] | null,
+    errors: { type?: string; message?: string }[] = [],
+  ) => ({
+    data: {
+      viewer: { login: "owner" },
+      repository: {
+        owner: {
+          __typename: "User",
+          id: "U_1",
+          login: "owner",
+          issueFields: fields ? { pageInfo: { hasNextPage: false }, nodes: fields } : null,
+        },
+      },
+    },
+    errors,
+  });
+  const apiOf = (answer: unknown, discovery: unknown = discoveryOf([sizeField])) => {
+    /** Native value queries only; field verification is recorded separately. */
+    const calls: unknown[] = [];
+    const verifications: unknown[] = [];
+    return {
+      calls,
+      verifications,
+      api: {
+        query: async (q: string, v: Record<string, string>) => {
+          if (q.includes("issueFields(")) {
+            verifications.push(v);
+            return discovery as { data: unknown; errors: { type?: string; message?: string }[] };
+          }
+          calls.push(v);
+          if (answer instanceof Error) throw answer;
+          return answer as { data: unknown; errors: { type?: string; message?: string }[] };
+        },
+        mutate: async () => {
+          throw new Error("briefing must never mutate");
+        },
+      },
+    };
+  };
+  const marker = (size: "M" | "S", recordedAt = time, guidanceVersion = 1) =>
+    provenanceComment({
+      schemaVersion: 1,
+      kind: "complexity-estimate",
+      fieldId: field,
+      size,
+      previous: null,
+      rationale: "contained capability across modules",
+      assumptions: ["blocker #9 supplies the API; waiting excluded"],
+      references: [],
+      estimator: "ana",
+      revision: null,
+      guidanceVersion,
+      recordedAt,
+    });
+  const withComment = (item: Issue, body: string): Issue => ({
+    ...item,
+    comments: page([{ body, url: `${item.url}#c`, author: null, createdAt: time }]),
+  });
+  async function brief(
+    configText: string | null,
+    answer: unknown,
+    issues: Issue[],
+    args: string[] = [],
+    discovery?: unknown,
+  ) {
+    const { api, calls } = apiOf(answer, discovery);
+    let out = "";
+    const code = await main(["--json", ...args], async (t) => void (out = t), {
+      collect: async () => snapshot(issues, []),
+      currentRepository: async () => repo,
+      now: () => new Date(time),
+      estimation: { fs: config(configText), git, cwd: root, api },
+    });
+    return { code, report: JSON.parse(out), calls };
+  }
+  const blocked = (): Issue => ({
+    ...issue(2),
+    issueDependenciesSummary: { blockedBy: 1, totalBlockedBy: 1, blocking: 0, totalBlocking: 0 },
+  });
+
+  it("queues unestimated blocked tickets while they stay ineligible for implementation", async () => {
+    const { code, report, calls } = await brief(mapped, valuesAnswer({ 1: "M", 2: null }), [
+      withComment(issue(1), marker("M")),
+      blocked(),
+    ]);
+    expect(code).toBe(0);
+    expect(calls).toHaveLength(1);
+    expect(report.schemaVersion).toBe(2);
+    expect(report.estimation).toMatchObject({ status: "available", requested: false });
+    expect(report.estimation.queue.items.map((e: { number: number }) => e.number)).toEqual([2]);
+    expect(report.estimation.queue.items[0]).toMatchObject({
+      state: "unestimated",
+      implementation: "ineligible",
+    });
+    const one = report.subjects.find((s: { number: number }) => s.number === 1);
+    expect(one.complexity).toMatchObject({
+      size: "M",
+      state: "estimated",
+      recorded: { rationale: "contained capability across modules", estimator: "ana" },
+    });
+    // Eligible pickup still comes first; estimation is not offered automatically.
+    expect(report.actions.items[0]).toBe(issue(1).url);
+    expect(report.estimation.offered).toBe(false);
+  });
+  it("flags stale estimates: value drift, older guidance or later description edits", async () => {
+    const edited = { ...withComment(issue(1), marker("M")), lastEditedAt: "2026-11-13T00:00:00Z" };
+    const { report } = await brief(mapped, valuesAnswer({ 1: "M", 2: "L", 3: "S" }), [
+      edited,
+      withComment(issue(2), marker("M")),
+      withComment(issue(3), marker("S", time, 0)),
+    ]);
+    const states = report.estimation.queue.items.map(
+      (e: { number: number; state: string; reasons: string[] }) => [
+        e.number,
+        e.state,
+        e.reasons.join(),
+      ],
+    );
+    expect(states).toEqual([
+      [1, "stale", expect.stringContaining("description edited")],
+      [2, "stale", expect.stringContaining("differs from recorded estimate M")],
+      [3, "stale", expect.stringContaining("guidance version 0 < 1")],
+    ]);
+  });
+  it("treats unreadable native values (FORBIDDEN) as unknown, never unestimated, and still succeeds", async () => {
+    const forbidden = { data: null, errors: [{ type: "FORBIDDEN", message: "not enabled" }] };
+    const { code, report } = await brief(mapped, forbidden, [
+      withComment(issue(1), marker("M")),
+      blocked(),
+    ]);
+    expect(code).toBe(0);
+    expect(report.estimation).toMatchObject({ status: "unknown", queue: null, unknown: 2 });
+    expect(report.estimation.detail).toContain("FORBIDDEN");
+    const one = report.subjects.find((s: { number: number }) => s.number === 1);
+    expect(one.complexity).toMatchObject({ state: "unknown", size: null, recorded: { size: "M" } });
+    const thrown = await brief(mapped, new Error("network down"), [issue(1)]);
+    expect(thrown.code).toBe(0);
+    expect(thrown.report.estimation.status).toBe("unknown");
+  });
+  it("keeps the queue unavailable when the mapped field is deleted, incompatible or inaccessible", async () => {
+    const issues = [issue(1), blocked()];
+    // The values query succeeds with no matching values: without verification every
+    // issue would wrongly be queued as unestimated.
+    const empty = valuesAnswer({ 1: null, 2: null });
+    const other = { ...sizeField, id: "IF_other" };
+    const deleted = await brief(mapped, empty, issues, [], discoveryOf([other]));
+    expect(deleted.report.estimation).toMatchObject({ status: "missing", queue: null, unknown: 2 });
+    expect(deleted.report.estimation.findings[0]).toMatchObject({
+      rule: "complexity-field-missing",
+      next: [
+        "github-triage setup complexity --select IF_other",
+        "github-triage config set complexity.enabled false",
+      ],
+    });
+    const wrong = { ...sizeField, options: sizeOptions.slice(0, 3) };
+    const incompatible = await brief(mapped, empty, issues, [], discoveryOf([wrong]));
+    expect(incompatible.report.estimation).toMatchObject({ status: "incompatible", queue: null });
+    expect(incompatible.report.estimation.findings[0].rule).toBe("complexity-field-incompatible");
+    const forbidden = discoveryOf(null, [{ type: "FORBIDDEN", message: "no" }]);
+    const inaccessible = await brief(mapped, empty, issues, [], forbidden);
+    expect(inaccessible.report.estimation).toMatchObject({ status: "inaccessible", queue: null });
+    expect(inaccessible.report.estimation.findings[0]).toMatchObject({
+      rule: "complexity-field-api-inaccessible",
+      next: ["github-triage setup complexity", "github-triage config set complexity.enabled false"],
+    });
+    for (const r of [deleted, incompatible, inaccessible]) {
+      expect(r.code).toBe(0);
+      expect(r.calls).toEqual([]);
+      const subject = r.report.subjects.find((s: { number: number }) => s.number === 2);
+      expect(subject.complexity.state).toBe("unknown");
+    }
+  });
+  it("suppresses the queue when disabled and reports a missing mapping as a finding", async () => {
+    const disabled = await brief(
+      '{"schemaVersion":1,"complexity":{"enabled":false,"fieldId":"x"}}',
+      valuesAnswer({}),
+      [issue(1)],
+    );
+    expect(disabled.calls).toEqual([]);
+    expect(disabled.report.estimation).toMatchObject({ status: "disabled", queue: null });
+    const unmapped = await brief(null, valuesAnswer({}), [issue(1)]);
+    expect(unmapped.calls).toEqual([]);
+    expect(unmapped.report.estimation).toMatchObject({ status: "setup-required", queue: null });
+    expect(unmapped.report.estimation.findings[0]).toMatchObject({
+      rule: "complexity-field-unmapped",
+      next: ["github-triage setup complexity", "github-triage config set complexity.enabled false"],
+    });
+  });
+  it("offers estimation only without higher-priority work, or first on --estimate", async () => {
+    const idle = await brief(mapped, valuesAnswer({ 2: null }), [blocked()]);
+    expect(idle.report.estimation.offered).toBe(true);
+    const { api } = apiOf(valuesAnswer({ 1: null, 2: null }));
+    let text = "";
+    await main(["--estimate"], async (t) => void (text = t), {
+      collect: async () => snapshot([issue(1), blocked()], []),
+      currentRepository: async () => repo,
+      now: () => new Date(time),
+      estimation: { fs: config(mapped), git, cwd: root, api },
+    });
+    expect(text.indexOf("ESTIMATION (requested)")).toBeGreaterThan(0);
+    expect(text.indexOf("ESTIMATION (requested)")).toBeLessThan(text.indexOf("NEXT STEPS"));
+    expect(text).toContain("unestimated [unestimated]; implementation ineligible");
+    expect(text).toContain("acquires no claim");
+    let full = "";
+    await main(["--estimate", "--full"], async (t) => void (full = t), {
+      collect: async () => snapshot([issue(1), blocked()], []),
+      currentRepository: async () => repo,
+      now: () => new Date(time),
+      estimation: { fs: config(mapped), git, cwd: root, api },
+    });
+    expect(full.indexOf("ESTIMATION (requested)")).toBeGreaterThan(0);
+    expect(full.indexOf("ESTIMATION (requested)")).toBeLessThan(full.indexOf("NEXT ACTIONS"));
+    let plain = "";
+    await main([], async (t) => void (plain = t), {
+      collect: async () => snapshot([issue(1), blocked()], []),
+      currentRepository: async () => repo,
+      now: () => new Date(time),
+      estimation: { fs: config(mapped), git, cwd: root, api },
+    });
+    expect(plain.indexOf("ESTIMATION (optional")).toBeGreaterThan(plain.indexOf("NEXT STEPS"));
+    expect(plain).toContain("#1 Ticket 1  (unestimated)");
+  });
+  it("reports offline briefings as unknown without querying, and keeps --full in sync", async () => {
+    const { api, calls } = apiOf(valuesAnswer({ 1: null }));
+    const dir = await mkdtemp(join(tmpdir(), "triage-estimation-"));
+    try {
+      const cache = join(dir, "cache.json");
+      await atomicJson(cache, snapshot([issue(1)], []));
+      let out = "";
+      await main(["--offline", "--cache", cache, "--full", "--json"], async (t) => void (out = t), {
+        collect: async () => {
+          throw new Error("offline only");
+        },
+        currentRepository: async () => repo,
+        estimation: { fs: config(mapped), git, cwd: root, api },
+      });
+      expect(calls).toEqual([]);
+      expect(JSON.parse(out).estimation).toMatchObject({ status: "unknown", queue: null });
+      expect(JSON.parse(out).schemaVersion).toBe(1);
+    } finally {
+      await rm(dir, { recursive: true });
+    }
+  });
+});
