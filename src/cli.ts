@@ -26,7 +26,8 @@ import {
   planNeedsHuman,
   planRelease,
 } from "./claims.js";
-import { checkForUpdate, installedVersion, optOutEnv, updateAdvisory } from "./updates.js";
+import { cachedCheckForUpdate } from "./updatecache.js";
+import { installedVersion, optOutEnv, updateAdvisory } from "./updates.js";
 import { defaultStaleHours, teamText, teamView } from "./team.js";
 import { ticketOwnership, ticketOwnershipText } from "./who.js";
 import { migrationPlanText, planMigration } from "./migration.js";
@@ -76,7 +77,7 @@ export interface Runtime {
   migrationRuntime?: Parameters<typeof planMigration>[1];
   query?: Query;
   now?: () => Date;
-  updateCheck?: typeof checkForUpdate;
+  updateCheck?: typeof cachedCheckForUpdate;
   stderr?: (text: string) => void;
   /** Filesystem, git and working directory for `config`; tests never touch the real checkout. */
   config?: ConfigRuntime;
@@ -491,11 +492,11 @@ export async function main(
     ),
   runtime: Runtime = { collect, currentRepository, dependencyReport },
 ): Promise<number> {
-  // Version check (#51): runs alongside the command, bounded by a short timeout, and reports
+  // Version check (#51, cached daily per user by #65): runs alongside the command, bounded by a short timeout, and reports
   // only on stderr so JSON on stdout stays valid. --offline and opt-outs mean no network.
   const optOut = args.includes("--no-update-check") || !!process.env[optOutEnv];
   const rest = args.filter((a) => a !== "--no-update-check");
-  const check = runtime.updateCheck ?? checkForUpdate;
+  const check = runtime.updateCheck ?? cachedCheckForUpdate;
   if (rest[0] === "version") {
     const installed = await installedVersion();
     const result = await check({ offline: rest.includes("--offline"), optOut, installed });

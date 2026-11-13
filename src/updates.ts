@@ -36,6 +36,8 @@ export type UpdateCheckResult =
       available: string;
       channel: string;
       command: string;
+      /** false when the cached check already showed this notice within the last 24 hours (#65). */
+      notify?: boolean;
     };
 
 export interface CheckOptions {
@@ -85,9 +87,100 @@ export async function installedVersion(
   }
 }
 
+export type Eligibility =
+  | { skip: UpdateCheckResult }
+  | { skip?: undefined; info: InstalledInfo; current: ParsedVersion; channel: Channel };
+
+export type Channel = "latest" | "next";
+
+/** Opt-out, offline, checkout and unknown-version skips, shared by the plain and cached checks. */
+export async function eligibility(
+  installed: InstalledInfo | undefined,
+  offline: boolean,
+  optOut: boolean,
+): Promise<Eligibility> {
+  const info = installed ?? (await installedVersion());
+  if (optOut)
+    return {
+      skip: { status: "skipped", reason: `disabled (${optOutEnv} or --no-update-check)` },
+    };
+  if (offline) return { skip: { status: "skipped", reason: "offline: no network lookup" } };
+  if (!info.installed)
+    return {
+      skip: {
+        status: "skipped",
+        reason: "not an npm installation (source or development checkout)",
+      },
+    };
+  const current = parseVersion(info.version ?? "");
+  if (!current)
+    return {
+      skip: {
+        status: "skipped",
+        reason: `installed version unknown (${info.reason ?? info.version ?? "none"})`,
+      },
+    };
+  return { info, current, channel: current.next === null ? "latest" : "next" };
+}
+
+/** Result of one registry lookup: the channel's version, or why there is none. */
+type Lookup = { ok: true; available: string } | { ok: false; reason: string };
+
+async function lookup(
+  channel: Channel,
+  fetchImpl: typeof fetch,
+  timeoutMs: number,
+): Promise<Lookup> {
+  let tags: unknown;
+  try {
+    const response = await fetchImpl(
+      `https://registry.npmjs.org/-/package/${packageName.replace("/", "%2f")}/dist-tags`,
+      { signal: AbortSignal.timeout(timeoutMs), headers: { accept: "application/json" } },
+    );
+    if (!response.ok) return { ok: false, reason: `npm registry returned ${response.status}` };
+    tags = await response.json();
+  } catch (error) {
+    return {
+      ok: false,
+      reason:
+        isRecord(error) && error.name === "TimeoutError"
+          ? `npm registry did not answer within ${timeoutMs} ms`
+          : "npm registry unreachable",
+    };
+  }
+  const tag = isRecord(tags) ? tags[channel] : undefined;
+  return typeof tag === "string" && parseVersion(tag)
+    ? { ok: true, available: tag }
+    : { ok: false, reason: `no usable ${channel} version on npm` };
+}
+
+/** Compare the installed version with a known channel version. */
+export function compareWith(
+  info: InstalledInfo,
+  current: ParsedVersion,
+  channel: Channel,
+  available: string,
+) {
+  const parsed = parseVersion(available);
+  if (!parsed)
+    return {
+      status: "unknown" as const,
+      reason: `no usable ${channel} version on npm`,
+      installed: info.version,
+      channel,
+    };
+  return {
+    status: compareVersions(parsed, current) > 0 ? ("newer" as const) : ("current" as const),
+    installed: info.version,
+    available,
+    channel,
+    command: `npm install -g ${packageName}${channel === "next" ? "@next" : ""}`,
+  };
+}
+
 /**
- * Decide and perform the check. Every outcome is returned for explicit inspection; only
- * `status: "newer"` produces routine output.
+ * Decide and perform the check (one lookup, no cache). Every outcome is returned for explicit
+ * inspection; only `status: "newer"` produces routine output.
  */
 export async function checkForUpdate({
   installed,
@@ -96,68 +189,17 @@ export async function checkForUpdate({
   fetchImpl = fetch,
   timeoutMs = defaultTimeoutMs,
 }: CheckOptions = {}): Promise<UpdateCheckResult> {
-  const info = installed ?? (await installedVersion());
-  if (optOut) return { status: "skipped", reason: `disabled (${optOutEnv} or --no-update-check)` };
-  if (offline) return { status: "skipped", reason: "offline: no network lookup" };
-  if (!info.installed)
-    return {
-      status: "skipped",
-      reason: "not an npm installation (source or development checkout)",
-    };
-  const current = parseVersion(info.version ?? "");
-  if (!current)
-    return {
-      status: "skipped",
-      reason: `installed version unknown (${info.reason ?? info.version ?? "none"})`,
-    };
-  const channel = current.next === null ? "latest" : "next";
-  let tags: unknown;
-  try {
-    const response = await fetchImpl(
-      `https://registry.npmjs.org/-/package/${packageName.replace("/", "%2f")}/dist-tags`,
-      { signal: AbortSignal.timeout(timeoutMs), headers: { accept: "application/json" } },
-    );
-    if (!response.ok)
-      return {
-        status: "unknown",
-        reason: `npm registry returned ${response.status}`,
-        installed: info.version,
-        channel,
-      };
-    tags = await response.json();
-  } catch (error) {
-    return {
-      status: "unknown",
-      reason:
-        isRecord(error) && error.name === "TimeoutError"
-          ? `npm registry did not answer within ${timeoutMs} ms`
-          : "npm registry unreachable",
-      installed: info.version,
-      channel,
-    };
-  }
-  const tag = isRecord(tags) ? tags[channel] : undefined;
-  const available = typeof tag === "string" ? parseVersion(tag) : null;
-  if (typeof tag !== "string" || !available)
-    return {
-      status: "unknown",
-      reason: `no usable ${channel} version on npm`,
-      installed: info.version,
-      channel,
-    };
-  const newer = compareVersions(available, current) > 0;
-  return {
-    status: newer ? "newer" : "current",
-    installed: info.version,
-    available: tag,
-    channel,
-    command: `npm install -g ${packageName}${channel === "next" ? "@next" : ""}`,
-  };
+  const e = await eligibility(installed, offline, optOut);
+  if (e.skip) return e.skip;
+  const found = await lookup(e.channel, fetchImpl, timeoutMs);
+  return found.ok
+    ? compareWith(e.info, e.current, e.channel, found.available)
+    : { status: "unknown", reason: found.reason, installed: e.info.version, channel: e.channel };
 }
 
 /** The one-line advisory, or null when nothing should be said routinely. */
 export function updateAdvisory(result: UpdateCheckResult): string | null {
-  return result.status === "newer"
+  return result.status === "newer" && result.notify !== false
     ? `github-triage ${result.available} is available (installed ${result.installed}). Update with: ${result.command}`
     : null;
 }
