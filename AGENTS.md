@@ -69,3 +69,7 @@ The owner requested a mirror of poker_blocks' design/implementation process. Rev
 The [process adaptation audit](doc/reports/process-adaptation-audit.md) (#12) recommends retaining this guide and the focused merged contracts as active policy. The mirrored process remains context, not a second competing instruction source. Close tickets only when their stated acceptance is complete; completing a documentation phase alone does not finish its implementation or empirical follow-up.
 
 For a design/research phase with further ticket acceptance outstanding, use neutral PR wording such as `References #N`. Do not negate a GitHub closing keyword next to a real issue reference: GitHub still treated that wording as a closing directive in this project. Use an intentional closing directive only when the PR completes the issue’s stated acceptance. Verify the issue state after merge.
+
+## Proportionate research
+
+Follow [the research-stage instructions](doc/design/research-stages.md) for #72/#74/#75/#78: up to roughly one hour of agent time for initial plausibility/preparation. Higher-standard feasibility/practicality or repetitive evaluation is separate and must not block the original low-cost experiment. Later repetitive trials go to a cheaper agent after review and a separately agreed budget; a possible $20 cap is not current authorization. Cheap, bounded experiments can establish plausibility; costly ones need a plausible basis first. Unknown cost must be estimated, not treated as low.

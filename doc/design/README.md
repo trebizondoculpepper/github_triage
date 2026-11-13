@@ -38,3 +38,7 @@ The owner chose a full [TypeScript migration](typescript.md) in #91. This supers
 ## Runtime baseline
 
 The owner accepts a recent Node requirement: [the current Node LTS](runtime.md), tracked in #108. Older-Node compatibility no longer constrains the urgent TypeScript migration. Package engines, current user requirements and CI are updated by implementation; npm/npx does not supply or upgrade Node automatically.
+
+## Research stage and budget instructions
+
+[Proportionate research](research-stages.md) separates a roughly one-hour initial plausibility stage from later higher-standard feasibility/repetitive evaluation. The later study must not block the original experiment. A future cheaper-agent experiment budget requires separate agreement.
