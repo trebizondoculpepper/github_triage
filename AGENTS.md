@@ -4,6 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Read [HANDOFF.md](HANDOFF.md) first. This is the standalone GitHub Triage project, extracted from poker_blocks at the owner's request. Its source is under `src/`; do not continue development in the game repository.
 
+## Source language
+
+Owner decision: all maintained first-party application code, scripts and executable examples must use TypeScript. Intentionally selected ancillary languages such as Datalog are allowed where the relevant design documents their purpose and validation boundary. Handwritten JavaScript is not an allowed convenience exception. Generated JavaScript bundles and third-party code remain normal runtime artifacts.
+
+Follow [the TypeScript architecture and migration contract](doc/design/typescript.md) (#91). Existing JavaScript commands below describe the current implementation until migration lands; they do not authorize expanding JavaScript source. Keep the migration behavior-preserving and preserve Node 20 consumers through built JavaScript.
+
 ## Architecture and scope
 
 - Run the JavaScript CLI directly with Node; use Vite+ for checks/tests/builds.
