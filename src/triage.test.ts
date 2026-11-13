@@ -6047,6 +6047,7 @@ describe("read-only MCP adapter (#25)", async () => {
       expect(tools.map((t) => t.name).sort()).toEqual([
         "triage_briefing",
         "triage_dependencies",
+        "triage_events",
         "triage_issue",
       ]);
       const call = (await session.request("tools/call", {
@@ -6069,12 +6070,13 @@ describe("read-only MCP adapter (#25)", async () => {
     await session.close();
   });
 
-  it("lists exactly three read-only tools with strict inputs", async () => {
+  it("lists exactly four read-only tools with strict inputs", async () => {
     const client = await connect(fake());
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
       "triage_briefing",
       "triage_dependencies",
+      "triage_events",
       "triage_issue",
     ]);
     for (const tool of tools) {
