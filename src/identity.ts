@@ -483,12 +483,16 @@ export async function ensureExcluded(
 /**
  * smol-toml's TomlDate keeps only milliseconds, so a date-time/time literal with non-zero
  * sub-millisecond digits would be silently rounded by a rewrite. Refuse instead (#165 review).
- * A matching literal inside a string survives serialisation verbatim and is not refused.
+ * Checked per occurrence, not per substring: string contents survive serialisation verbatim,
+ * while a rounded literal loses its digits, so any drop in the occurrence count of a
+ * high-precision time means a value would change.
  */
 function assertLosslessRewrite(raw: string | null, text: string): void {
   if (raw === null) return;
-  for (const match of raw.matchAll(/\d{2}:\d{2}:\d{2}\.\d{3}(\d+)/g)) {
-    if (/[1-9]/.test(match[1]!) && !text.includes(match[0])) {
+  const pattern = /\d{2}:\d{2}:\d{2}\.\d{3}(\d+)/g;
+  const count = (source: string, needle: string) => source.split(needle).length - 1;
+  for (const match of raw.matchAll(pattern)) {
+    if (/[1-9]/.test(match[1]!) && count(text, match[0]) < count(raw, match[0])) {
       throw new ConfigError(
         "incompatible",
         `${IDENTITY_FILE} contains a date or time with sub-millisecond precision that cannot be rewritten without changing it; nothing was changed.`,

@@ -8373,6 +8373,16 @@ x = 1
       random: () => 0.1,
     });
     expect(ok.files.get(file)).toContain('note = "12:00:00.123456"');
+    // A string repeating the same time text must not mask the rounding of the literal.
+    const masked = `when = 1979-05-27T07:32:00.123456Z\nnote = "07:32:00.123456"\n`;
+    const m = setup(masked, { ignored: true });
+    await expect(
+      setIdentity({ root, repository: null }, "codex", "identity.triage_role", "designer", {
+        fs: m.fs,
+        git: m.git,
+      }),
+    ).rejects.toMatchObject({ code: "incompatible" });
+    expect(m.files.get(file)).toBe(masked);
   });
 
   it("appends exclude rules without replacing concurrent additions (#165 review)", async () => {
