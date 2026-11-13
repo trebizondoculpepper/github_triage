@@ -89,9 +89,9 @@ A pure function over an injected snapshot, returning one ranked list of candidat
 - `unlockEvidence`: `complete`, or `partial` with reasons: `blocking` truncated (`pageInfo.hasNextPage`), dependants absent from the snapshot (cross-repository or not collected), dependants without native evidence. Unknown dependants are listed, never counted and never treated as zero.
 - For a PR, `completion`:
   - `last-required` only when explicit delivery evidence says this PR is the last open required deliverable of the issue.
-  - `sole-open-pr-unverified` when it is the only open closing PR of a linked issue (`closingPrEvidence` complete), but no deliverable record exists. Its unlocks are shown but marked unverified.
+  - `sole-open-pr-unverified` when it is the only open closing PR of a linked issue and the closing references are **exhaustive**, but no deliverable record exists. Its unlocks are shown but marked unverified. Exhaustive means the issue's own `closedByPullRequestsReferences` is complete (not truncated), or no open PR's `closingIssuesReferences` is truncated. `closingPrEvidence(...).complete` is **not** sufficient: it becomes true as soon as one open closing PR is found, which proves presence (safe for excluding pickup), not cardinality. A visible PR whose sibling may be hidden by truncation is therefore `unknown`, not sole.
   - `partial` when another open PR also closes the same issue. Unlocks are reported once, against the issue, as "shared, needs all of #a, #b", and credited to no single PR.
-  - `unknown` when closing evidence is incomplete.
+  - `unknown` when closing evidence is incomplete, including when one closing PR is visible but the references are not exhaustive. This needs a cardinality-aware helper (or an `exhaustive` flag on `closingPrEvidence`), recommended for #196.
 - For an estimate: `implementation` eligibility and the ticket's own `unlocks`, both reported as context, not as estimation impact.
 
 ### Ordering
