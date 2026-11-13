@@ -40,31 +40,45 @@ export function selected<T>(value: unknown): T | null {
   return isRecord(value) ? trusted<T>(value) : null;
 }
 
-export const ghQuery: Query = async (query, variables) => {
-  const args = ["api", "graphql", "-f", `query=${query}`];
-  for (const [key, value] of Object.entries(variables)) args.push("-F", `${key}=${value}`);
-  let stdout: string;
-  try {
-    ({ stdout } = await execute("gh", args, { maxBuffer: 32 * 1024 * 1024, timeout: 60_000 }));
-  } catch (error) {
-    // gh exits non-zero on any GraphQL error but still prints the response. A response whose
-    // only errors are NOT_FOUND is a valid answer ("no such issue"): callers see null fields.
-    const answer = graphqlAnswer(prop(error, "stdout"));
-    if (answer) return answer;
-    // Do not echo subprocess arguments, stderr, credentials or private API response bodies.
-    throw new Error(
-      "GitHub query failed. Check gh auth status, repository access and API rate limits.",
-    );
-  }
-  const parsed: unknown = JSON.parse(stdout);
-  const errors = prop(parsed, "errors");
-  if (Array.isArray(errors) && errors.length && !graphqlAnswer(stdout))
-    throw new Error("GitHub returned incomplete query data; no fresh report saved.");
-  const data = prop(parsed, "data");
-  if (!isRecord(data))
-    throw new Error("GitHub returned incomplete query data; no fresh report saved.");
-  return data;
-};
+/**
+ * Read-only GraphQL through gh. With `signal`, aborting terminates the running gh child
+ * process (execFile's kill on abort) and rejects with the abort reason instead of a result.
+ */
+export const ghQueryWith =
+  (signal?: AbortSignal): Query =>
+  async (query, variables) => {
+    signal?.throwIfAborted();
+    const args = ["api", "graphql", "-f", `query=${query}`];
+    for (const [key, value] of Object.entries(variables)) args.push("-F", `${key}=${value}`);
+    let stdout: string;
+    try {
+      ({ stdout } = await execute("gh", args, {
+        maxBuffer: 32 * 1024 * 1024,
+        timeout: 60_000,
+        signal,
+      }));
+    } catch (error) {
+      signal?.throwIfAborted();
+      // gh exits non-zero on any GraphQL error but still prints the response. A response whose
+      // only errors are NOT_FOUND is a valid answer ("no such issue"): callers see null fields.
+      const answer = graphqlAnswer(prop(error, "stdout"));
+      if (answer) return answer;
+      // Do not echo subprocess arguments, stderr, credentials or private API response bodies.
+      throw new Error(
+        "GitHub query failed. Check gh auth status, repository access and API rate limits.",
+      );
+    }
+    const parsed: unknown = JSON.parse(stdout);
+    const errors = prop(parsed, "errors");
+    if (Array.isArray(errors) && errors.length && !graphqlAnswer(stdout))
+      throw new Error("GitHub returned incomplete query data; no fresh report saved.");
+    const data = prop(parsed, "data");
+    if (!isRecord(data))
+      throw new Error("GitHub returned incomplete query data; no fresh report saved.");
+    return data;
+  };
+/** Uncancellable production GraphQL boundary used by the CLI. */
+export const ghQuery: Query = ghQueryWith();
 /** Data from a GraphQL response whose errors are all NOT_FOUND, else null. */
 export function graphqlAnswer(text: unknown): JsonObject | null {
   try {
@@ -87,20 +101,25 @@ export interface RestAnswer {
 export type Rest = (path: string) => Promise<RestAnswer>;
 
 /** Read-only REST GET through gh (which follows GitHub's transfer redirects). */
-export const ghRest: Rest = async (path) => {
-  try {
-    const { stdout } = await execute("gh", ["api", path], { timeout: 30_000 });
-    return { status: 200, body: JSON.parse(stdout) as unknown };
-  } catch (error) {
+export const ghRestWith =
+  (signal?: AbortSignal): Rest =>
+  async (path) => {
+    signal?.throwIfAborted();
     try {
-      const out = prop(error, "stdout");
-      const body: unknown = JSON.parse(typeof out === "string" ? out : "");
-      return { status: Number(prop(body, "status")) || null, body };
-    } catch {
-      return { status: null, body: null };
+      const { stdout } = await execute("gh", ["api", path], { timeout: 30_000, signal });
+      return { status: 200, body: JSON.parse(stdout) as unknown };
+    } catch (error) {
+      signal?.throwIfAborted();
+      try {
+        const out = prop(error, "stdout");
+        const body: unknown = JSON.parse(typeof out === "string" ? out : "");
+        return { status: Number(prop(body, "status")) || null, body };
+      } catch {
+        return { status: null, body: null };
+      }
     }
-  }
-};
+  };
+export const ghRest: Rest = ghRestWith();
 
 interface LocationBase {
   repository: string;
@@ -193,15 +212,16 @@ export class IssueUnavailable extends Error {
 }
 
 /** Resolve the gh repository of the working directory (or of `cwd`, e.g. an MCP project). */
-export async function currentRepository(cwd?: string): Promise<string> {
+export async function currentRepository(cwd?: string, signal?: AbortSignal): Promise<string> {
   try {
     const { stdout } = await execute(
       "gh",
       ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
-      { timeout: 30_000, cwd },
+      { timeout: 30_000, cwd, signal },
     );
     return stdout.trim();
   } catch {
+    signal?.throwIfAborted();
     throw new Error(
       "Cannot resolve repository. Supply --repo owner/name and check gh authentication.",
     );
@@ -290,16 +310,22 @@ export interface CollectOptions {
   issue?: number;
   /** Injected issue-location diagnosis (production: `locateIssue`). */
   locate?: (repository: string, number: number) => Promise<IssueDiagnosis>;
+  /**
+   * Cancellation (MCP): stops further requests and, for the default gh boundaries, terminates
+   * the running gh child processes. A cancelled collection rejects; it never returns a report.
+   */
+  signal?: AbortSignal;
 }
 export async function collect(
   repository: string,
   options: CollectOptions = {},
-  query: Query = ghQuery,
+  query: Query = ghQueryWith(options.signal),
   now: () => Date = () => new Date(),
 ): Promise<Snapshot> {
   const originalQuery = query;
   let requestCount = 0;
   query = (...args: Parameters<Query>) => {
+    options.signal?.throwIfAborted();
     requestCount++;
     return originalQuery(...args);
   };
@@ -330,7 +356,9 @@ export async function collect(
       ? nodes.filter((node) => Date.parse(node.updatedAt) >= Date.parse(cutoff))
       : nodes;
   };
-  const locate = options.locate ?? locateIssue;
+  const locate =
+    options.locate ??
+    ((repo: string, number: number) => locateIssue(repo, number, ghRestWith(options.signal)));
   /**
    * For --issue N, a failed GraphQL read gets the read-only REST diagnosis. The failure itself
    * is never transfer evidence: only REST's own answer decides, and "unknown" keeps the error.
