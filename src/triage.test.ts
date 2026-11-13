@@ -43,6 +43,7 @@ import {
   loadConfig,
   nodeFileSystem,
   parseConfig,
+  retiredKeyNotices,
   resolveRepositoryTarget,
   settingFor,
   updateConfig,
@@ -61,10 +62,8 @@ import {
 } from "./process.js";
 import { pickupPolicy } from "./ranking.js";
 import { complexityGuidance } from "./complexity.js";
-import { classifyField } from "./complexitysetup.js";
 import { parseLabelProvenance, provenanceComment } from "./estimate.js";
 import type { LabelEstimateProvenance } from "./estimate.js";
-import { complexityConfigText, diagnoseComplexityConfig } from "./complexitydoctor.js";
 import {
   classifyComplexityLabels,
   collectLabelEstimationInput,
@@ -4396,22 +4395,22 @@ describe("repository configuration service (#116, doc/design/repository-configur
   const target = { root, repository: "owner/name" };
   const token = () => "t";
 
-  it("defaults complexity on, fieldId unset, when the file is absent", async () => {
+  it("defaults complexity on when the file is absent, with no field setting", async () => {
     const memory = memoryFs();
     const config = await loadConfig(root, memory.fs);
     expect(config.storedVersion).toBeNull();
     expect(config.settings).toEqual([
       { key: "complexity.enabled", value: true, source: "default" },
-      { key: "complexity.fieldId", value: null, source: "default" },
       { key: "processGuide", value: true, source: "default" },
     ]);
+    expect(config.retired).toEqual([]);
     expect(memory.writes).toEqual([]);
   });
 
   it("treats an explicitly stored default as explicit", () => {
     const config = parseConfig('{"schemaVersion":1,"complexity":{"enabled":true}}', undefined);
     expect(settingFor(config, "complexity.enabled").source).toBe("explicit");
-    expect(settingFor(config, "complexity.fieldId").source).toBe("default");
+    expect(settingFor(config, "processGuide").source).toBe("default");
   });
 
   it("reports explicit settings and their source", async () => {
@@ -4424,8 +4423,35 @@ describe("repository configuration service (#116, doc/design/repository-configur
       value: false,
       source: "explicit",
     });
-    expect(settingFor(config, "complexity.fieldId").value).toBe("PVTF_1");
     expect(() => settingFor(config, "complexity.colour")).toThrow(ConfigError);
+  });
+
+  it("ignores the retired complexity.fieldId with a diagnostic, never a failure (#153)", async () => {
+    const raw = '{"schemaVersion":1,"complexity":{"enabled":false,"fieldId":"PVTF_1"}}';
+    const memory = memoryFs(raw);
+    const config = await loadConfig(root, memory.fs);
+    expect(config.retired).toEqual(["complexity.fieldId"]);
+    expect([...config.explicit.keys()]).toEqual(["complexity.enabled"]);
+    expect(() => settingFor(config, "complexity.fieldId")).toThrow(ConfigError);
+    expect(retiredKeyNotices(config)).toEqual([
+      expect.objectContaining({
+        key: "complexity.fieldId",
+        next: "github-triage config set complexity.enabled false",
+      }),
+    ]);
+    expect(memory.files.get(path)).toBe(raw);
+    expect(memory.writes).toEqual([]);
+    // The suggested command-mediated write drops the retired key and keeps everything else.
+    const result = await updateConfig(target, new Map([["complexity.enabled", false]]), {
+      fs: memory.fs,
+      token,
+    });
+    expect(result.changed).toBe(true);
+    expect(result.config.retired).toEqual([]);
+    expect(JSON.parse(memory.files.get(path)!)).toEqual({
+      schemaVersion: 1,
+      complexity: { enabled: false },
+    });
   });
 
   it.each([
@@ -4498,7 +4524,7 @@ describe("repository configuration service (#116, doc/design/repository-configur
   });
 
   it("writes atomically, preserves unrelated settings and skips equal writes", async () => {
-    const memory = memoryFs('{"schemaVersion":1,"complexity":{"fieldId":"PVTF_1"}}');
+    const memory = memoryFs('{"schemaVersion":1,"processGuide":false}');
     const result = await updateConfig(target, new Map([["complexity.enabled", false]]), {
       fs: memory.fs,
       token,
@@ -4508,7 +4534,8 @@ describe("repository configuration service (#116, doc/design/repository-configur
     expect(memory.files.has(`${path}.t.tmp`)).toBe(false);
     expect(JSON.parse(memory.files.get(path)!)).toEqual({
       schemaVersion: 1,
-      complexity: { enabled: false, fieldId: "PVTF_1" },
+      complexity: { enabled: false },
+      processGuide: false,
     });
     const again = await updateConfig(target, new Map([["complexity.enabled", false]]), {
       fs: memory.fs,
@@ -4519,14 +4546,14 @@ describe("repository configuration service (#116, doc/design/repository-configur
   });
 
   it("unsets a key back to its default and creates no file for default-only state", async () => {
-    const memory = memoryFs('{"schemaVersion":1,"complexity":{"fieldId":"PVTF_1"}}');
-    await updateConfig(target, new Map([["complexity.fieldId", undefined]]), {
+    const memory = memoryFs('{"schemaVersion":1,"processGuide":false}');
+    await updateConfig(target, new Map([["processGuide", undefined]]), {
       fs: memory.fs,
       token,
     });
     expect(JSON.parse(memory.files.get(path)!)).toEqual({ schemaVersion: 1 });
     const empty = memoryFs();
-    const result = await updateConfig(target, new Map([["complexity.fieldId", undefined]]), {
+    const result = await updateConfig(target, new Map([["processGuide", undefined]]), {
       fs: empty.fs,
       token,
     });
@@ -4539,7 +4566,7 @@ describe("repository configuration service (#116, doc/design/repository-configur
     for (const [key, value] of [
       ["complexity.enabled", "false"],
       ["complexity.enabled", null],
-      ["complexity.fieldId", ""],
+      ["complexity.fieldId", "PVTF_1"],
       ["complexity.colour", true],
     ] as const) {
       await expect(
@@ -4551,7 +4578,7 @@ describe("repository configuration service (#116, doc/design/repository-configur
 
   it("detects an intervening edit and leaves the other writer's file in place", async () => {
     const memory = memoryFs('{"schemaVersion":1}');
-    const theirs = '{"schemaVersion":1,"complexity":{"fieldId":"PVTF_9"}}';
+    const theirs = '{"schemaVersion":1,"processGuide":false}';
     const fs: ConfigFileSystem = {
       ...memory.fs,
       writeText: async (file, text) => {
@@ -4748,34 +4775,61 @@ describe("config get/set/list/help commands (#117)", () => {
     const t = setup();
     expect(await t.call("get", "complexity.enabled")).toBe(0);
     expect(t.out[0]).toBe("complexity.enabled = true (default)\n");
-    expect(await t.call("get", "complexity.fieldId", "--json")).toBe(0);
+    expect(await t.call("get", "processGuide", "--json")).toBe(0);
     expect(t.json()).toMatchObject({
       schemaVersion: 1,
       kind: "config-get",
       repository: "owner/name",
-      key: "complexity.fieldId",
-      value: null,
+      key: "processGuide",
+      value: true,
       source: "default",
     });
     expect(t.files.size).toBe(0);
   });
 
-  it("sets through the service, is idempotent, and disabling keeps the field mapping", async () => {
+  it("lists a retired field mapping as ignored, and any set removes it (#153)", async () => {
     const t = setup('{"schemaVersion":1,"complexity":{"fieldId":"PVTF_1"}}');
+    expect(await t.call("list", "--json")).toBe(0);
+    expect(t.json().retired).toEqual([
+      expect.objectContaining({
+        key: "complexity.fieldId",
+        next: "github-triage config set complexity.enabled true",
+      }),
+    ]);
+    expect(await t.call("list")).toBe(0);
+    expect(t.out.at(-1)).toContain(
+      "Ignored: .github/triage.json contains the retired key complexity.fieldId",
+    );
+    expect(await t.call("get", "complexity.fieldId", "--json")).toBe(1);
+    expect(t.json()).toMatchObject({ code: "unknown-key" });
+    expect(await t.call("set", "complexity.enabled", "true")).toBe(0);
+    expect(JSON.parse(t.files.get(path)!)).toEqual({
+      schemaVersion: 1,
+      complexity: { enabled: true },
+    });
+    expect(await t.call("list", "--json")).toBe(0);
+    expect(t.json().retired).toEqual([]);
+  });
+
+  it("sets through the service, is idempotent, and disabling keeps other settings", async () => {
+    const t = setup('{"schemaVersion":1,"processGuide":false}');
     expect(await t.call("set", "complexity.enabled", "false", "--json")).toBe(0);
     expect(t.json()).toMatchObject({ changed: true, value: false, source: "explicit" });
     const written = JSON.parse(t.files.get(path)!);
-    expect(written.complexity).toEqual({ enabled: false, fieldId: "PVTF_1" });
+    expect(written).toEqual({
+      schemaVersion: 1,
+      complexity: { enabled: false },
+      processGuide: false,
+    });
     expect(await t.call("set", "complexity.enabled", "false")).toBe(0);
     expect(t.out.at(-1)).toContain("unchanged");
     expect(await t.call("list", "--json")).toBe(0);
     expect(t.json().settings).toEqual([
       expect.objectContaining({ key: "complexity.enabled", value: false, source: "explicit" }),
-      expect.objectContaining({ key: "complexity.fieldId", value: "PVTF_1", source: "explicit" }),
-      expect.objectContaining({ key: "processGuide", value: true, source: "default" }),
+      expect.objectContaining({ key: "processGuide", value: false, source: "explicit" }),
     ]);
     expect(await t.call("list")).toBe(0);
-    expect(t.out.at(-1)).toContain("complexity.fieldId = PVTF_1 (explicit)");
+    expect(t.out.at(-1)).toContain("processGuide = false (explicit)");
   });
 
   it("refuses bad keys, values, scopes and syntax with recovery, as JSON or text", async () => {
@@ -4838,11 +4892,12 @@ describe("config get/set/list/help commands (#117)", () => {
     const t = setup();
     expect(await t.call("help")).toBe(0);
     expect(t.out[0]).toContain("complexity.enabled (boolean; default true; valid: true, false)");
-    expect(await t.call("help", "complexity.fieldId", "--json")).toBe(0);
+    expect(await t.call("help", "processGuide", "--json")).toBe(0);
     expect(t.json()).toMatchObject({
       kind: "config-help",
-      keys: [{ key: "complexity.fieldId", defaultValue: null }],
+      keys: [{ key: "processGuide", defaultValue: true }],
     });
+    expect(t.out.join("")).not.toContain("fieldId");
     expect(await t.call("--help")).toBe(0);
     const top: string[] = [];
     await main(["--help", "--no-update-check"], async (x) => void top.push(x));
@@ -5350,405 +5405,6 @@ describe("estimate N records a size label with provenance (#152)", () => {
   });
 });
 
-describe("setup complexity (#119)", () => {
-  const root = "/repo";
-  const path = join(root, CONFIG_PATH);
-  const sizes = ["XS", "S", "M", "L", "XL", "XXL"].map((name) => ({ name }));
-  const good = {
-    __typename: "IssueFieldSingleSelect",
-    id: "IF_good",
-    name: "Complexity",
-    dataType: "SINGLE_SELECT",
-    visibility: "ALL",
-    options: sizes,
-  };
-  const wrongOptions = { ...good, id: "IF_opts", name: "Size", options: sizes.slice(0, 3) };
-  const text = {
-    __typename: "IssueFieldText",
-    id: "IF_text",
-    name: "Notes",
-    dataType: "TEXT",
-    visibility: "ALL",
-  };
-  type Answer = { data: unknown; errors: { type?: string; message?: string }[] };
-  const owner = (fields: unknown, extra: Record<string, unknown> = {}): Answer => ({
-    data: {
-      viewer: { login: "owner" },
-      repository: {
-        owner: { __typename: "User", id: "U_1", login: "owner", issueFields: fields, ...extra },
-      },
-    },
-    errors: [],
-  });
-  const list = (...nodes: unknown[]) => ({ pageInfo: { hasNextPage: false }, nodes });
-  function setup(
-    answer: Answer,
-    options: {
-      initial?: string;
-      prompt?: string[];
-      failWrite?: boolean;
-      created?: Answer;
-      onQuery?: (files: Map<string, string>) => void;
-    } = {},
-  ) {
-    const files = new Map<string, string>(
-      options.initial === undefined ? [] : [[path, options.initial]],
-    );
-    const fs: ConfigFileSystem = {
-      readText: async (file) => files.get(file) ?? null,
-      writeText: async (file, value) => {
-        if (options.failWrite) throw new ConfigError("filesystem", "disk full", "free space");
-        files.set(file, value);
-      },
-      rename: async (from, to) => {
-        files.set(to, files.get(from)!);
-        files.delete(from);
-      },
-      remove: async (file) => void files.delete(file),
-      makeDirectory: async () => undefined,
-    };
-    const git: GitRunner = async (args) =>
-      args[0] === "rev-parse" ? `${root}\n` : "origin\thttps://github.com/owner/name.git (fetch)\n";
-    const mutations: unknown[] = [];
-    const queries: unknown[] = [];
-    const prompts: string[] = [];
-    const replies = [...(options.prompt ?? [])];
-    const out: string[] = [];
-    const call = (...args: string[]) =>
-      main(["setup", "complexity", ...args, "--no-update-check"], async (t) => void out.push(t), {
-        collect: async () => {
-          throw new Error("no GitHub");
-        },
-        currentRepository: async () => {
-          throw new Error("no GitHub");
-        },
-        setup: {
-          fs,
-          git,
-          cwd: root,
-          api: {
-            query: async (_q, v) => (queries.push(v), options.onQuery?.(files), answer),
-            mutate: async (_q, v) => (
-              mutations.push(v),
-              options.created ?? { data: null, errors: [] }
-            ),
-          },
-          prompt: options.prompt ? async (q) => (prompts.push(q), replies.shift() ?? "") : null,
-        },
-      });
-    return { files, out, call, mutations, queries, prompts, json: () => JSON.parse(out.at(-1)!) };
-  }
-
-  it("skips all remote calls when complexity is explicitly disabled", async () => {
-    const t = setup(owner(list(good)), {
-      initial: '{"schemaVersion":1,"complexity":{"enabled":false,"fieldId":"IF_x"}}\n',
-    });
-    expect(await t.call("--json")).toBe(0);
-    expect(t.json()).toMatchObject({ status: "disabled", mappedFieldId: "IF_x" });
-    expect(t.queries).toEqual([]);
-  });
-  it("reports discovered fields and returns setup-required unattended without hanging", async () => {
-    const t = setup(owner(list(good, wrongOptions, text)));
-    expect(await t.call()).toBe(2);
-    const out = t.out[0]!;
-    expect(out).toContain("compatible   IF_good");
-    expect(out).toMatch(/incompatible IF_opts .*expected XS, S, M, L, XL, XXL/);
-    expect(out).toMatch(/IF_text .*type TEXT/);
-    expect(out).toContain("visible to all of owner's repositories");
-    expect(out).toContain("--select IF_good");
-    expect(t.files.size).toBe(0);
-    expect(t.mutations).toEqual([]);
-  });
-  it("saves an explicitly selected compatible field and is idempotent on retry", async () => {
-    const t = setup(owner(list(good)));
-    expect(await t.call("--select", "IF_good", "--json")).toBe(0);
-    expect(t.json()).toMatchObject({ status: "saved", changed: true, mappedFieldId: "IF_good" });
-    expect(JSON.parse(t.files.get(path)!)).toEqual({
-      schemaVersion: 1,
-      complexity: { fieldId: "IF_good" },
-    });
-    expect(await t.call("--select", "IF_good", "--json")).toBe(0);
-    expect(t.json()).toMatchObject({ changed: false });
-    expect(await t.call()).toBe(0);
-    expect(t.out.at(-1)).toContain("Configured");
-  });
-  it("compares options one by one, not as a comma-joined string", async () => {
-    const merged = [{ name: "XS,S" }, ...sizes.slice(2)];
-    const field = classifyField({ ...good, options: merged })!;
-    expect(field.compatible).toBe(false);
-    expect(classifyField(good)!.compatible).toBe(true);
-  });
-  it("refuses with a conflict when the mapping changes while setup is running", async () => {
-    const elsewhere = '{"schemaVersion":1,"complexity":{"fieldId":"IF_other"}}\n';
-    const t = setup(owner(list(good)), {
-      onQuery: (files) => void files.set(path, elsewhere),
-    });
-    expect(await t.call("--select", "IF_good", "--json")).toBe(1);
-    expect(t.json()).toMatchObject({
-      code: "conflict",
-      recovery: expect.stringContaining("setup complexity"),
-    });
-    expect(t.files.get(path)).toBe(elsewhere);
-  });
-  it("refuses incompatible or unknown selections without writing", async () => {
-    const t = setup(owner(list(good, wrongOptions)));
-    expect(await t.call("--select", "IF_opts", "--json")).toBe(1);
-    expect(t.json()).toMatchObject({ kind: "complexity-setup-error", code: "incompatible" });
-    await expect(t.call("--select", "IF_nope")).rejects.toThrow("not among");
-    expect(t.files.size).toBe(0);
-  });
-  it("distinguishes forbidden and unsupported APIs and offers no fallback", async () => {
-    const forbidden = setup({ ...owner(null), errors: [{ type: "FORBIDDEN", message: "no" }] });
-    expect(await forbidden.call("--create", "--json")).toBe(2);
-    expect(forbidden.json()).toMatchObject({ status: "setup-required:inaccessible" });
-    expect(forbidden.mutations).toEqual([]);
-    const unsupported = setup({
-      data: null,
-      errors: [{ message: "Field 'issueFields' doesn't exist on type 'User'" }],
-    });
-    expect(await unsupported.call("--json")).toBe(2);
-    expect(unsupported.json()).toMatchObject({ status: "setup-required:unsupported" });
-  });
-  it("creates only on explicit --create, after confirmation on a terminal", async () => {
-    const created = {
-      data: { createIssueField: { issueField: { ...good, id: "IF_new" } } },
-      errors: [],
-    };
-    const declined = setup(owner(list(text)), { prompt: ["n"], created });
-    expect(await declined.call("--create")).toBe(2);
-    expect(declined.prompts[0]).toContain("visible to all of owner's repositories");
-    expect(declined.mutations).toEqual([]);
-    const menu = setup(owner(list(text)), { prompt: ["c", "y"], created });
-    expect(await menu.call()).toBe(0);
-    expect(menu.mutations).toHaveLength(1);
-    expect(menu.mutations[0]).toMatchObject({ ownerId: "U_1", name: "Complexity" });
-    expect(JSON.parse(menu.files.get(path)!).complexity.fieldId).toBe("IF_new");
-    const unattended = setup(owner(list(text)), { created });
-    expect(await unattended.call("--create", "--json")).toBe(0);
-    expect(unattended.json()).toMatchObject({ status: "created", mappedFieldId: "IF_new" });
-  });
-  it("refuses creation without permission, with partial lists or when a field already exists", async () => {
-    const org = setup({
-      data: {
-        viewer: { login: "me" },
-        repository: {
-          owner: {
-            __typename: "Organization",
-            id: "O_1",
-            login: "org",
-            viewerCanAdminister: false,
-            issueFields: list(),
-          },
-        },
-      },
-      errors: [],
-    });
-    expect(await org.call("--create", "--json")).toBe(1);
-    expect(org.json()).toMatchObject({ code: "not-permitted" });
-    const partial = setup(owner({ pageInfo: { hasNextPage: true }, nodes: [] }));
-    expect(await partial.call("--create", "--json")).toBe(1);
-    expect(partial.json()).toMatchObject({ code: "incomplete-discovery" });
-    const exists = setup(owner(list(good)));
-    expect(await exists.call("--create", "--json")).toBe(1);
-    expect(exists.json()).toMatchObject({
-      code: "exists",
-      recovery: "github-triage setup complexity --select IF_good",
-    });
-    for (const t of [org, partial, exists]) expect(t.mutations).toEqual([]);
-  });
-  it("reports the created ID and recovery when the local save fails", async () => {
-    const created = {
-      data: { createIssueField: { issueField: { ...good, id: "IF_new" } } },
-      errors: [],
-    };
-    const t = setup(owner(list()), { failWrite: true, created });
-    expect(await t.call("--create", "--json")).toBe(2);
-    expect(t.json()).toMatchObject({
-      status: "created-not-saved",
-      created: { id: "IF_new" },
-      recovery: "github-triage setup complexity --select IF_new",
-    });
-  });
-  it("flags a mapped field that is missing and verifies the repository target", async () => {
-    const t = setup(owner(list(good)), {
-      initial: '{"schemaVersion":1,"complexity":{"fieldId":"IF_gone"}}\n',
-    });
-    expect(await t.call()).toBe(2);
-    expect(t.out[0]).toContain("IF_gone: missing");
-    await expect(t.call("--repo", "other/repo")).rejects.toThrow("is not other/repo");
-    expect(
-      await (async () => {
-        let s = "";
-        await main(["setup", "--help"], async (x) => void (s = x));
-        return s;
-      })(),
-    ).toContain("--create");
-  });
-});
-
-describe("Ticket Doctor: complexity configuration (#120)", () => {
-  const root = "/repo";
-  const path = join(root, CONFIG_PATH);
-  const sizes = ["XS", "S", "M", "L", "XL", "XXL"].map((name) => ({ name }));
-  const good = {
-    __typename: "IssueFieldSingleSelect",
-    id: "IF_good",
-    name: "Complexity",
-    dataType: "SINGLE_SELECT",
-    visibility: "ALL",
-    options: sizes,
-  };
-  const bad = { ...good, id: "IF_bad", name: "Size", options: sizes.slice(0, 2) };
-  const owner = (fields: unknown, errors: { type?: string; message?: string }[] = []) => ({
-    data: {
-      viewer: { login: "owner" },
-      repository: {
-        owner: { __typename: "User", id: "U_1", login: "owner", issueFields: fields },
-      },
-    },
-    errors,
-  });
-  const list = (...nodes: unknown[]) => ({ pageInfo: { hasNextPage: false }, nodes });
-  function run(
-    config: string | null,
-    answer: unknown,
-    options: { offline?: boolean; checkout?: boolean; readError?: Error } = {},
-  ) {
-    const writes: string[] = [];
-    const queries: unknown[] = [];
-    const fs: ConfigFileSystem = {
-      readText: async (file) => {
-        if (options.readError) throw options.readError;
-        return file === path ? config : null;
-      },
-      writeText: async (file) => void writes.push(file),
-      rename: async (file) => void writes.push(file),
-      remove: async (file) => void writes.push(file),
-      makeDirectory: async (file) => void writes.push(file),
-    };
-    const git: GitRunner = async (args) => {
-      if (options.checkout === false) throw new Error("not a repository");
-      return args[0] === "rev-parse"
-        ? `${root}\n`
-        : "origin\thttps://github.com/owner/name.git (fetch)\n";
-    };
-    const mutations: unknown[] = [];
-    const api = {
-      query: async (_q: string, v: Record<string, string>) => {
-        queries.push(v);
-        if (answer instanceof Error) throw answer;
-        return answer as { data: unknown; errors: [] };
-      },
-      mutate: async (_q: string, v: Record<string, string>) => {
-        mutations.push(v);
-        return { data: null, errors: [] };
-      },
-    };
-    return diagnoseComplexityConfig(
-      "owner/name",
-      { offline: options.offline },
-      { fs, git, cwd: root, api },
-    ).then((r) => ({ r, writes, queries, mutations }));
-  }
-  const mapped = (id: string) => `{"schemaVersion":1,"complexity":{"fieldId":"${id}"}}\n`;
-
-  it("suppresses findings and makes no remote call when disabled", async () => {
-    const { r, queries } = await run(
-      '{"schemaVersion":1,"complexity":{"enabled":false,"fieldId":"IF_gone"}}\n',
-      owner(list()),
-    );
-    expect(r).toMatchObject({ status: "disabled", findings: [], fieldId: "IF_gone" });
-    expect(queries).toEqual([]);
-  });
-  it("reports an unmapped field with the exact setup command", async () => {
-    const { r } = await run(null, owner(list(good, bad)));
-    expect(r.status).toBe("unconfigured");
-    expect(r.findings[0]).toMatchObject({
-      rule: "complexity-field-unmapped",
-      next: [
-        "github-triage setup complexity --select IF_good",
-        "github-triage config set complexity.enabled false",
-      ],
-    });
-  });
-  it("accepts a compatible mapping with no findings", async () => {
-    const { r } = await run(mapped("IF_good"), owner(list(good)));
-    expect(r).toMatchObject({ status: "configured-compatible", verified: true, findings: [] });
-  });
-  it("distinguishes incompatible from missing", async () => {
-    const incompatible = (await run(mapped("IF_bad"), owner(list(good, bad)))).r;
-    expect(incompatible.status).toBe("incompatible");
-    expect(incompatible.findings[0]!.detail).toContain("expected XS, S, M, L, XL, XXL");
-    const missing = (await run(mapped("IF_gone"), owner(list(good)))).r;
-    expect(missing.status).toBe("missing");
-    expect(missing.findings[0]!.next[0]).toBe("github-triage setup complexity --select IF_good");
-  });
-  it("reports FORBIDDEN as inaccessible, not absent", async () => {
-    const { r } = await run(mapped("IF_good"), owner(null, [{ type: "FORBIDDEN", message: "no" }]));
-    expect(r.status).toBe("inaccessible");
-    expect(r.findings[0]).toMatchObject({ certainty: "unknown" });
-    expect(r.findings[0]!.detail).toContain("Absent is not the same as unavailable");
-  });
-  it("reports an API without issue fields as unsupported", async () => {
-    const { r } = await run(null, {
-      data: null,
-      errors: [{ message: "Field 'issueFields' doesn't exist on type 'User'" }],
-    });
-    expect(r.status).toBe("unsupported");
-  });
-  it("treats missing evidence as unknown, never healthy", async () => {
-    const offline = (await run(mapped("IF_good"), owner(list(good)), { offline: true })).r;
-    expect(offline).toMatchObject({ status: "unknown", verified: false });
-    expect(offline.findings[0]!.rule).toBe("complexity-field-unverified");
-    const failed = (await run(mapped("IF_good"), new Error("network"))).r;
-    expect(failed.status).toBe("unknown");
-    const partial = (
-      await run(mapped("IF_x"), owner({ pageInfo: { hasNextPage: true }, nodes: [good] }))
-    ).r;
-    expect(partial.status).toBe("unknown");
-    const noCheckout = (await run(null, owner(list(good)), { checkout: false })).r;
-    expect(noCheckout).toMatchObject({
-      status: "unknown",
-      findings: [{ rule: "config-unavailable" }],
-    });
-  });
-  it("never recommends --create when setup would refuse it", async () => {
-    const taken = { ...bad, id: "IF_taken", name: "complexity" };
-    const unmapped = (await run(null, owner(list(taken)))).r;
-    expect(unmapped.findings[0]!.next[0]).toMatch(/Choose or fix a field in GitHub yourself/);
-    expect(unmapped.findings[0]!.next.join(" ")).not.toContain("--create");
-    const incompatible = (await run(mapped("IF_taken"), owner(list(taken)))).r;
-    expect(incompatible.findings[0]!.next.join(" ")).not.toContain("--create");
-    const free = (await run(null, owner(list(bad)))).r;
-    expect(free.findings[0]!.next[0]).toBe("github-triage setup complexity --create");
-  });
-  it("reports an unreadable configuration file as unknown instead of failing the report", async () => {
-    const denied = Object.assign(new Error("denied"), { code: "EACCES", path });
-    const { r, queries } = await run(mapped("IF_good"), owner(list(good)), { readError: denied });
-    expect(r).toMatchObject({
-      status: "unknown",
-      findings: [{ rule: "config-unavailable", certainty: "unknown" }],
-    });
-    expect(r.findings[0]!.detail).toContain("EACCES");
-    expect(queries).toEqual([]);
-    await expect(
-      run(mapped("IF_good"), owner(list(good)), { readError: new TypeError("bug") }),
-    ).rejects.toThrow("bug");
-  });
-  it("reports malformed configuration with recovery and never writes", async () => {
-    const { r, writes, mutations } = await run("{not json", owner(list(good)));
-    expect(r.findings[0]).toMatchObject({ rule: "config-invalid", certainty: "definite" });
-    expect(writes).toEqual([]);
-    expect(mutations).toEqual([]);
-  });
-  it("renders the configuration section in Ticket Doctor text", async () => {
-    const { r } = await run(mapped("IF_gone"), owner(list(good)));
-    const lines = complexityConfigText(r).join("\n");
-    expect(lines).toContain("complexity missing");
-    expect(lines).toContain("next: github-triage setup complexity --select IF_good");
-  });
-});
-
 describe("estimation queue and briefing visibility from size labels (#122, #152)", () => {
   const root = "/repo";
   const path = join(root, CONFIG_PATH);
@@ -5761,15 +5417,6 @@ describe("estimation queue and briefing visibility from size labels (#122, #152)
   });
   const git: GitRunner = async (args) =>
     args[0] === "rev-parse" ? `${root}\n` : `origin\thttps://github.com/${repo}.git (fetch)\n`;
-  /** The briefing never reaches GitHub for sizes: any field/API call fails the test. */
-  const api = {
-    query: async () => {
-      throw new Error("briefing must not query sizes");
-    },
-    mutate: async () => {
-      throw new Error("briefing must never mutate");
-    },
-  };
   const marker = (size: "M" | "S", recordedAt = time, guidanceVersion = 1) =>
     provenanceComment({
       schemaVersion: 2,
@@ -5803,7 +5450,7 @@ describe("estimation queue and briefing visibility from size labels (#122, #152)
       collect: async () => snapshot(issues, []),
       currentRepository: async () => repo,
       now: () => new Date(time),
-      estimation: { fs: config(configText), git, cwd: root, api },
+      estimation: { fs: config(configText), git, cwd: root },
     });
     return { code, report: JSON.parse(out) };
   }
@@ -5885,6 +5532,27 @@ describe("estimation queue and briefing visibility from size labels (#122, #152)
     ]);
     expect(disabled.report.estimation).toMatchObject({ status: "disabled", queue: null });
   });
+  it("keeps the label queue available when a retired field mapping is stored (#153)", async () => {
+    const { report } = await brief('{"schemaVersion":1,"complexity":{"fieldId":"IF_old"}}', [
+      sized(1, []),
+    ]);
+    expect(report.estimation).toMatchObject({
+      status: "available",
+      queue: { items: [{ number: 1, state: "unestimated" }] },
+      findings: [
+        {
+          rule: "config-retired-key",
+          next: ["github-triage config set complexity.enabled true"],
+        },
+      ],
+    });
+    expect(report.estimation).not.toHaveProperty("fieldId");
+  });
+  it("advertises no native-field setup command (#153)", async () => {
+    const top: string[] = [];
+    await main(["--help", "--no-update-check"], async (x) => void top.push(x));
+    expect(top.join("")).not.toMatch(/setup complexity|issue field|fieldId/);
+  });
   it("offers estimation only without higher-priority work, or first on --estimate", async () => {
     const idle = await brief(null, [blocked()]);
     expect(idle.report.estimation.offered).toBe(true);
@@ -5892,7 +5560,7 @@ describe("estimation queue and briefing visibility from size labels (#122, #152)
       collect: async () => snapshot([issue(1), blocked()], []),
       currentRepository: async () => repo,
       now: () => new Date(time),
-      estimation: { fs: config(null), git, cwd: root, api },
+      estimation: { fs: config(null), git, cwd: root },
     };
     let text = "";
     await main(["--estimate"], async (t) => void (text = t), runtime);
@@ -5920,7 +5588,7 @@ describe("estimation queue and briefing visibility from size labels (#122, #152)
           throw new Error("offline only");
         },
         currentRepository: async () => repo,
-        estimation: { fs: config(null), git, cwd: root, api },
+        estimation: { fs: config(null), git, cwd: root },
       });
       expect(JSON.parse(out).estimation).toMatchObject({
         status: "available",
@@ -9148,7 +8816,6 @@ describe("label-backed complexity classification and prepared reader (#151)", ()
       ["--issue", "1"],
       ["estimate", "1"],
     ]);
-    expect(r.configuration).toBeUndefined();
   });
   it("treats truncated label pages as unknown, never unestimated", () => {
     expect(classifyComplexityLabels(labelled(1, ["status:ready"], true)).state).toBe("unknown");

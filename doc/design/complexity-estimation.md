@@ -71,3 +71,5 @@ Historical recalibration (#123) stays deferred until labels and estimates provid
 - #154: independent scenario-based rule plausibility suite.
 
 Field-era work remains closed history; #150 is retired rather than implemented. General Doctor cleanup #64 remains separate.
+
+Delivered by #153: the `setup complexity` command, native field discovery/classification, the field-backed estimation input and v1 provenance parser, and the field-era Ticket Doctor configuration checks are deleted. `complexity.fieldId` is no longer a registered key. A stored value is ignored rather than refused, reported as a `config-retired-key` finding in the estimation report and as `retired` in `config list`, and dropped by the next `config set`, which is the command-mediated correction. Configuration schema version 1 is unchanged and no migration is registered. The briefing estimation object drops its always-null `fieldId` and the field-only statuses (`setup-required`, `missing`, `incompatible`, `inaccessible`, `unsupported`).

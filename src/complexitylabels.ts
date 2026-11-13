@@ -24,6 +24,7 @@ import {
   nodeFileSystem,
   nodeGit,
   resolveRepositoryTarget,
+  retiredKeyNotices,
   settingFor,
 } from "./config.js";
 import type { ConfigFileSystem, GitRunner } from "./config.js";
@@ -147,9 +148,15 @@ export async function collectLabelEstimationInput(
       runtime.git ?? nodeGit,
     );
     const config = await loadConfig(target.root, runtime.fs ?? nodeFileSystem);
+    // Retired keys (complexity.fieldId, #153) are ignored with a finding, never a failure.
+    const findings = retiredKeyNotices(config).map(({ detail, next }) => ({
+      rule: "config-retired-key",
+      detail,
+      next: [next],
+    }));
     return settingFor(config, "complexity.enabled").value === false
-      ? { status: "disabled", unavailable: null, findings: [] }
-      : { status: "available", unavailable: null, findings: [] };
+      ? { status: "disabled", unavailable: null, findings }
+      : { status: "available", unavailable: null, findings };
   } catch (caught) {
     const error = filesystemRefusal(caught) ?? caught;
     if (!(error instanceof ConfigError)) throw error;
@@ -169,10 +176,8 @@ export function labelEstimationReport(
 ): EstimationReport {
   const source: SizeSource | undefined = input && {
     status: input.status,
-    fieldId: null,
     unavailable: input.unavailable,
     findings: input.findings,
-    provenanceFieldId: null,
     evidence: "complexity size label",
     read: labelSizeReading,
   };

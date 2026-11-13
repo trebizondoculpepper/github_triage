@@ -52,15 +52,7 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
     nullable: false,
     defaultValue: true,
     description:
-      "Whether complexity estimation is active for this repository. Disabling it keeps any existing field mapping and estimates.",
-  },
-  {
-    key: "complexity.fieldId",
-    type: "string",
-    nullable: true,
-    defaultValue: null,
-    description:
-      "Identifier of the native GitHub field that records complexity. Unset until explicitly selected.",
+      "Whether complexity estimation (complexity:XS..complexity:XXL labels) is active for this repository. Disabling it keeps existing labels and estimates.",
   },
   {
     key: "processGuide",
@@ -71,6 +63,37 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
       "Whether briefings include the compact workflow guide (#71). false keeps a one-line pointer; --guide/--no-guide override per run and `github-triage process` always shows the full guide.",
   },
 ];
+
+/**
+ * Keys an earlier build registered and this one no longer supports (#153). A stored retired key
+ * is not an error and never crashes a read: it is ignored (no effective value), reported in
+ * `LoadedConfig.retired` so callers can show a diagnostic, and dropped by the next command-mediated
+ * write (`config set`). This is not a schema migration: the schema version is unchanged.
+ */
+export const RETIRED_CONFIG_KEYS: readonly { readonly key: string; readonly reason: string }[] = [
+  {
+    key: "complexity.fieldId",
+    reason:
+      "complexity is stored as complexity:XS..complexity:XXL labels; the native issue field mapping was retired",
+  },
+];
+
+/**
+ * Diagnostic for each retired key in a loaded file. The correction re-sets complexity.enabled to
+ * its current effective value: any `config set` rewrites the file without retired keys.
+ */
+export function retiredKeyNotices(config: LoadedConfig): {
+  key: string;
+  detail: string;
+  next: string;
+}[] {
+  const enabled = settingFor(config, "complexity.enabled").value !== false;
+  return config.retired.map((key) => ({
+    key,
+    detail: `${CONFIG_PATH} contains the retired key ${key} (${RETIRED_CONFIG_KEYS.find((entry) => entry.key === key)?.reason ?? "no longer supported"}); it is ignored.`,
+    next: `github-triage config set complexity.enabled ${enabled}`,
+  }));
+}
 
 /** Upgrade a document from `from` to `from + 1`. Must be pure. */
 export interface ConfigMigration {
@@ -191,6 +214,8 @@ export interface LoadedConfig {
   readonly settings: readonly EffectiveSetting[];
   /** Raw file text as read, used to detect intervening edits. */
   readonly raw: string | null;
+  /** Retired keys found in the file: ignored, and removed by the next `config set`. */
+  readonly retired: readonly string[];
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -272,7 +297,13 @@ export function parseConfig(
 ): LoadedConfig {
   const explicit = new Map<string, ConfigValue>();
   if (raw === null) {
-    return { storedVersion: null, explicit, settings: effective(schema, explicit), raw };
+    return {
+      storedVersion: null,
+      explicit,
+      settings: effective(schema, explicit),
+      raw,
+      retired: [],
+    };
   }
   let data: unknown;
   try {
@@ -319,8 +350,13 @@ export function parseConfig(
     }
     document = step.migrate(document);
   }
+  const retired: string[] = [];
   try {
     for (const [key, value] of flatten(schema, document)) {
+      if (RETIRED_CONFIG_KEYS.some((entry) => entry.key === key)) {
+        retired.push(key);
+        continue;
+      }
       explicit.set(key, validateValue(schema, key, value));
     }
   } catch (error) {
@@ -331,7 +367,7 @@ export function parseConfig(
       `${error.recovery} ${recovery(root)}`,
     );
   }
-  return { storedVersion, explicit, settings: effective(schema, explicit), raw };
+  return { storedVersion, explicit, settings: effective(schema, explicit), raw, retired };
 }
 
 function effective(

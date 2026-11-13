@@ -14,6 +14,7 @@ import {
   ConfigError,
   DEFAULT_SCHEMA,
   loadConfig,
+  retiredKeyNotices,
   nodeFileSystem,
   nodeGit,
   resolveRepositoryTarget,
@@ -310,12 +311,14 @@ export async function runConfig(
         ...where,
         storedVersion: config.storedVersion,
         settings: config.settings.map(settingJson),
+        // Additive (#153): ignored retired keys, each with the command that removes it.
+        retired: retiredKeyNotices(config),
         identity,
       };
       await output(
         parsed.json
           ? JSON.stringify(result, null, 2) + "\n"
-          : `Configuration for ${target.repository} (${where.path}${config.storedVersion === null ? ", not present: all defaults" : ""}):\n${config.settings.map((s) => `  ${settingText(s)}`).join("\n")}\n${identityListText(identity)}`,
+          : `Configuration for ${target.repository} (${where.path}${config.storedVersion === null ? ", not present: all defaults" : ""}):\n${config.settings.map((s) => `  ${settingText(s)}`).join("\n")}\n${result.retired.map((r) => `  Ignored: ${r.detail} Next: ${r.next}\n`).join("")}${identityListText(identity)}`,
       );
       return 0;
     }
