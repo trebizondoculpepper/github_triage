@@ -164,7 +164,7 @@ interface TicketIssue {
  * An issue comment. Author and edit evidence (#212) decide whether a marker in it may drive a
  * write; `undefined` means the field was not read, which is missing evidence.
  */
-type Comment = {
+export type Comment = {
   body: string;
   createdAt?: string;
   author?: Actor | null;
@@ -172,7 +172,7 @@ type Comment = {
   includesCreatedEdit?: boolean;
   editor?: Actor | null;
 };
-type Actor = { __typename?: string; login?: string };
+export type Actor = { __typename?: string; login?: string };
 type CommentPageInfo = { hasPreviousPage?: boolean; startCursor?: string | null };
 type LabelEvent = { __typename?: string; createdAt?: string; label?: { name: string } };
 type TicketItem = TicketIssue | { __typename: "PullRequest"; number: number; url: string };
@@ -202,7 +202,7 @@ const commentFields =
  * maintain or admin permission, and any edit was made by such a user. `untrusted` is established
  * as lacking authority (ignored, with a warning); `unknown` could not be established (refused).
  */
-type Authority = { status: "trusted" } | { status: "untrusted" | "unknown"; why: string };
+export type Authority = { status: "trusted" } | { status: "untrusted" | "unknown"; why: string };
 async function actorAuthority(
   actor: Actor | null | undefined,
   role: string,
@@ -226,7 +226,10 @@ async function actorAuthority(
     ? { status: "trusted" }
     : { status: "untrusted", why: `${role} ${actor.login} has ${level} permission, not write` };
 }
-async function commentAuthority(c: Comment, permission: PermissionLookup): Promise<Authority> {
+export async function commentAuthority(
+  c: Comment,
+  permission: PermissionLookup,
+): Promise<Authority> {
   const author = await actorAuthority(c.author, "author", permission);
   if (author.status !== "trusted") return author;
   if (c.lastEditedAt === undefined || c.includesCreatedEdit === undefined)
