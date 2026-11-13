@@ -51,6 +51,8 @@ export type Issue = {
   updatedAt: string;
   labels: Page<{ name: string }>;
   comments: Page<Comment>;
+  /** Open PRs that would close this issue (#162); absent in snapshots that predate it. */
+  closedByPullRequestsReferences?: Page<{ number: number; url: string; state: string }>;
 };
 export type PullRequest = Issue & {
   headRefOid: string;

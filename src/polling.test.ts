@@ -12,6 +12,7 @@ import {
 import type { Clock, Collect, DomainEvent } from "./polling.js";
 import { createServer, envelope, mcpArguments } from "./mcp.js";
 import { RateLimitError } from "./dependencies.js";
+import { closingPrEvidence } from "./ranking.js";
 import { rateLimitFailure } from "./github.js";
 import type { McpRuntime } from "./mcp.js";
 import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
@@ -415,6 +416,26 @@ describe("optional polling and domain events (#32)", () => {
     expect(w.status()).toMatchObject({ lastOutcome: "incomplete" });
     await time.advance(minute);
     expect(kinds(w)).toEqual([]);
+    w.stop();
+  });
+
+  it("shares the closing-link rule with ranking: a complete reverse link proves absence (#162)", async () => {
+    const time = fakeClock();
+    const truncated = { ...pr(), closingIssuesReferences: page([], true) };
+    const proven = (labels: string[]) => ({
+      ...issue(1, labels),
+      closedByPullRequestsReferences: page([]),
+    });
+    expect(closingPrEvidence(proven(["status:ready"]), [truncated]).complete).toBe(true);
+    const { collect } = scripted([
+      snap([proven(["status:needs-design"])], [truncated]),
+      snap([proven(["status:ready"])], [truncated]),
+    ]);
+    const w = watch(collect, time.clock, 1);
+    w.start();
+    await time.advance(0);
+    await time.advance(minute);
+    expect(kinds(w)).toEqual(["work-became-eligible"]);
     w.stop();
   });
 

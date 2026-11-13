@@ -10,7 +10,7 @@
  */
 import { isParked, owners } from "./briefing.js";
 import type { Bounded, Briefing } from "./briefing.js";
-import { immediateUnlocks, openClosingPrs, platformsOf } from "./ranking.js";
+import { closingPrEvidence, immediateUnlocks, platformsOf } from "./ranking.js";
 import type { Action, Issue, PullRequest, Snapshot } from "./types.js";
 
 /** One row of a role section: the subject and why it is here, in this position. */
@@ -116,7 +116,8 @@ const designCandidates = (context: RoleContext): Issue[] => {
       !labelsOf(item).includes(designPolicy.decisionNeeded) &&
       nextStepAllowed(item, context) &&
       // An open closing PR is represented by DESIGN REVIEW, as pickup eligibility excludes it.
-      !openClosingPrs(item, prs).length,
+      // Unproven absence (truncated closing references) is not design pickup either.
+      ((closing) => closing.complete && !closing.open.length)(closingPrEvidence(item, prs)),
   );
 };
 

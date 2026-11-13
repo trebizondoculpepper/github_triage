@@ -10,6 +10,7 @@ import { owners, workflow } from "./briefing.js";
 import { dependencyDrift, nativeKnown } from "./dependencies.js";
 import { teamView } from "./team.js";
 import { complexityLabelFindings } from "./complexitylabels.js";
+import { closingPrEvidence } from "./ranking.js";
 import type { Issue, PullRequest, Snapshot } from "./types.js";
 
 /**
@@ -188,12 +189,10 @@ export function ticketDoctor(
   /** Evidence gaps that make the scan itself incomplete, not just one ticket's finding. */
   const gaps: string[] = [];
   const openPrsFor = new Map<string, { number: number; url: string; finished: boolean }[]>();
-  // An open PR whose linked-issue page is truncated may address any ticket: "no open PR" is
-  // then not established for anyone.
-  let prLinksPartial = false;
+  // "No open PR" rests on the shared closing-link rule (closingPrEvidence): an open PR whose
+  // linked-issue page is truncated may address any ticket unless its reverse link proves not.
   for (const pr of snapshot.pullRequests)
     if (pr.state === "OPEN") {
-      if (pr.closingIssuesReferences?.pageInfo?.hasNextPage) prLinksPartial = true;
       for (const ref of pr.closingIssuesReferences?.nodes ?? [])
         openPrsFor.set(ref.url, [
           ...(openPrsFor.get(ref.url) ?? []),
@@ -469,12 +468,13 @@ export function ticketDoctor(
       );
     // A handoff to review that no open PR backs: the PR merged or closed, so the awaiting-review
     // state (and any remaining claim) is a leftover to inspect.
-    if (!prs.length && labels.includes(doctorPolicy.awaitingReview))
+    const closing = closingPrEvidence(issue, snapshot.pullRequests);
+    if (!closing.open.length && labels.includes(doctorPolicy.awaitingReview))
       add(
         issue,
         "awaiting-review-without-pr",
         // Rests on the absence of an open PR, unknown when a PR's linked issues are truncated.
-        prLinksPartial ? "unknown" : "candidate",
+        closing.complete ? "candidate" : "unknown",
         `Labelled ${doctorPolicy.awaitingReview}${held.length ? ` and claimed by ${held.join(", ")}` : ""}, but no open PR addresses it; the PR may have merged or closed.`,
         [
           cmd.who(issue.number),

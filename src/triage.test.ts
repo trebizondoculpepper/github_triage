@@ -60,7 +60,7 @@ import {
   mutatingCommands,
   policyVersion,
 } from "./process.js";
-import { pickupPolicy } from "./ranking.js";
+import { closingPrEvidence, pickupEligibility, pickupPolicy } from "./ranking.js";
 import { complexityGuidance } from "./complexity.js";
 import { parseLabelProvenance, provenanceComment } from "./estimate.js";
 import type { LabelEstimateProvenance } from "./estimate.js";
@@ -6712,6 +6712,69 @@ describe("role-shaped briefings (#1, doc/design/briefings.md)", () => {
     expect(inspect.background).toBe(true);
     expect(inspect.items[0]!.reason).toMatch(/eligibility unknown/);
     expect(numbers(r.role!.next)).not.toContain(150);
+  });
+  it("never offers pickup whose only open closing PR has truncated closing references (#162)", async () => {
+    const ticket = issue(170);
+    // PR #4 closes #170, but the reference falls on an unseen page of its closing references.
+    const truncated = { ...pr(), closingIssuesReferences: page([], true, "next") };
+    const evidence = closingPrEvidence(ticket, [truncated]);
+    expect(evidence).toMatchObject({ open: [], complete: false });
+    expect(pickupEligibility(ticket, { prs: [truncated] })).toMatchObject({ status: "unknown" });
+    const r = await compact(snapshot([ticket], [truncated]), {
+      limit: 10,
+      agent: "reader",
+      role: "implementer",
+    });
+    expect(r.role!.sections.find((s) => s.name === "pickup")?.items ?? []).toEqual([]);
+    const inspect = section(r, "pickup-inspect");
+    expect(numbers(inspect.items)).toEqual([170]);
+    expect(inspect.items[0]!.reason).toMatch(/closing references truncated on open PR #4/);
+    expect(numbers(r.role!.next)).not.toContain(170);
+    // Design pickup shares the rule: unproven absence is not design pickup either.
+    const design = issue(171, ["status:needs-design"]);
+    const d = await compact(snapshot([design], [truncated]), {
+      limit: 10,
+      agent: "reader",
+      role: "designer",
+    });
+    expect(d.role!.sections.find((s) => s.name === "design-pickup")?.items ?? []).toEqual([]);
+  });
+  it("proves no open closing PR from the issue's complete reverse link despite truncation (#162)", async () => {
+    const truncated = { ...pr(), closingIssuesReferences: page([], true, "next") };
+    const proven = { ...issue(172), closedByPullRequestsReferences: page([]) };
+    expect(closingPrEvidence(proven, [truncated])).toEqual({
+      open: [],
+      complete: true,
+      reasons: [],
+    });
+    expect(pickupEligibility(proven, { prs: [truncated] }).status).toBe("eligible");
+    // A complete reverse link naming an open PR stays known-ineligible.
+    const linked = {
+      ...issue(173),
+      closedByPullRequestsReferences: page([{ number: 4, url: truncated.url, state: "OPEN" }]),
+    };
+    expect(pickupEligibility(linked, { prs: [truncated] })).toMatchObject({
+      status: "ineligible",
+      reasons: ["open closing PR #4 (PR follow-up)"],
+    });
+    // A truncated reverse link cannot prove absence either.
+    const partial = { ...issue(174), closedByPullRequestsReferences: page([], true) };
+    expect(pickupEligibility(partial, { prs: [truncated] }).status).toBe("unknown");
+    // Ticket Doctor rests "no open PR" on the same rule.
+    const waiting = { ...issue(175, ["status:awaiting-review"]) };
+    const findings = (prs: PullRequest[]) =>
+      ticketDoctor(snapshot([waiting], prs), { now: new Date(time) })
+        .tickets.flatMap((t) => t.findings)
+        .filter((f) => f.kind === "awaiting-review-without-pr")
+        .map((f) => f.certainty);
+    expect(findings([truncated])).toEqual(["unknown"]);
+    const reverseProof = { ...waiting, closedByPullRequestsReferences: page([]) };
+    expect(
+      ticketDoctor(snapshot([reverseProof], [truncated]), { now: new Date(time) })
+        .tickets.flatMap((t) => t.findings)
+        .filter((f) => f.kind === "awaiting-review-without-pr")
+        .map((f) => f.certainty),
+    ).toEqual(["candidate"]);
   });
   it("shows every issue and PR from the non-role briefing somewhere in each role", async () => {
     const holder = issue(160, ["agent:other"]);

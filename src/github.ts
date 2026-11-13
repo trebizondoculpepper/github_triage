@@ -260,6 +260,9 @@ export async function currentRepository(cwd?: string, signal?: AbortSignal): Pro
 const info = "pageInfo{hasNextPage endCursor}";
 const comment = "body url author{login} createdAt updatedAt";
 const common = `number title body url state createdAt updatedAt lastEditedAt labels(first:100){nodes{name} ${info}} comments(first:100){nodes{${comment}} ${info}}`;
+// The issue side of the closing link (#162): proves an issue has no open closing PR when an
+// open PR's closing references are truncated.
+const closedBy = `closedByPullRequestsReferences(first:10,includeClosedPrs:false){nodes{number url state} ${info}}`;
 const prFields = `${common} headRefOid headRefName baseRefName isDraft mergeable mergeStateStatus reviewDecision mergedAt
  closingIssuesReferences(first:100){nodes{number url} ${info}}
  reviewThreads(first:100){nodes{isResolved isOutdated comments(first:1){totalCount nodes{${comment}} ${info}}} ${info}}
@@ -400,7 +403,11 @@ export async function collect(
     throw new IssueUnavailable(diagnosis);
   };
   const [issues, pullRequests] = await Promise.all([
-    collection<Issue>("issues", `${common} stateReason ${nativeFields}`, ",states:OPEN"),
+    collection<Issue>(
+      "issues",
+      `${common} stateReason ${closedBy} ${nativeFields}`,
+      ",states:OPEN",
+    ),
     collection<PullRequest>("pullRequests", prFields, ",states:OPEN"),
   ]).catch(diagnoseFailure);
   const issueSource = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){${common} stateReason ${nativeFields}}}}`;
@@ -457,7 +464,7 @@ export async function collect(
     const values = await Promise.all([
       collection<Issue>(
         "issues",
-        `${common} stateReason ${nativeFields}`,
+        `${common} stateReason ${closedBy} ${nativeFields}`,
         ",states:[OPEN,CLOSED]",
         options.since,
       ),
