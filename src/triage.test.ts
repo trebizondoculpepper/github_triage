@@ -1776,3 +1776,35 @@ describe("claim and needs-human review fixes", () => {
     expect(shellQuote("--add-label")).toBe("--add-label");
   });
 });
+
+describe("claim ownership needs complete labels", () => {
+  it("refuses before trusting an existing or competing claim when labels are incomplete", async () => {
+    const data = (labels: string[]) => ({
+      repository: {
+        issueOrPullRequest: {
+          __typename: "Issue",
+          number: 7,
+          title: "T7",
+          url: `https://github.com/${repo}/issues/7`,
+          state: "OPEN",
+          updatedAt: time,
+          labels: {
+            nodes: labels.map((name) => ({ name })),
+            pageInfo: { hasNextPage: true, endCursor: "x" },
+          },
+          issueDependenciesSummary: { blockedBy: 0 },
+          blockedBy: page([]),
+          closedByPullRequestsReferences: page([]),
+          comments: page([]),
+          timelineItems: page([]),
+        },
+        claims: page([{ number: 7, title: "T7", url: issue(7).url }]),
+        ownerLabel: { name: "agent:kavya" },
+      },
+    });
+    for (const labels of [["agent:kavya"], ["status:ready"]]) {
+      const plan = await planClaim(repo, { number: 7, agent: "kavya" }, async () => data(labels));
+      expect(plan).toMatchObject({ ok: false, error: "EVIDENCE_INCOMPLETE" });
+    }
+  });
+});

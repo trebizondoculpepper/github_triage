@@ -125,6 +125,14 @@ export async function planClaim(repository, request, query = ghQuery) {
   const mine = claimPolicy.owner(agent);
   if (item.state !== "OPEN")
     return refuse("TICKET_CLOSED", facts, "Only an open ticket can be claimed.", [`${triage}`]);
+  // Ownership is decided from the complete label set only.
+  if (item.labels.pageInfo?.hasNextPage)
+    return refuse(
+      "EVIDENCE_INCOMPLETE",
+      facts,
+      "More than 100 labels; ownership and readiness cannot be verified.",
+      [`${triage} --issue ${number}`],
+    );
   const others = facts.owners.filter((o) => o !== mine);
   if (others.length)
     return refuse(
@@ -183,13 +191,6 @@ export async function planClaim(repository, request, query = ghQuery) {
       changes: commented ? [] : [claimComment()],
     };
   }
-  if (item.labels.pageInfo?.hasNextPage)
-    return refuse(
-      "EVIDENCE_INCOMPLETE",
-      facts,
-      "More than 100 labels; ownership and readiness cannot be verified.",
-      [`${triage} --issue ${number}`],
-    );
   if (
     label(item, claimPolicy.question) ||
     label(item, claimPolicy.needsDesign) ||
