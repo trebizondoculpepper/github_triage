@@ -16,6 +16,8 @@ Read [HANDOFF.md](HANDOFF.md) first. This is the standalone GitHub Triage projec
 
 ## Work and checks
 
+Use this project's triage tool instead of direct `gh` wherever the operation is supported. Use full ticket intake and native dependency views before separate GitHub searches; fall back to `gh` only for unsupported operations, missing evidence or triage diagnosis. Check current `--help`, not planned command syntax.
+
 Use this repository's issues, not the old poker_blocks issue numbers. Recheck current ownership and native blockers before claiming. Keep one issue/PR focused; preserve another agent's work. An unanswered question goes on its ticket with the concrete blocker.
 
 Before committing run `npm run check`, `npm test` and `npm run build`. Use the installed Vite+ pre-commit hook; do not bypass it. Keep the developer diary in `diary/` for significant work.
