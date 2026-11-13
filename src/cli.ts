@@ -31,6 +31,8 @@ import type { ConfigRuntime } from "./configcli.js";
 import { runSetup, terminalPrompt } from "./complexitysetup.js";
 import type { SetupRuntime } from "./complexitysetup.js";
 import { estimateUsage, runEstimate } from "./estimate.js";
+import { collectEstimationInput } from "./estimation.js";
+import type { EstimationRuntime } from "./estimation.js";
 import type { EstimateRuntime } from "./estimate.js";
 import { diagnoseComplexityConfig } from "./complexitydoctor.js";
 import type { ComplexityDoctorRuntime } from "./complexitydoctor.js";
@@ -75,6 +77,8 @@ export interface Runtime {
   estimate?: EstimateRuntime;
   /** Filesystem, git and GitHub field API for Ticket Doctor's configuration checks. */
   doctor?: ComplexityDoctorRuntime;
+  /** Filesystem, git and GitHub field API for the briefing's estimation queue (#122). */
+  estimation?: EstimationRuntime;
 }
 
 type Output = (text: string) => Promise<void>;
@@ -117,6 +121,9 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
                         incomplete first, oldest), or oldest/newest (creation time alone,
                         ignoring urgency/impact; both still shown). Never changes eligibility,
                         claims, addressed attention or the PR/owned-work groups above pickup
+  --estimate            Present the optional estimation queue (unestimated or stale sizes,
+                        blocked tickets included) first; otherwise it follows higher-priority
+                        work. Never claims or reserves; disabled complexity hides it
   --stale-hours N       Flag claims with no ticket/linked-PR activity for N hours (default 48)
   --max-chars N         Compact text budget (default 10000)
   --limit N             Next steps (default 5 compact, 10 expanded)
@@ -290,6 +297,7 @@ export function argumentsFor(args: string[]) {
       order: { type: "string" },
       platform: { type: "string" },
       "stale-hours": { type: "string" },
+      estimate: { type: "boolean" },
       help: { type: "boolean" },
     },
   });
@@ -693,12 +701,18 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
   }
   if (options.issue && !snapshot.issues.some((issue) => issue.number === options.issue))
     throw new Error(`Issue #${options.issue} not in this cache. Refresh live with --issue.`);
+  const estimation = await collectEstimationInput(
+    snapshot.repository,
+    { offline: !!options.offline },
+    runtime.estimation,
+  );
   const expanded = briefing(
     snapshot,
     options.full
-      ? options
+      ? { ...options, estimation }
       : {
           ...options,
+          estimation,
           limit: Math.max(snapshot.issues.length + snapshot.pullRequests.length, 1) * 20,
         },
   );

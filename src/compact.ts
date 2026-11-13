@@ -2,6 +2,8 @@
 import { owners, excerpt } from "./briefing.js";
 import { unblocks } from "./dependencies.js";
 import type { Briefing, BriefingOptions, Bounded, CheckOutcome } from "./briefing.js";
+import { estimateLine } from "./estimation.js";
+import type { EstimateEntry } from "./estimation.js";
 import type { Action, Issue, PullRequest, Snapshot } from "./types.js";
 
 export type RuleGroup =
@@ -92,10 +94,12 @@ export interface CompactSubject {
   findings: Action[];
   detailCommand: string;
   pullRequest?: CompactPullRequest;
+  /** Complexity size/estimate state (#122); null when disabled or not an open issue. */
+  complexity?: EstimateEntry | null;
 }
 export function compactBriefing(
   snapshot: Snapshot,
-  options: Pick<BriefingOptions, "limit" | "agent">,
+  options: Pick<BriefingOptions, "limit" | "agent" | "estimate">,
   expanded: Briefing,
 ) {
   const bound = <T>(items: T[], size = 3): Bounded<T> => ({
@@ -216,6 +220,19 @@ export function compactBriefing(
       .map((item) => item.url),
   );
   const actions = bound(next, options.limit);
+  // Estimation is offered automatically only when no higher-priority group (addressed
+  // attention, PR follow-up, own work, eligible pickup) exists; explicit requests always see it.
+  const higher = next.some((group) => tier(group) <= 4);
+  const estimates = new Map(facts.estimation.entries.map((e) => [e.url, e]));
+  const { entries: _entries, queue, ...estimationFacts } = facts.estimation;
+  const shownQueue = queue?.items.slice(0, options.limit) ?? [];
+  const estimation = {
+    ...estimationFacts,
+    offered: estimationFacts.requested || (!higher && !!queue?.total),
+    queue: queue
+      ? { total: queue.total, omitted: queue.total - shownQueue.length, items: shownQueue }
+      : null,
+  };
   const urls = new Set([
     ...actions.items.map((item) => item.target),
     ...Object.values(sections).flatMap((s) => s.items),
@@ -232,6 +249,7 @@ export function compactBriefing(
       source: sourceContext(item),
       dependencies: facts.dependencies.find((dep) => dep.url === url) ?? null,
       findings: grouped.get(url) ?? [],
+      complexity: estimates.get(url) ?? null,
       detailCommand: item.headRefOid
         ? `gh pr view ${item.number} --repo ${snapshot.repository} --json headRefOid,statusCheckRollup,reviews`
         : `npm run --silent triage -- --repo ${snapshot.repository} --issue ${item.number} --json`,
@@ -266,6 +284,7 @@ export function compactBriefing(
     },
     actions: { ...actions, items: actions.items.map(({ target }) => target) },
     sections,
+    estimation,
     subjects,
     changes: facts.changes,
     detail: facts.detail,
@@ -295,17 +314,34 @@ export function compactText(report: CompactBriefing, maxChars = 10000): string {
       }
       shown.add(url);
       rows.push(
-        `- #${s.number} ${s.title} ${s.owners.join(", ")}\n  ${s.findings.map((f) => `[${f.uncertainty}] ${f.reason}${markerSource(f)} Next: ${f.next}`).join(" ")}\n  ${url}${s.pullRequest ? `\n  Head ${s.pullRequest.head}; ${s.pullRequest.checks.map((c) => `${c.name}:${c.outcome}`).join(", ")}; ${s.pullRequest.unresolvedThreads} unresolved threads` : ""}\n  ${s.source.chronology}\n  ${s.detailCommand}`,
+        `- #${s.number} ${s.title} ${s.owners.join(", ")}${s.complexity && report.estimation.status === "available" ? ` (${s.complexity.state === "unknown" ? "size unknown" : (s.complexity.size ?? "unestimated")})` : ""}\n  ${s.findings.map((f) => `[${f.uncertainty}] ${f.reason}${markerSource(f)} Next: ${f.next}`).join(" ")}\n  ${url}${s.pullRequest ? `\n  Head ${s.pullRequest.head}; ${s.pullRequest.checks.map((c) => `${c.name}:${c.outcome}`).join(", ")}; ${s.pullRequest.unresolvedThreads} unresolved threads` : ""}\n  ${s.source.chronology}\n  ${s.detailCommand}`,
       );
     }
   };
+  const estimation = report.estimation;
+  const estimationRows = (): void => {
+    if (estimation.status === "disabled") return;
+    rows.push(
+      `\nESTIMATION${estimation.requested ? " (requested)" : " (optional; after the work above)"} (${estimation.queue?.total ?? "unavailable"}; ${estimation.queue?.omitted ?? 0} omitted)`,
+      `- ${estimation.detail}`,
+      ...estimation.findings.map((f) => `- ${f.rule}: ${f.detail} Next: ${f.next.join(" | ")}`),
+      ...(estimation.queue?.items ?? []).map(
+        (e) => `- #${e.number} ${e.title}\n  ${estimateLine(e)}\n  ${e.url}`,
+      ),
+      `- ${estimation.boundaries} Guidance: github-triage estimate --help`,
+    );
+  };
+  if (estimation.requested) estimationRows();
   add("NEXT STEPS", report.actions);
+  if (estimation.offered && !estimation.requested)
+    rows.push("- No higher-priority work: estimation is offered below (optional).");
   const titles: Record<string, string> = {
     "decision-needed": "DECISION NEEDED",
     "documentation-needed": "AGREED, NEEDS DOCUMENTATION",
   };
   for (const [name, section] of Object.entries(report.sections))
     add(titles[name] ?? name.toUpperCase(), section);
+  if (!estimation.requested) estimationRows();
   // Warnings are always shown, but bounded so they cannot exhaust the text budget alone;
   // JSON output keeps the full list.
   const warnings = report.completeness.warnings;
