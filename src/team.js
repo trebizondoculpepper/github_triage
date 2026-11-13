@@ -45,9 +45,12 @@ function pullRequestState(pr) {
 /**
  * Aggregate open claims by agent.
  * @param {import("./types.js").Snapshot} snapshot
- * @param {{ now?: Date, staleHours?: number }} [options]
+ * @param {{ now?: Date, staleHours?: number, offline?: boolean }} [options]
  */
-export function teamView(snapshot, { now = new Date(), staleHours = defaultStaleHours } = {}) {
+export function teamView(
+  snapshot,
+  { now = new Date(), staleHours = defaultStaleHours, offline = false } = {},
+) {
   const open = snapshot.issues.filter((i) => i.state === "OPEN");
   const linked = new Map();
   for (const pr of snapshot.pullRequests)
@@ -124,6 +127,17 @@ export function teamView(snapshot, { now = new Date(), staleHours = defaultStale
     kind: "team-view",
     repository: snapshot.repository,
     fetchedAt: snapshot.fetchedAt,
+    // Same freshness shape as the briefing: an offline cache is labelled with its fetch time
+    // and age, and ownership is not verified live.
+    freshness: {
+      startedAt: snapshot.startedAt,
+      fetchedAt: snapshot.fetchedAt,
+      offline,
+      ageSeconds: Math.max(0, Math.floor((now.getTime() - Date.parse(snapshot.fetchedAt)) / 1000)),
+      liveVerification: offline
+        ? "not performed: offline cache; recheck live before acting on any claim"
+        : "live fetch",
+    },
     staleHours,
     presence:
       "unknown: no presence source; recorded ownership and recent activity are not availability",
@@ -137,8 +151,11 @@ export function teamView(snapshot, { now = new Date(), staleHours = defaultStale
 
 /** Text rendering. */
 export function teamText(view) {
+  const age = view.freshness.ageSeconds;
   const lines = [
-    `Team view: ${view.repository} (fetched ${view.fetchedAt})`,
+    view.freshness.offline
+      ? `Team view: ${view.repository} — OFFLINE cache fetched ${view.fetchedAt} (${Math.floor(age / 3600)}h ${Math.floor((age % 3600) / 60)}m old); ownership not verified live`
+      : `Team view: ${view.repository} (fetched ${view.fetchedAt})`,
     view.guidance,
     `Presence: ${view.presence}`,
   ];

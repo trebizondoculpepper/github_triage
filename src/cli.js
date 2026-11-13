@@ -243,7 +243,11 @@ export async function main(
       ? await cachedSnapshot(values.cache, values.repo)
       : await runtime.collect(values.repo ?? (await runtime.currentRepository()), {});
     if (!values.offline && values.cache) await atomicJson(values.cache, snapshot);
-    const view = teamView(snapshot, { staleHours, now: runtime.now?.() ?? new Date() });
+    const view = teamView(snapshot, {
+      staleHours,
+      now: runtime.now?.() ?? new Date(),
+      offline: !!values.offline,
+    });
     await output(values.json ? JSON.stringify(view, null, 2) + "\n" : teamText(view));
     return view.completeness.complete ? 0 : 2;
   }

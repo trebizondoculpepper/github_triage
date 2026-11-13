@@ -1488,7 +1488,20 @@ describe("team view (#41, doc/design/diagnostics.md)", () => {
           runtime,
         ),
       ).toBe(0);
-      expect(JSON.parse(out)).toMatchObject({ kind: "team-view", schemaVersion: 1 });
+      expect(JSON.parse(out)).toMatchObject({
+        kind: "team-view",
+        schemaVersion: 1,
+        freshness: { offline: true, ageSeconds: 0 },
+      });
+      expect(JSON.parse(out).freshness.liveVerification).toMatch(/^not performed/);
+      let text = "";
+      await main(["team", "--offline", "--cache", cache], async (t) => void (text = t), {
+        ...runtime,
+        now: () => new Date(Date.parse(time) + 3 * 3_600_000),
+      });
+      expect(text.split("\n")[0]).toMatch(
+        /OFFLINE cache fetched .* \(3h 0m old\); ownership not verified live/,
+      );
       for (const bad of [
         ["team", "--stale-hours", "0"],
         ["team", "--stale-hours", "x"],
