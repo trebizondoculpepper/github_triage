@@ -172,13 +172,28 @@ export function validateValue(schema: ConfigSchema, key: string, value: unknown)
   );
 }
 
-/** Flatten `{complexity: {enabled: true}}` into dotted keys. */
-function flatten(document: Record<string, unknown>, prefix = ""): Map<string, unknown> {
+/**
+ * Flatten `{complexity: {enabled: true}}` into dotted keys. Objects are only accepted at
+ * namespace paths of registered keys, so an object at a scalar key or an unknown subtree
+ * (even an empty one) is refused instead of being silently dropped.
+ */
+function flatten(
+  schema: ConfigSchema,
+  document: Record<string, unknown>,
+  prefix = "",
+): Map<string, unknown> {
   const flat = new Map<string, unknown>();
   for (const [name, value] of Object.entries(document)) {
     const key = prefix ? `${prefix}.${name}` : name;
-    if (isRecord(value)) for (const [inner, leaf] of flatten(value, key)) flat.set(inner, leaf);
-    else flat.set(key, value);
+    if (!isRecord(value)) {
+      flat.set(key, value);
+      continue;
+    }
+    if (schema.keys.some((entry) => entry.key === key)) {
+      validateValue(schema, key, value);
+    }
+    if (!schema.keys.some((entry) => entry.key.startsWith(`${key}.`))) findKey(schema, key);
+    for (const [inner, leaf] of flatten(schema, value, key)) flat.set(inner, leaf);
   }
   return flat;
 }
@@ -252,17 +267,17 @@ export function parseConfig(
     }
     document = step.migrate(document);
   }
-  for (const [key, value] of flatten(document)) {
-    try {
+  try {
+    for (const [key, value] of flatten(schema, document)) {
       explicit.set(key, validateValue(schema, key, value));
-    } catch (error) {
-      if (!(error instanceof ConfigError)) throw error;
-      throw new ConfigError(
-        "incompatible",
-        `${CONFIG_PATH} contains unsupported data: ${error.message}`,
-        `${error.recovery} ${recovery(root)}`,
-      );
     }
+  } catch (error) {
+    if (!(error instanceof ConfigError)) throw error;
+    throw new ConfigError(
+      "incompatible",
+      `${CONFIG_PATH} contains unsupported data: ${error.message}`,
+      `${error.recovery} ${recovery(root)}`,
+    );
   }
   return { storedVersion, explicit, settings: effective(schema, explicit), raw };
 }

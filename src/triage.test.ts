@@ -3644,6 +3644,10 @@ describe("repository configuration service (#116, doc/design/repository-configur
     ['{"schemaVersion":2}', "unsupported-version"],
     ['{"schemaVersion":1,"complexity":{"enabled":"yes"}}', "incompatible"],
     ['{"schemaVersion":1,"token":"secret"}', "incompatible"],
+    // Empty objects must not bypass validation (Codex review on #131).
+    ['{"schemaVersion":1,"complexity":{"enabled":{}}}', "incompatible"],
+    ['{"schemaVersion":1,"futureSetting":{}}', "incompatible"],
+    ['{"schemaVersion":1,"complexity":{"enabled":true,"later":{}}}', "incompatible"],
   ])("refuses %s without touching the file", async (raw, code) => {
     const memory = memoryFs(raw);
     await expect(loadConfig(root, memory.fs)).rejects.toMatchObject({ code });
