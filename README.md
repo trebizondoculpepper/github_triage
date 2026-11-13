@@ -69,12 +69,14 @@ github-triage pr 17 --repo owner/repository
 ### Catch up and check repository health
 
 ```sh
+github-triage briefing --repo owner/repository --last 24h
+github-triage briefing --repo owner/repository --checkpoint ~/.config/github-triage/owner-repository.json
 github-triage --repo owner/repository --since 2026-11-01T09:00:00Z
 github-triage ticket-doctor --repo owner/repository
 github-triage team --repo owner/repository
 ```
 
-Ticket Doctor reports inconsistencies without repairing them. Team activity reflects recorded claims and recent evidence; it does not prove an agent is online.
+`briefing` reports owner attention, completed and disposed work, progress, blockers and current activity for a window (`--last`, `--since` or `--checkpoint`, default 24 hours). A checkpoint advances only after a complete live report is delivered; `--offline --cache PATH` replays a saved window and never advances one. Ticket Doctor reports inconsistencies without repairing them. Team activity reflects recorded claims and recent evidence; it does not prove an agent is online.
 
 ### Use structured output
 

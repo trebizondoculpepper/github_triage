@@ -1081,10 +1081,14 @@ const attentionHeadline: Record<AttentionStatus, string> = {
   unknown: "Owner attention: UNKNOWN — current collection is incomplete.",
 };
 
-/** Bounded text. Window, completeness, scope and omission notices are kept before row detail. */
+/**
+ * Bounded text. Window, completeness, scope and omission notices are kept before row detail.
+ * `notices` are front-end lines (offline source, checkpoint policy) kept right after the title.
+ */
 export function catchUpText(
   report: CatchUpReport,
   maxChars: number = catchUpLimits.maxChars.default,
+  notices: string[] = [],
 ): string {
   if (
     !Number.isInteger(maxChars) ||
@@ -1098,6 +1102,7 @@ export function catchUpText(
   const s = report.summary;
   const head = [
     `Repository briefing: ${report.repository}`,
+    ...notices,
     attentionHeadline[report.attentionStatus],
     w
       ? `Window ${w.from ?? "(baseline)"} → ${w.through} (${w.source}${w.last ? ` ${w.last}` : ""}); observed ${report.observation.startedAt} → ${report.observation.fetchedAt}.`
