@@ -10,8 +10,11 @@
 import { parseArgs } from "node:util";
 import { join } from "node:path";
 import {
-  CONFIG_PATH,
+  CONVERT_COMMAND,
   ConfigError,
+  convertConfig,
+  LEGACY_CONFIG_PATH,
+  TOML_CONFIG_PATH,
   DEFAULT_SCHEMA,
   loadConfig,
   retiredKeyNotices,
@@ -38,6 +41,8 @@ import { resolveEntry, SUPPORTED_HARNESSES, validateHarness } from "./harness.js
 import type { EntryResolution, Environment } from "./harness.js";
 import type { IdentityKey, IdentityRecord } from "./identity.js";
 import type {
+  ConfigFormat,
+  LoadedConfig,
   ConfigErrorCode,
   ConfigFileSystem,
   ConfigKey,
@@ -60,6 +65,7 @@ export interface ConfigRuntime {
 export const configUsage = `Usage: github-triage config get KEY [--entry KEY | --harness NAME] [--json] [--repo owner/name]
        github-triage config set KEY VALUE [--entry KEY | --harness NAME] [--json] [--repo owner/name]
        github-triage config list [--entry KEY | --harness NAME] [--json] [--repo owner/name]
+       github-triage config convert [--prefer toml|json] [--json] [--repo owner/name]
        github-triage config help [KEY] [--json]
 identity.* keys use the [agents.KEY] entry of the root agent-inbox.toml selected by --entry KEY,
 else by --harness ${SUPPORTED_HARNESSES.join("|")}, else by the detected harness.`;
@@ -68,7 +74,8 @@ type Parsed =
   | { command: "help"; key?: string; json: boolean }
   | ({ command: "get"; key: string; json: boolean; repo?: string } & Selection)
   | ({ command: "set"; key: string; value: string; json: boolean; repo?: string } & Selection)
-  | ({ command: "list"; json: boolean; repo?: string } & Selection);
+  | ({ command: "list"; json: boolean; repo?: string } & Selection)
+  | { command: "convert"; json: boolean; repo?: string; prefer?: ConfigFormat };
 
 /** Explicit entry selection; both absent means harness detection decides. */
 interface Selection {
@@ -102,6 +109,7 @@ export function configArgumentsFor(args: string[]): Parsed {
         repo: { type: "string" },
         entry: { type: "string" },
         harness: { type: "string" },
+        prefer: { type: "string" },
         json: { type: "boolean" },
         help: { type: "boolean" },
         scope: { type: "string" },
@@ -142,7 +150,16 @@ export function configArgumentsFor(args: string[]): Parsed {
       );
     return { command: "help", key, json };
   }
-  const { repo, entry, harness } = values;
+  const { repo, entry, harness, prefer } = values;
+  if (prefer !== undefined && command !== "convert")
+    throw new ConfigUsageError("usage", "--prefer applies only to config convert.");
+  if (command === "convert") {
+    if (operands.length !== 0 || entry !== undefined || harness !== undefined)
+      throw new ConfigUsageError("usage", "config convert takes no KEY and no --entry/--harness.");
+    if (prefer !== undefined && prefer !== "toml" && prefer !== "json")
+      throw new ConfigUsageError("usage", "--prefer must be toml or json.");
+    return { command, json, repo, prefer };
+  }
   if (entry !== undefined && harness !== undefined)
     throw new ConfigUsageError("usage", "Pass either --entry or --harness, not both.");
   if (
@@ -219,7 +236,10 @@ function helpResult(key: string | undefined) {
     schemaVersion: 1,
     kind: "config-help",
     scope: "repository",
-    path: CONFIG_PATH,
+    path: TOML_CONFIG_PATH,
+    // Additive (#160): the earlier JSON store, read until converted, and the conversion command.
+    legacyPath: LEGACY_CONFIG_PATH,
+    convert: CONVERT_COMMAND,
     usage: configUsage,
     keys: keys.map((entry) => ({
       key: entry.key,
@@ -248,10 +268,14 @@ function helpText(result: ReturnType<typeof helpResult>): string {
     )
     .join("\n");
   return `${result.usage}
-Repository settings stored in ${CONFIG_PATH} of the current checkout (repository scope only;
+Repository settings stored in ${TOML_CONFIG_PATH} of the current checkout (repository scope only;
 global/machine scopes are not supported). Use these commands rather than editing the file:
 values are validated, older schemas migrated and concurrent edits refused. Changes are not
-committed; review and commit the file with Git. get/list never modify the file.
+committed; review and commit the file with Git. get/list never modify or convert the file.
+An earlier ${LEGACY_CONFIG_PATH} is still read, and set in place, until you run
+${CONVERT_COMMAND}: it writes and verifies ${TOML_CONFIG_PATH}, then removes the JSON
+file. Both files present is refused; convert removes a JSON file the TOML file agrees with,
+and --prefer toml|json chooses which file's settings to keep when they disagree.
 Keys:
 ${keys}
 Per-agent identity keys, stored in the [agents.KEY] table selected by --entry KEY in
@@ -261,7 +285,8 @@ get/list never create the file; setting identity.triage_role initialises a missi
 with a generated name once:
 ${identity}
 Exit: 0 success (including an unchanged set); 1 invalid arguments, unsupported scope,
-unknown key, invalid value, unreadable file, write conflict or wrong repository.
+unknown key, invalid value, unreadable file, write conflict, both settings files present,
+incomplete conversion or wrong repository.
 `;
 }
 
@@ -280,7 +305,7 @@ export async function runConfig(
       return 0;
     }
     const fs = runtime.fs ?? nodeFileSystem;
-    if (parsed.command !== "list" && isIdentityKey(parsed.key)) {
+    if ((parsed.command === "get" || parsed.command === "set") && isIdentityKey(parsed.key)) {
       await output(await runIdentity(parsed, runtime));
       return 0;
     }
@@ -290,20 +315,42 @@ export async function runConfig(
       parsed.repo,
       runtime.git ?? nodeGit,
     );
-    const where = {
+    const at = (config: LoadedConfig) => ({
       repository: target.repository,
-      path: join(target.root, CONFIG_PATH),
-    };
+      path: join(target.root, config.path),
+      // Additive (#160): which store was read, and the conversion still to run for JSON.
+      storage: storageJson(config),
+    });
+    if (parsed.command === "convert") {
+      const converted = await convertConfig(target, { fs, prefer: parsed.prefer });
+      const result = {
+        schemaVersion: 1,
+        kind: "config-convert",
+        ...at(converted.config),
+        status: converted.status,
+        wroteToml: converted.wroteToml,
+        removedJson: converted.removedJson,
+        droppedRetired: converted.droppedRetired,
+        settings: converted.config.settings.map(settingJson),
+      };
+      await output(parsed.json ? JSON.stringify(result, null, 2) + "\n" : convertText(result));
+      return 0;
+    }
     if (parsed.command === "get") {
-      const setting = settingFor(await loadConfig(target.root, fs), parsed.key);
+      const config = await loadConfig(target.root, fs);
+      const setting = settingFor(config, parsed.key);
+      const where = at(config);
       const result = { schemaVersion: 1, kind: "config-get", ...where, ...settingJson(setting) };
       await output(
-        parsed.json ? JSON.stringify(result, null, 2) + "\n" : `${settingText(setting)}\n`,
+        parsed.json
+          ? JSON.stringify(result, null, 2) + "\n"
+          : `${settingText(setting)}\n${legacyNotice(config)}`,
       );
       return 0;
     }
     if (parsed.command === "list") {
       const config = await loadConfig(target.root, fs);
+      const where = at(config);
       const identity = await identityListing(parsed, target.root, fs, runtime);
       const result = {
         schemaVersion: 1,
@@ -318,7 +365,7 @@ export async function runConfig(
       await output(
         parsed.json
           ? JSON.stringify(result, null, 2) + "\n"
-          : `Configuration for ${target.repository} (${where.path}${config.storedVersion === null ? ", not present: all defaults" : ""}):\n${config.settings.map((s) => `  ${settingText(s)}`).join("\n")}\n${result.retired.map((r) => `  Ignored: ${r.detail} Next: ${r.next}\n`).join("")}${identityListText(identity)}`,
+          : `Configuration for ${target.repository} (${where.path}${config.storedVersion === null ? ", not present: all defaults" : ""}):\n${config.settings.map((s) => `  ${settingText(s)}`).join("\n")}\n${result.retired.map((r) => `  Ignored: ${r.detail} Next: ${r.next}\n`).join("")}${legacyNotice(config)}${identityListText(identity)}`,
       );
       return 0;
     }
@@ -329,6 +376,7 @@ export async function runConfig(
       { fs },
     );
     const setting = settingFor(write.config, entry.key);
+    const where = at(write.config);
     const result = {
       schemaVersion: 1,
       kind: "config-set",
@@ -339,7 +387,7 @@ export async function runConfig(
     await output(
       parsed.json
         ? JSON.stringify(result, null, 2) + "\n"
-        : `${settingText(setting)} — ${write.changed ? `written to ${where.path} (not committed)` : "unchanged"}\n`,
+        : `${settingText(setting)} — ${write.changed ? `written to ${where.path} (not committed)` : "unchanged"}\n${legacyNotice(write.config)}`,
     );
     return 0;
   } catch (caught) {
@@ -361,6 +409,45 @@ export async function runConfig(
     );
     return 1;
   }
+}
+
+/** Which store a result came from; `next` is the conversion command while JSON is in use. */
+const storageJson = (config: LoadedConfig) => ({
+  format: config.format,
+  path: config.path,
+  legacy: config.format === "json",
+  next: config.format === "json" ? CONVERT_COMMAND : null,
+});
+
+const legacyNotice = (config: LoadedConfig): string =>
+  config.format === "json"
+    ? `  Note: ${LEGACY_CONFIG_PATH} is the earlier JSON format; convert it to ${TOML_CONFIG_PATH} with: ${CONVERT_COMMAND}\n`
+    : "";
+
+const convertSummary: Record<string, string> = {
+  "nothing-to-convert": `No ${LEGACY_CONFIG_PATH} or ${TOML_CONFIG_PATH}: nothing to convert; no file was created.`,
+  "already-toml": `Already converted: settings are in ${TOML_CONFIG_PATH}; nothing was changed.`,
+  converted: `Converted ${LEGACY_CONFIG_PATH} to ${TOML_CONFIG_PATH}, verified every setting, and removed ${LEGACY_CONFIG_PATH}.`,
+  "removed-json": `Kept ${TOML_CONFIG_PATH} and removed ${LEGACY_CONFIG_PATH}.`,
+  "replaced-toml": `Replaced ${TOML_CONFIG_PATH} with the settings from ${LEGACY_CONFIG_PATH}, verified them, and removed ${LEGACY_CONFIG_PATH}.`,
+};
+
+function convertText(result: {
+  repository: string;
+  status: string;
+  wroteToml: boolean;
+  removedJson: boolean;
+  droppedRetired: readonly string[];
+  settings: readonly EffectiveSetting[];
+}): string {
+  const lines = [
+    `${result.repository}: ${convertSummary[result.status]}`,
+    ...result.settings.map((s) => `  ${settingText(s)}`),
+    ...result.droppedRetired.map((key) => `  Dropped retired key ${key} (ignored since #153).`),
+  ];
+  if (result.wroteToml || result.removedJson)
+    lines.push(`Not committed: review and commit the change with Git.`);
+  return `${lines.join("\n")}\n`;
 }
 
 const flags = (parsed: { repo?: string }, entry: string): string =>

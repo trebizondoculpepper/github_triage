@@ -39,6 +39,9 @@ import {
 import {
   CONFIG_PATH,
   ConfigError,
+  convertConfig,
+  LEGACY_CONFIG_PATH,
+  TOML_CONFIG_PATH,
   githubRepositories,
   loadConfig,
   nodeFileSystem,
@@ -4851,7 +4854,8 @@ describe("repository configuration service (#116, doc/design/repository-configur
       await updateConfig(local, new Map([["complexity.enabled", false]]));
       const config = await loadConfig(directory);
       expect(settingFor(config, "complexity.enabled").source).toBe("explicit");
-      expect(await readdir(join(directory, ".github"))).toEqual(["triage.json"]);
+      // A repository with no settings file starts on the TOML store (#160).
+      expect(await readdir(join(directory, ".github"))).toEqual(["triage.toml"]);
       await expect(nodeFileSystem.readText(join(directory, "missing"))).resolves.toBeNull();
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -4974,6 +4978,473 @@ describe("bundled complexity guidance (#118)", () => {
       main(["estimate", "12", "--size", "huge", "--rationale", "x"], async () => {}, offline),
     ).rejects.toThrow("--size must be one of");
     await expect(main(["estimate"], async () => {}, offline)).rejects.toThrow("Usage:");
+  });
+});
+
+describe("shared repository settings in TOML (#160, doc/design/configuration-formats.md)", () => {
+  const root = "/repo";
+  const tomlPath = join(root, TOML_CONFIG_PATH);
+  const jsonPath = join(root, LEGACY_CONFIG_PATH);
+  const target = { root, repository: "owner/name" };
+  const token = () => "t";
+  const JSON_SETTINGS =
+    '{"schemaVersion":1,"complexity":{"enabled":false,"fieldId":"F_1"},"processGuide":false}';
+  const TOML_SETTINGS =
+    "schemaVersion = 1\nprocessGuide = false\n\n[complexity]\nenabled = false\n";
+
+  /** In-memory filesystem with hooks for concurrent edits and failures. */
+  function memoryFs(initial: Record<string, string> = {}) {
+    const files = new Map<string, string>(Object.entries(initial));
+    const hooks: {
+      beforeRename?: () => void;
+      afterRename?: () => void;
+      failRemove?: string;
+      afterRead?: (file: string) => void;
+    } = {};
+    const fs: ConfigFileSystem = {
+      readText: async (file) => {
+        const text = files.get(file) ?? null;
+        hooks.afterRead?.(file);
+        return text;
+      },
+      writeText: async (file, text) => {
+        if (files.has(file)) throw Object.assign(new Error("EEXIST"), { code: "EEXIST" });
+        files.set(file, text);
+        // A concurrent edit lands between the temporary write and the final checks.
+        if (file.endsWith(".tmp")) hooks.beforeRename?.();
+      },
+      rename: async (from, to) => {
+        files.set(to, files.get(from)!);
+        files.delete(from);
+        hooks.afterRename?.();
+      },
+      remove: async (file) => {
+        if (file === hooks.failRemove)
+          throw Object.assign(new Error("EACCES"), { code: "EACCES", path: file });
+        files.delete(file);
+      },
+      makeDirectory: async () => undefined,
+    };
+    return { fs, files, hooks };
+  }
+
+  it("creates TOML for a new repository, with typed values and a header", async () => {
+    const memory = memoryFs();
+    await updateConfig(target, new Map([["processGuide", false]]), { fs: memory.fs, token });
+    const text = memory.files.get(tomlPath)!;
+    expect(text.startsWith("# Shared github-triage repository settings")).toBe(true);
+    expect(text).toContain("schemaVersion = 1\nprocessGuide = false\n");
+    expect([...memory.files.keys()]).toEqual([tomlPath]);
+    const config = await loadConfig(root, memory.fs);
+    expect(config).toMatchObject({ format: "toml", path: TOML_CONFIG_PATH, storedVersion: 1 });
+    expect(settingFor(config, "processGuide")).toMatchObject({ value: false, source: "explicit" });
+    expect(settingFor(config, "complexity.enabled").source).toBe("default");
+  });
+
+  it("keeps reading and setting an unconverted JSON file in place, never converting", async () => {
+    const memory = memoryFs({ [jsonPath]: '{"schemaVersion":1,"processGuide":false}' });
+    const config = await loadConfig(root, memory.fs);
+    expect(config).toMatchObject({ format: "json", path: LEGACY_CONFIG_PATH });
+    await updateConfig(target, new Map([["complexity.enabled", false]]), {
+      fs: memory.fs,
+      token,
+    });
+    expect([...memory.files.keys()]).toEqual([jsonPath]);
+    expect(JSON.parse(memory.files.get(jsonPath)!)).toEqual({
+      schemaVersion: 1,
+      complexity: { enabled: false },
+      processGuide: false,
+    });
+  });
+
+  it("refuses both files when they agree, pointing at convert, and never writes", async () => {
+    const memory = memoryFs({
+      [jsonPath]: '{"schemaVersion":1,"processGuide":false,"complexity":{"enabled":false}}',
+      [tomlPath]: TOML_SETTINGS,
+    });
+    const before = new Map(memory.files);
+    const error = await loadConfig(root, memory.fs).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "duplicate-config" });
+    expect((error as ConfigError).message).toContain("same settings");
+    expect((error as ConfigError).recovery).toContain("\ngithub-triage config convert");
+    await expect(
+      updateConfig(target, new Map([["processGuide", true]]), { fs: memory.fs, token }),
+    ).rejects.toMatchObject({ code: "duplicate-config" });
+    expect(memory.files).toEqual(before);
+  });
+
+  it("refuses disagreeing files without preferring either, naming keys and exact commands", async () => {
+    const memory = memoryFs({
+      [jsonPath]: '{"schemaVersion":1,"processGuide":true}',
+      [tomlPath]: TOML_SETTINGS,
+    });
+    const error = (await loadConfig(root, memory.fs).catch(
+      (caught: unknown) => caught,
+    )) as ConfigError;
+    expect(error.code).toBe("duplicate-config");
+    expect(error.message).toContain("disagree on complexity.enabled, processGuide");
+    expect(error.recovery.split("\n").slice(1)).toEqual([
+      "github-triage config convert --prefer toml",
+      "github-triage config convert --prefer json",
+    ]);
+    expect(error.recovery).not.toContain("#");
+    await expect(convertConfig(target, { fs: memory.fs, token })).rejects.toMatchObject({
+      code: "duplicate-config",
+    });
+    expect(memory.files.get(jsonPath)).toBe('{"schemaVersion":1,"processGuide":true}');
+  });
+
+  it("converts JSON to verified TOML, removes the JSON and drops the retired fieldId", async () => {
+    const memory = memoryFs({ [jsonPath]: JSON_SETTINGS });
+    const result = await convertConfig(target, { fs: memory.fs, token });
+    expect(result).toMatchObject({
+      status: "converted",
+      wroteToml: true,
+      removedJson: true,
+      droppedRetired: ["complexity.fieldId"],
+    });
+    expect([...memory.files.keys()]).toEqual([tomlPath]);
+    const text = memory.files.get(tomlPath)!;
+    expect(text).not.toContain("fieldId");
+    const config = await loadConfig(root, memory.fs);
+    expect(config.format).toBe("toml");
+    expect(Object.fromEntries(config.explicit)).toEqual({
+      "complexity.enabled": false,
+      processGuide: false,
+    });
+    // Converting again is a no-op.
+    expect(await convertConfig(target, { fs: memory.fs, token })).toMatchObject({
+      status: "already-toml",
+      wroteToml: false,
+      removedJson: false,
+    });
+  });
+
+  it("creates nothing when there is nothing to convert", async () => {
+    const memory = memoryFs();
+    expect(await convertConfig(target, { fs: memory.fs, token })).toMatchObject({
+      status: "nothing-to-convert",
+    });
+    expect(memory.files.size).toBe(0);
+  });
+
+  it.each([
+    ["malformed", "{not json"],
+    ["unsupported-version", '{"schemaVersion":99}'],
+    ["incompatible", '{"schemaVersion":1,"unknown":true}'],
+  ])("refuses to convert %s JSON and changes nothing", async (code, raw) => {
+    const memory = memoryFs({ [jsonPath]: raw });
+    await expect(convertConfig(target, { fs: memory.fs, token })).rejects.toMatchObject({ code });
+    expect([...memory.files]).toEqual([[jsonPath, raw]]);
+  });
+
+  it("refuses a conversion when the JSON changes before the TOML is placed", async () => {
+    const memory = memoryFs({ [jsonPath]: JSON_SETTINGS });
+    memory.hooks.beforeRename = () =>
+      memory.files.set(jsonPath, '{"schemaVersion":1,"processGuide":true}');
+    await expect(convertConfig(target, { fs: memory.fs, token })).rejects.toMatchObject({
+      code: "conflict",
+    });
+    expect([...memory.files.keys()]).toEqual([jsonPath]);
+  });
+
+  it("keeps the JSON when it changes after the TOML is written, reporting partial conversion", async () => {
+    const memory = memoryFs({ [jsonPath]: JSON_SETTINGS });
+    memory.hooks.afterRename = () =>
+      memory.files.set(jsonPath, '{"schemaVersion":1,"processGuide":true}');
+    const error = (await convertConfig(target, { fs: memory.fs, token }).catch(
+      (caught: unknown) => caught,
+    )) as ConfigError;
+    expect(error.code).toBe("partial-conversion");
+    expect(error.recovery).toContain("github-triage config convert --prefer json");
+    expect(memory.files.get(jsonPath)).toBe('{"schemaVersion":1,"processGuide":true}');
+    expect(memory.files.has(tomlPath)).toBe(true);
+  });
+
+  it("reports a JSON file it could not remove, and a rerun finishes the conversion", async () => {
+    const memory = memoryFs({ [jsonPath]: JSON_SETTINGS });
+    memory.hooks.failRemove = jsonPath;
+    const error = (await convertConfig(target, { fs: memory.fs, token }).catch(
+      (caught: unknown) => caught,
+    )) as ConfigError;
+    expect(error.code).toBe("partial-conversion");
+    expect(error.message).toContain("verified settings");
+    expect(error.recovery.split("\n").at(-1)).toBe("github-triage config convert");
+    expect(memory.files.get(jsonPath)).toBe(JSON_SETTINGS);
+    memory.hooks.failRemove = undefined;
+    // The retired key is ignored when comparing, so the stores agree and the JSON is removed.
+    expect(await convertConfig(target, { fs: memory.fs, token })).toMatchObject({
+      status: "removed-json",
+      wroteToml: false,
+    });
+    expect([...memory.files.keys()]).toEqual([tomlPath]);
+  });
+
+  it("keeps the JSON when the written TOML does not verify", async () => {
+    const memory = memoryFs({ [jsonPath]: JSON_SETTINGS });
+    memory.hooks.afterRename = () => memory.files.set(tomlPath, "schemaVersion = 1\n");
+    const error = (await convertConfig(target, { fs: memory.fs, token }).catch(
+      (caught: unknown) => caught,
+    )) as ConfigError;
+    expect(error.code).toBe("partial-conversion");
+    expect(error.message).toContain("could not be verified");
+    expect(memory.files.get(jsonPath)).toBe(JSON_SETTINGS);
+  });
+
+  it.each([
+    ["removed", (files: Map<string, string>) => files.delete(tomlPath)],
+    [
+      "changed",
+      (files: Map<string, string>) =>
+        files.set(tomlPath, "schemaVersion = 1\nprocessGuide = true\n"),
+    ],
+    ["made unparsable", (files: Map<string, string>) => files.set(tomlPath, "schemaVersion = \n")],
+  ])(
+    "keeps the JSON when the retained TOML is %s after it was read (--prefer toml)",
+    async (_label, mutate) => {
+      const json = '{"schemaVersion":1,"processGuide":true}';
+      const memory = memoryFs({ [jsonPath]: json, [tomlPath]: TOML_SETTINGS });
+      let tomlReads = 0;
+      memory.hooks.afterRead = (file) => {
+        if (file === tomlPath && ++tomlReads === 1) mutate(memory.files);
+      };
+      const error = (await convertConfig(target, { fs: memory.fs, token, prefer: "toml" }).catch(
+        (caught: unknown) => caught,
+      )) as ConfigError;
+      expect(error.code).toBe("partial-conversion");
+      expect(error.recovery).toContain("github-triage config convert --prefer");
+      expect(memory.files.get(jsonPath)).toBe(json);
+    },
+  );
+
+  it("keeps the JSON when the written TOML disappears after verification", async () => {
+    const memory = memoryFs({ [jsonPath]: JSON_SETTINGS });
+    let tomlReads = 0;
+    memory.hooks.afterRead = (file) => {
+      // Reads: snapshot, pre-rename check, verification; then delete before the final recheck.
+      if (file === tomlPath && ++tomlReads === 3) memory.files.delete(tomlPath);
+    };
+    const error = (await convertConfig(target, { fs: memory.fs, token }).catch(
+      (caught: unknown) => caught,
+    )) as ConfigError;
+    expect(error.code).toBe("partial-conversion");
+    expect(memory.files.get(jsonPath)).toBe(JSON_SETTINGS);
+  });
+
+  it("follows the suggested --prefer json recovery after a written TOML fails to parse", async () => {
+    const memory = memoryFs({ [jsonPath]: JSON_SETTINGS });
+    memory.hooks.afterRename = () => memory.files.set(tomlPath, "schemaVersion = \n");
+    const error = (await convertConfig(target, { fs: memory.fs, token }).catch(
+      (caught: unknown) => caught,
+    )) as ConfigError;
+    expect(error.code).toBe("partial-conversion");
+    const command = error.recovery.split("\n").at(-1)!;
+    expect(command).toBe("github-triage config convert --prefer json");
+    memory.hooks.afterRename = undefined;
+    expect(await convertConfig(target, { fs: memory.fs, token, prefer: "json" })).toMatchObject({
+      status: "replaced-toml",
+      removedJson: true,
+    });
+    expect([...memory.files.keys()]).toEqual([tomlPath]);
+    expect(Object.fromEntries((await loadConfig(root, memory.fs)).explicit)).toEqual({
+      "complexity.enabled": false,
+      processGuide: false,
+    });
+  });
+
+  it("keeps a valid TOML with --prefer toml when the JSON is malformed", async () => {
+    const memory = memoryFs({ [jsonPath]: "{not json", [tomlPath]: TOML_SETTINGS });
+    const error = (await convertConfig(target, { fs: memory.fs, token }).catch(
+      (caught: unknown) => caught,
+    )) as ConfigError;
+    expect(error.code).toBe("duplicate-config");
+    expect(error.recovery).toContain("github-triage config convert --prefer toml");
+    expect(await convertConfig(target, { fs: memory.fs, token, prefer: "toml" })).toMatchObject({
+      status: "removed-json",
+      wroteToml: false,
+    });
+    expect([...memory.files]).toEqual([[tomlPath, TOML_SETTINGS]]);
+  });
+
+  it("still refuses to discard a preferred-against file that changed since it was read", async () => {
+    const memory = memoryFs({ [jsonPath]: "{not json", [tomlPath]: TOML_SETTINGS });
+    memory.hooks.afterRead = (file) => {
+      if (file === jsonPath && memory.files.get(jsonPath) === "{not json") {
+        memory.files.set(jsonPath, "{still not json");
+      }
+    };
+    await expect(
+      convertConfig(target, { fs: memory.fs, token, prefer: "toml" }),
+    ).rejects.toMatchObject({ code: "partial-conversion" });
+    expect(memory.files.get(jsonPath)).toBe("{still not json");
+    const invalidToml = memoryFs({ [jsonPath]: JSON_SETTINGS, [tomlPath]: "schemaVersion = \n" });
+    invalidToml.hooks.beforeRename = () => invalidToml.files.set(tomlPath, "schemaVersion = 9\n");
+    await expect(
+      convertConfig(target, { fs: invalidToml.fs, token, prefer: "json" }),
+    ).rejects.toMatchObject({ code: "conflict" });
+    expect(invalidToml.files.get(jsonPath)).toBe(JSON_SETTINGS);
+    expect(invalidToml.files.get(tomlPath)).toBe("schemaVersion = 9\n");
+  });
+
+  it("resolves disagreeing files only with an explicit --prefer", async () => {
+    const keepJson = memoryFs({
+      [jsonPath]: '{"schemaVersion":1,"processGuide":true}',
+      [tomlPath]: TOML_SETTINGS,
+    });
+    expect(await convertConfig(target, { fs: keepJson.fs, token, prefer: "json" })).toMatchObject({
+      status: "replaced-toml",
+      wroteToml: true,
+      removedJson: true,
+    });
+    expect(Object.fromEntries((await loadConfig(root, keepJson.fs)).explicit)).toEqual({
+      processGuide: true,
+    });
+    const keepToml = memoryFs({
+      [jsonPath]: '{"schemaVersion":1,"processGuide":true}',
+      [tomlPath]: TOML_SETTINGS,
+    });
+    expect(await convertConfig(target, { fs: keepToml.fs, token, prefer: "toml" })).toMatchObject({
+      status: "removed-json",
+      wroteToml: false,
+    });
+    expect(keepToml.files.get(tomlPath)).toBe(TOML_SETTINGS);
+    expect(keepToml.files.has(jsonPath)).toBe(false);
+  });
+
+  it.each([
+    ["malformed", "schemaVersion = \n"],
+    ["malformed", "schemaVersion = 1.0\n"],
+    ["unsupported-version", "schemaVersion = 2\n"],
+    ["incompatible", 'schemaVersion = 1\nsecret = "x"\n'],
+    ["incompatible", "schemaVersion = 1\nprocessGuide = 1\n"],
+    ["incompatible", "schemaVersion = 1\nprocessGuide = 1979-05-27T07:32:00Z\n"],
+    ["incompatible", 'schemaVersion = 1\n[complexity]\nenabled = "yes"\n'],
+  ])("refuses %s TOML without rewriting it", async (code, raw) => {
+    const memory = memoryFs({ [tomlPath]: raw });
+    await expect(loadConfig(root, memory.fs)).rejects.toMatchObject({ code });
+    await expect(
+      updateConfig(target, new Map([["processGuide", true]]), { fs: memory.fs, token }),
+    ).rejects.toMatchObject({ code });
+    expect([...memory.files]).toEqual([[tomlPath, raw]]);
+  });
+
+  it("reports TOML syntax errors by position without echoing contents", async () => {
+    const memory = memoryFs({ [tomlPath]: 'schemaVersion = 1\ntoken = "ghp_secret' });
+    const error = (await loadConfig(root, memory.fs).catch((caught: unknown) => caught)) as Error;
+    expect(error.message).toMatch(/line \d+, column \d+/);
+    expect(error.message).not.toContain("ghp_secret");
+  });
+
+  it("refuses a concurrent TOML edit, and a JSON file appearing mid-write", async () => {
+    const edited = memoryFs({ [tomlPath]: TOML_SETTINGS });
+    edited.hooks.beforeRename = () => edited.files.set(tomlPath, "schemaVersion = 1\n");
+    await expect(
+      updateConfig(target, new Map([["processGuide", true]]), { fs: edited.fs, token }),
+    ).rejects.toMatchObject({ code: "conflict" });
+    expect(edited.files.get(tomlPath)).toBe("schemaVersion = 1\n");
+    expect([...edited.files.keys()]).toEqual([tomlPath]);
+    const appeared = memoryFs({ [tomlPath]: TOML_SETTINGS });
+    appeared.hooks.beforeRename = () => appeared.files.set(jsonPath, '{"schemaVersion":1}');
+    await expect(
+      updateConfig(target, new Map([["processGuide", true]]), { fs: appeared.fs, token }),
+    ).rejects.toMatchObject({ code: "conflict" });
+    expect(appeared.files.get(tomlPath)).toBe(TOML_SETTINGS);
+  });
+
+  it("converts through the real filesystem in a temporary checkout", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "triage-convert-"));
+    try {
+      const local = { root: directory, repository: "owner/name" };
+      await nodeFileSystem.makeDirectory(join(directory, ".github"));
+      await nodeFileSystem.writeText(join(directory, LEGACY_CONFIG_PATH), JSON_SETTINGS);
+      expect((await convertConfig(local)).status).toBe("converted");
+      expect(await readdir(join(directory, ".github"))).toEqual(["triage.toml"]);
+      expect(settingFor(await loadConfig(directory), "processGuide").value).toBe(false);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  describe("config convert and storage reporting commands", () => {
+    function setup(initial: Record<string, string> = {}) {
+      const memory = memoryFs(initial);
+      const git: GitRunner = async (args) =>
+        args[0] === "rev-parse"
+          ? `${root}\n`
+          : args[0] === "remote"
+            ? "origin\thttps://github.com/owner/name.git (fetch)\n"
+            : "";
+      const out: string[] = [];
+      const call = (...args: string[]) =>
+        main(["config", ...args, "--no-update-check"], async (t) => void out.push(t), {
+          collect: async () => {
+            throw new Error("no GitHub");
+          },
+          currentRepository: async () => {
+            throw new Error("no GitHub");
+          },
+          config: { fs: memory.fs, git, cwd: root, env: {} },
+        });
+      return { ...memory, out, call, json: () => JSON.parse(out.at(-1)!) };
+    }
+
+    it("lists an unconverted JSON store with the convert command and never converts", async () => {
+      const t = setup({ [jsonPath]: JSON_SETTINGS });
+      expect(await t.call("list", "--json")).toBe(0);
+      expect(t.json()).toMatchObject({
+        path: jsonPath,
+        storage: {
+          format: "json",
+          path: LEGACY_CONFIG_PATH,
+          legacy: true,
+          next: "github-triage config convert",
+        },
+      });
+      expect(await t.call("get", "processGuide")).toBe(0);
+      expect(t.out.at(-1)).toContain("Note: .github/triage.json is the earlier JSON format");
+      expect([...t.files]).toEqual([[jsonPath, JSON_SETTINGS]]);
+    });
+
+    it("converts with text and JSON output", async () => {
+      const t = setup({ [jsonPath]: JSON_SETTINGS });
+      expect(await t.call("convert", "--json")).toBe(0);
+      expect(t.json()).toMatchObject({
+        schemaVersion: 1,
+        kind: "config-convert",
+        status: "converted",
+        path: tomlPath,
+        storage: { format: "toml", legacy: false, next: null },
+        droppedRetired: ["complexity.fieldId"],
+      });
+      expect(await t.call("convert")).toBe(0);
+      expect(t.out.at(-1)).toContain("Already converted");
+      expect(await t.call("get", "processGuide", "--json")).toBe(0);
+      expect(t.json()).toMatchObject({ value: false, source: "explicit", path: tomlPath });
+    });
+
+    it("reports both files as a JSON error with exact commands, exit 1", async () => {
+      const t = setup({ [jsonPath]: '{"schemaVersion":1}', [tomlPath]: TOML_SETTINGS });
+      expect(await t.call("list", "--json")).toBe(1);
+      expect(t.json()).toMatchObject({ kind: "config-error", code: "duplicate-config" });
+      expect(await t.call("convert", "--prefer", "toml", "--json")).toBe(0);
+      expect(t.json()).toMatchObject({ status: "removed-json" });
+    });
+
+    it("validates convert arguments and documents convert in help", async () => {
+      const t = setup();
+      expect(await t.call("get", "processGuide", "--prefer", "toml", "--json")).toBe(1);
+      expect(t.json()).toMatchObject({ code: "usage" });
+      expect(await t.call("convert", "--prefer", "yaml", "--json")).toBe(1);
+      expect(t.json()).toMatchObject({ code: "usage" });
+      expect(await t.call("help", "--json")).toBe(0);
+      expect(t.json()).toMatchObject({
+        path: TOML_CONFIG_PATH,
+        legacyPath: LEGACY_CONFIG_PATH,
+        convert: "github-triage config convert",
+      });
+      expect(await t.call("help")).toBe(0);
+      expect(t.out.at(-1)).toContain("config convert [--prefer toml|json]");
+    });
   });
 });
 
@@ -5141,7 +5612,7 @@ describe("config get/set/list/help commands (#117)", () => {
     expect(await t.call("--help")).toBe(0);
     const top: string[] = [];
     await main(["--help", "--no-update-check"], async (x) => void top.push(x));
-    expect(top.join("")).toContain("config get KEY | set KEY VALUE | list | help [KEY]");
+    expect(top.join("")).toContain("config get KEY | set KEY VALUE | list | convert | help [KEY]");
   });
 });
 

@@ -7,7 +7,7 @@
  * it never grants authority, claims, releases or executes anything.
  *
  * The recurring briefing guide is on by default. Precedence: `--guide`/`--no-guide`, then the
- * registered `processGuide` repository setting (.github/triage.json), then the default. An
+ * registered `processGuide` repository setting (.github/triage.toml, or the earlier .github/triage.json), then the default. An
  * unreadable or mismatched configuration never breaks a briefing: it falls back to the default
  * and reports a diagnostic. `--help` and `github-triage process` are always available, local
  * and credential-free.
@@ -74,7 +74,7 @@ export const commandRegistry: readonly CommandSpec[] = [
   },
   { name: "who", template: "github-triage who N", mutatesGitHub: false },
   { name: "process", template: PROCESS_COMMAND, mutatesGitHub: false },
-  // Changes only the local .github/triage.json, never GitHub.
+  // Changes only the local repository settings file, never GitHub.
   { name: "config set", template: "github-triage config set KEY VALUE", mutatesGitHub: false },
 ];
 const command = (name: string): CommandSpec => {
