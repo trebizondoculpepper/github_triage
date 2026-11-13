@@ -132,9 +132,10 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   ticket-doctor [--stale-hours N] [--limit N]  Read-only consistency scan of all open tickets
                         and repository complexity configuration, with suggested correction
                         commands per finding (never run; claim commands only for the claimant)
-  doctor [--agent NAME] [--role NAME]  Read-only local configuration checks: Node, gh
-                        install/auth, checkout, agent-inbox.toml presence, Git ignore vs
-                        tracked, identity and triage role; exact next commands per check
+  doctor [--agent NAME] [--role NAME] [--entry KEY | --harness NAME]  Read-only local
+                        configuration checks: Node, gh install/auth, checkout, agent-inbox.toml
+                        presence, parse, Git ignore vs tracked, selected entry, persisted name
+                        and triage_role; exact next commands per check, nothing repaired
   config get KEY | set KEY VALUE | list | help [KEY]  Repository settings in
                         .github/triage.json of this checkout; identity.name and
                         identity.triage_role in local agent-inbox.toml, entry chosen by
@@ -577,12 +578,22 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
         json: { type: "boolean" },
         agent: { type: "string" },
         role: { type: "string" },
+        entry: { type: "string" },
+        harness: { type: "string" },
       },
     });
     if (values.repo && !/^[\w.-]+\/[\w.-]+$/.test(values.repo))
       throw new Error("--repo must be owner/name.");
+    if (values.entry !== undefined && values.harness !== undefined)
+      throw new Error("Pass either --entry or --harness, not both.");
     const report = await localDoctor(
-      { repo: values.repo, agent: values.agent, role: values.role },
+      {
+        repo: values.repo,
+        agent: values.agent,
+        role: values.role,
+        entry: values.entry,
+        harness: values.harness,
+      },
       runtime.localDoctor,
     );
     await output(values.json ? JSON.stringify(report, null, 2) + "\n" : localDoctorText(report));
