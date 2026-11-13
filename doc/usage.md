@@ -15,9 +15,29 @@ github-triage --repo owner/repository --issue 42
 github-triage deps 42 --repo owner/repository --tree
 ```
 
-Without --repo, GitHub CLI resolves the current working directory’s repository. --agent currently focuses explicit ownership; automatic identity and attention/role behavior are proposed in the design handoff. Use --help and deps --help for the installed version’s actual surface. Suggestions are not permission or claims. Source-linked comments and design files need agent judgment.
+Without --repo, GitHub CLI resolves the current working directory’s repository. --agent NAME is your explicit identity: tickets and PRs labelled `attention:NAME` come first (an ADDRESSED section; non-exclusive, never a claim, shown even when parked or owned by someone else, with any `origin:` provenance), then work you own via `agent:NAME`, then general pickup. Respond on the ticket before removing your own attention label. Without --agent the briefing says addressed filtering is unavailable; identity is never inferred from the GitHub login. Automatic identity and role-shaped views are still to come. Use --help and deps --help for the installed version’s actual surface. Suggestions are not permission or claims. Source-linked comments and design files need agent judgment.
 
-Collection uses GitHub queries through gh, registered workflow rules and compact text or versioned JSON. Native blocked-by relationships determine dependency evidence; body text can indicate drift. Full ticket intake preserves body/comments, including closed issues. Missing evidence never means clean or approved. Current commands include dependency add/remove mutations and a read-only migration plan; automatic migration apply is deferred. Planned claim/handoff/doctor/MCP operations are not documented as runnable here.
+Collection uses GitHub queries through gh, registered workflow rules and compact text or versioned JSON. Native blocked-by relationships determine dependency evidence; body text can indicate drift. Full ticket intake preserves body/comments, including closed issues. Missing evidence never means clean or approved. Current commands include dependency add/remove mutations and a read-only migration plan; automatic migration apply is deferred. Claim and question-routing commands are available on main as shown below. Handoff/release, local configuration doctor, MCP and dedicated role views remain planned; do not infer they are available from their design contracts.
+
+## Claim work or record a human question
+
+Inspect the ticket and its native blockers first. Preview a mutation before applying it when you need to inspect the intended updates:
+
+```sh
+github-triage claim 42 --repo owner/repository --agent your-agent-name --dry-run
+github-triage claim 42 --repo owner/repository --agent your-agent-name --branch feature/topic
+github-triage needs-human 42 --repo owner/repository --agent your-agent-name --designer designer-name --why "A design decision blocks progress" --question "Which behavior should this case use?" --dry-run
+```
+
+Omit `--dry-run` on the final command to record that question and route it to the named designer. Use your actual persistent name and a specific question; do not copy sample identities or invented reasoning. Claims mean current work and allow one active claim per agent. Failed prerequisites return stable error IDs and supported recovery guidance. `needs-human` is question routing, not permission to implement an unresolved design. Handoff/release remains #62; do not assume a proposed release command is installed.
+
+## Check team activity
+
+```sh
+github-triage team --repo owner/repository --json
+```
+
+This read-only view combines recorded claims, explicitly linked PRs, activity and warnings. It does not prove an agent is online, and stale activity does not authorize a takeover. Distinct unresolved/unknown evidence stays visible.
 
 ## Catch up after time away
 
@@ -40,6 +60,10 @@ Wrong repository: pass --repo. Missing auth: inspect gh auth status. Incomplete 
 ## Version check
 
 When the CLI runs from an npm installation, each invocation (except `--help`) asks npm once for the latest version on its channel (stable installs compare with `latest`, prerelease installs with `next`). The lookup uses a 1.5 s timeout and runs alongside the command, so it does not block triage; if npm has a newer version, one line on stderr names it and the `npm install -g` command (stdout, including `--json`, is unchanged). Downgrades are never suggested. A registry failure is reported as unknown on explicit inspection, never as up to date. Source checkouts, `--offline`, `--no-update-check` and `GITHUB_TRIAGE_NO_UPDATE_CHECK=1` make no network request. `github-triage version` (or `version --json`) shows the installed version and the check's result or the reason it was skipped. Only this package's name is sent to npm. This basic slice checks once per invocation; a daily cache and quieter repeat notices are #65.
+
+## Transferred, missing and forbidden issues
+
+`--issue N` for an issue that this repository cannot return explains why instead of failing generically, and exits 2. A transfer is reported only when GitHub itself resolves the number to another repository (`state: moved`, with the original and destination URLs). Missing (404), forbidden (403/401), a pull request number, and no authoritative answer (`unknown`) are separate states, and none of them is treated as a transfer. Transferred-out work is not this project's work and is excluded by default; `--include-transferred` follows the transfer to the destination's full intake, and the output records `transferredFrom`. Ownership at the destination is never assumed.
 
 ## Ticket Doctor: check ticket consistency
 

@@ -14,15 +14,46 @@ export const packageName = "@trebizondoculpepper/github-triage";
 export const defaultTimeoutMs = 1500;
 export const optOutEnv = "GITHUB_TRIAGE_NO_UPDATE_CHECK";
 
-/** @param {string} v */
-export function parseVersion(v) {
+export interface ParsedVersion {
+  major: number;
+  minor: number;
+  patch: number;
+  next: number | null;
+}
+
+export interface InstalledInfo {
+  version: string | null;
+  installed: boolean;
+  reason?: string;
+}
+
+export type UpdateCheckResult =
+  | { status: "skipped"; reason: string }
+  | { status: "unknown"; reason: string; installed: string | null; channel: string }
+  | {
+      status: "newer" | "current";
+      installed: string | null;
+      available: string;
+      channel: string;
+      command: string;
+    };
+
+export interface CheckOptions {
+  installed?: InstalledInfo;
+  offline?: boolean;
+  optOut?: boolean;
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+}
+
+export function parseVersion(v: string | null | undefined): ParsedVersion | null {
   const m = /^(\d+)\.(\d+)\.(\d+)(?:-next\.(\d+))?$/.exec(v ?? "");
   return m
     ? { major: +m[1], minor: +m[2], patch: +m[3], next: m[4] === undefined ? null : +m[4] }
     : null;
 }
 /** Positive when a is newer than b. A prerelease sorts before its own release. */
-export function compareVersions(a, b) {
+export function compareVersions(a: ParsedVersion, b: ParsedVersion): number {
   return (
     a.major - b.major ||
     a.minor - b.minor ||
@@ -35,17 +66,20 @@ export function compareVersions(a, b) {
 /**
  * Where this CLI runs from. Only an npm installation (a path inside node_modules) is eligible;
  * a source or development checkout is skipped.
- * @returns {Promise<{ version: string | null, installed: boolean, reason?: string }>}
  */
-export async function installedVersion(moduleUrl = import.meta.url) {
+export async function installedVersion(
+  moduleUrl: string = import.meta.url,
+): Promise<InstalledInfo> {
   const here = dirname(fileURLToPath(moduleUrl));
   const installed = here.split(sep).includes("node_modules");
   try {
     // dist/cli.mjs and src/*.js both sit one level below the package root.
-    const manifest = JSON.parse(await readFile(join(here, "..", "package.json"), "utf8"));
-    if (manifest.name !== packageName)
+    const manifest: unknown = JSON.parse(await readFile(join(here, "..", "package.json"), "utf8"));
+    if (!isRecord(manifest) || manifest.name !== packageName)
       return { version: null, installed, reason: "package manifest not found" };
-    return { version: manifest.version ?? null, installed };
+    const version = manifest.version ?? null;
+    // The original JavaScript passed any manifest version through; keep that but require a string.
+    return { version: typeof version === "string" ? version : null, installed };
   } catch {
     return { version: null, installed, reason: "package manifest not readable" };
   }
@@ -54,8 +88,6 @@ export async function installedVersion(moduleUrl = import.meta.url) {
 /**
  * Decide and perform the check. Every outcome is returned for explicit inspection; only
  * `status: "newer"` produces routine output.
- * @param {{ installed?: { version: string | null, installed: boolean, reason?: string },
- *   offline?: boolean, optOut?: boolean, fetchImpl?: typeof fetch, timeoutMs?: number }} [options]
  */
 export async function checkForUpdate({
   installed,
@@ -63,7 +95,7 @@ export async function checkForUpdate({
   optOut = false,
   fetchImpl = fetch,
   timeoutMs = defaultTimeoutMs,
-} = {}) {
+}: CheckOptions = {}): Promise<UpdateCheckResult> {
   const info = installed ?? (await installedVersion());
   if (optOut) return { status: "skipped", reason: `disabled (${optOutEnv} or --no-update-check)` };
   if (offline) return { status: "skipped", reason: "offline: no network lookup" };
@@ -79,7 +111,7 @@ export async function checkForUpdate({
       reason: `installed version unknown (${info.reason ?? info.version ?? "none"})`,
     };
   const channel = current.next === null ? "latest" : "next";
-  let tags;
+  let tags: unknown;
   try {
     const response = await fetchImpl(
       `https://registry.npmjs.org/-/package/${packageName.replace("/", "%2f")}/dist-tags`,
@@ -97,15 +129,16 @@ export async function checkForUpdate({
     return {
       status: "unknown",
       reason:
-        error?.name === "TimeoutError"
+        isRecord(error) && error.name === "TimeoutError"
           ? `npm registry did not answer within ${timeoutMs} ms`
           : "npm registry unreachable",
       installed: info.version,
       channel,
     };
   }
-  const available = parseVersion(tags?.[channel] ?? "");
-  if (!available)
+  const tag = isRecord(tags) ? tags[channel] : undefined;
+  const available = typeof tag === "string" ? parseVersion(tag) : null;
+  if (typeof tag !== "string" || !available)
     return {
       status: "unknown",
       reason: `no usable ${channel} version on npm`,
@@ -116,15 +149,19 @@ export async function checkForUpdate({
   return {
     status: newer ? "newer" : "current",
     installed: info.version,
-    available: tags[channel],
+    available: tag,
     channel,
     command: `npm install -g ${packageName}${channel === "next" ? "@next" : ""}`,
   };
 }
 
 /** The one-line advisory, or null when nothing should be said routinely. */
-export function updateAdvisory(result) {
+export function updateAdvisory(result: UpdateCheckResult): string | null {
   return result.status === "newer"
     ? `github-triage ${result.available} is available (installed ${result.installed}). Update with: ${result.command}`
     : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

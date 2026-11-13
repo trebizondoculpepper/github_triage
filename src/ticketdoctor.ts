@@ -8,6 +8,7 @@
 import { owners, workflow } from "./briefing.js";
 import { dependencyDrift, nativeKnown } from "./dependencies.js";
 import { teamView } from "./team.js";
+import type { Issue, Snapshot } from "./types.js";
 
 /** Ticket Doctor's own staleness default: 24 hours, separate from the briefing's two days. */
 export const doctorStaleHours = 24;
@@ -22,29 +23,52 @@ export const doctorPolicy = {
   urgency: ["urgency:high", "urgency:low"],
 };
 
-/**
- * @typedef {{ kind: string, certainty: "definite" | "candidate" | "unknown", detail: string }} DoctorFinding
- */
+export type Certainty = "definite" | "candidate" | "unknown";
+export interface DoctorFinding {
+  kind: string;
+  certainty: Certainty;
+  detail: string;
+}
+export interface DoctorTicket {
+  number: number;
+  title: string;
+  url: string;
+  findings: DoctorFinding[];
+}
+export interface TicketDoctorOptions {
+  now?: Date;
+  staleHours?: number;
+  limit?: number;
+  offline?: boolean;
+}
+export interface TicketDoctorReport {
+  schemaVersion: 1;
+  kind: "ticket-doctor";
+  repository: string;
+  fetchedAt: string;
+  freshness: ReturnType<typeof teamView>["freshness"];
+  staleHours: number;
+  scanned: number;
+  summary: { tickets: number; definite: number; candidate: number; unknown: number };
+  tickets: DoctorTicket[];
+  omittedTickets: number;
+  completeness: { complete: boolean; warnings: string[] };
+  guidance: string;
+}
 
 /**
  * Tickets on a blocked-by cycle: every member of a strongly connected component with more than
  * one ticket (or a self-loop). Tarjan's algorithm, so overlapping cycles are reported in full.
- * @param {Map<string, string[]>} edges ticket URL → blocker URLs (open tickets only)
- * @returns {string[][]} components, each sorted
+ * `edges` maps ticket URL → blocker URLs (open tickets only); returns components, each sorted.
  */
-export function blockerCycles(edges) {
+export function blockerCycles(edges: Map<string, string[]>): string[][] {
   let index = 0;
-  /** @type {Map<string, number>} */
-  const indices = new Map();
-  /** @type {Map<string, number>} */
-  const low = new Map();
-  /** @type {string[]} */
-  const stack = [];
-  const onStack = new Set();
-  /** @type {string[][]} */
-  const components = [];
-  /** @param {string} v */
-  const connect = (v) => {
+  const indices = new Map<string, number>();
+  const low = new Map<string, number>();
+  const stack: string[] = [];
+  const onStack = new Set<string>();
+  const components: string[][] = [];
+  const connect = (v: string): void => {
     indices.set(v, index);
     low.set(v, index);
     index++;
@@ -58,13 +82,14 @@ export function blockerCycles(edges) {
       } else if (onStack.has(w)) low.set(v, Math.min(low.get(v) ?? 0, indices.get(w) ?? 0));
     }
     if (low.get(v) === indices.get(v)) {
-      /** @type {string[]} */
-      const component = [];
-      let w;
+      const component: string[] = [];
+      let w: string | undefined;
       do {
         w = stack.pop();
-        onStack.delete(w);
-        if (w !== undefined) component.push(w);
+        if (w !== undefined) {
+          onStack.delete(w);
+          component.push(w);
+        }
       } while (w !== v && w !== undefined);
       if (component.length > 1 || (edges.get(v) ?? []).includes(v))
         components.push(component.sort((a, b) => a.localeCompare(b)));
@@ -74,30 +99,33 @@ export function blockerCycles(edges) {
   return components;
 }
 
-/**
- * @param {import("./types.js").Snapshot} snapshot
- * @param {{ now?: Date, staleHours?: number, limit?: number, offline?: boolean }} [options]
- */
 export function ticketDoctor(
-  snapshot,
-  { now = new Date(), staleHours = doctorStaleHours, limit = 30, offline = false } = {},
-) {
+  snapshot: Snapshot,
+  {
+    now = new Date(),
+    staleHours = doctorStaleHours,
+    limit = 30,
+    offline = false,
+  }: TicketDoctorOptions = {},
+): TicketDoctorReport {
   const open = snapshot.issues.filter((i) => i.state === "OPEN");
-  /** @type {Map<number, { number: number, title: string, url: string, findings: DoctorFinding[] }>} */
-  const tickets = new Map();
-  const add = (issue, kind, certainty, detail) => {
-    if (!tickets.has(issue.number))
-      tickets.set(issue.number, {
-        number: issue.number,
-        title: issue.title,
-        url: issue.url,
-        findings: [],
-      });
-    tickets.get(issue.number).findings.push({ kind, certainty, detail });
+  const tickets = new Map<number, DoctorTicket>();
+  const add = (
+    issue: Pick<Issue, "number" | "title" | "url">,
+    kind: string,
+    certainty: Certainty,
+    detail: string,
+  ): void => {
+    let ticket = tickets.get(issue.number);
+    if (!ticket) {
+      ticket = { number: issue.number, title: issue.title, url: issue.url, findings: [] };
+      tickets.set(issue.number, ticket);
+    }
+    ticket.findings.push({ kind, certainty, detail });
   };
   /** Evidence gaps that make the scan itself incomplete, not just one ticket's finding. */
-  const gaps = [];
-  const openPrsFor = new Map();
+  const gaps: string[] = [];
+  const openPrsFor = new Map<string, number[]>();
   for (const pr of snapshot.pullRequests)
     if (pr.state === "OPEN")
       for (const ref of pr.closingIssuesReferences?.nodes ?? [])
@@ -109,7 +137,7 @@ export function ticketDoctor(
     // With labels on an unseen page, "no such label" is not established: absence-based
     // findings become unknown instead of definite.
     const partial = !!issue.labels.pageInfo?.hasNextPage;
-    const absent = (certainty) => (partial ? "unknown" : certainty);
+    const absent = (certainty: Certainty): Certainty => (partial ? "unknown" : certainty);
     if (partial) {
       add(
         issue,
@@ -230,12 +258,18 @@ export function ticketDoctor(
 
   // Native dependency cycles among open tickets (blocked-by direction).
   const byUrl = new Map(open.map((i) => [i.url, i]));
+  // Cycle members and claims are open tickets of this snapshot, so the lookup always succeeds.
+  const openIssue = (url: string): Issue => {
+    const issue = byUrl.get(url);
+    if (!issue) throw new Error(`Open ticket ${url} missing from the snapshot.`);
+    return issue;
+  };
   const edges = new Map(open.map((i) => [i.url, (i.blockedBy?.nodes ?? []).map((b) => b.url)]));
   for (const component of blockerCycles(edges)) {
-    const names = component.map((u) => `#${byUrl.get(u).number}`).join(", ");
+    const names = component.map((u) => `#${openIssue(u).number}`).join(", ");
     for (const u of component)
       add(
-        byUrl.get(u),
+        openIssue(u),
         "dependency-cycle",
         "definite",
         `On a native blocker cycle among ${names}.`,
@@ -248,7 +282,7 @@ export function ticketDoctor(
     if (agent.claims.length > 1)
       for (const claim of agent.claims)
         add(
-          byUrl.get(claim.url),
+          openIssue(claim.url),
           "agent-multiple-claims",
           "definite",
           `${agent.agent} holds ${agent.claims.length} active claims (${agent.claims.map((c) => `#${c.number}`).join(", ")}).`,
@@ -257,14 +291,14 @@ export function ticketDoctor(
       const stale = claim.candidates.find((c) => c.startsWith("stale candidate"));
       if (stale)
         add(
-          byUrl.get(claim.url),
+          openIssue(claim.url),
           "stale-agent-activity",
           "candidate",
           `${agent.agent}: ${stale}. Recorded ownership is not presence; nothing is released.`,
         );
       if (!claim.latestActivity)
         add(
-          byUrl.get(claim.url),
+          openIssue(claim.url),
           "agent-activity-unknown",
           "unknown",
           `${agent.agent}: no evidenced activity.`,
@@ -272,7 +306,7 @@ export function ticketDoctor(
     }
   }
 
-  const order = { definite: 0, candidate: 1, unknown: 2 };
+  const order: Record<Certainty, number> = { definite: 0, candidate: 1, unknown: 2 };
   const all = [...tickets.values()]
     .map((t) => ({
       ...t,
@@ -282,7 +316,7 @@ export function ticketDoctor(
       (a, b) =>
         order[a.findings[0].certainty] - order[b.findings[0].certainty] || a.number - b.number,
     );
-  const count = (k) =>
+  const count = (k: Certainty): number =>
     all.reduce((n, t) => n + t.findings.filter((f) => f.certainty === k).length, 0);
   const warnings = [...snapshot.warnings, ...gaps];
   return {
@@ -309,7 +343,7 @@ export function ticketDoctor(
 }
 
 /** Text rendering. */
-export function ticketDoctorText(r) {
+export function ticketDoctorText(r: TicketDoctorReport): string {
   const age = r.freshness.ageSeconds;
   const lines = [
     r.freshness.offline

@@ -1,0 +1,3 @@
+# Current usage refresh
+
+Documentation task #99, claimed with the triage tool. Moved global installation into the main quick start; documented actual claim/question/team/Ticket Doctor surfaces and their boundaries. Removed stale README claims of automatic main publishing and used the implemented make-prerelease command. Clarified TypeScript migration status and pending versus shipped tools. Release docs now describe the implemented separate per-channel queues rather than the earlier stronger single-queue technical proposal; distinct channel tags/version forms remain isolated. No commands that publish or mutate live configuration were run.

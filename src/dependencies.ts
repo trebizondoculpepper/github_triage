@@ -1,7 +1,9 @@
 /** Native dependency queries and pure facts. Contract: doc/issue-dependencies.md. */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { ghQuery, pages, declaredDependencies } from "./github.js";
+import { ghQuery, pages, declaredDependencies, prop, selected } from "./github.js";
+import type { Query } from "./github.js";
+import type { Issue, NativeNode, Reference } from "./types.js";
 
 const execute = promisify(execFile);
 const pageInfo = "pageInfo { hasNextPage endCursor }";
@@ -10,50 +12,83 @@ export const summaryFields =
 const nodeFields = `number title state stateReason url repository { nameWithOwner } ${summaryFields}`;
 export const nativeFields = `${summaryFields} blockedBy(first:100) { nodes { ${nodeFields} } ${pageInfo} } blocking(first:100) { nodes { ${nodeFields} } ${pageInfo} }`;
 
-export async function completeNative(item, repository, query = ghQuery) {
-  for (const field of ["blockedBy", "blocking"]) {
+/** The native-dependency fields of an issue, as optionally present in collected facts. */
+export type NativeFields = Pick<Issue, "issueDependenciesSummary" | "blockedBy" | "blocking">;
+/** Native-dependency fields whose evidence is present. */
+export type KnownNative = Required<NativeFields>;
+/** The subset of an issue that a dependency read selects. */
+export type DependencyIssue = Pick<
+  Issue,
+  "number" | "title" | "body" | "url" | "state" | "stateReason" | "updatedAt" | "labels"
+> &
+  NativeFields;
+
+export async function completeNative<T extends NativeFields & Pick<Issue, "number" | "url">>(
+  item: T,
+  repository: string,
+  query: Query = ghQuery,
+): Promise<T & KnownNative> {
+  const fields = ["blockedBy", "blocking"] as const;
+  for (const field of fields) {
     const initial = item[field];
     if (!initial || !item.issueDependenciesSummary)
       throw new Error(`Native dependency evidence missing for ${item.url}.`);
-    item[field].nodes = await pages(async (cursor) => {
+    initial.nodes = await pages<NativeNode>(async (cursor) => {
       if (!cursor) return initial;
       const [owner, name] = repository.split("/");
       const data = await query(
         `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){issue(number:$number){${field}(first:100,after:$cursor){nodes{${nodeFields}} ${pageInfo}}}}}`,
         { owner, name, number: item.number, cursor },
       );
-      return data.repository?.issue?.[field];
+      return prop(data, "repository", "issue", field);
     });
-    item[field].pageInfo = { hasNextPage: false, endCursor: null };
+    initial.pageInfo = { hasNextPage: false, endCursor: null };
     const expected =
       item.issueDependenciesSummary[field === "blockedBy" ? "totalBlockedBy" : "totalBlocking"];
-    if (item[field].nodes.length !== expected)
+    if (initial.nodes.length !== expected)
       throw new Error(
         `Native dependency count changed or is incomplete for ${item.url}; refresh live.`,
       );
   }
-  return item;
+  const { issueDependenciesSummary, blockedBy, blocking } = item;
+  if (!issueDependenciesSummary || !blockedBy || !blocking)
+    throw new Error(`Native dependency evidence missing for ${item.url}.`);
+  // Reassigns the same values (no change): returns the same object, typed as complete.
+  return Object.assign(item, { issueDependenciesSummary, blockedBy, blocking });
 }
-export const nativeKnown = (item) =>
+export const nativeKnown = <T extends NativeFields>(item: T): item is T & KnownNative =>
   !!item.issueDependenciesSummary && !!item.blockedBy && !!item.blocking;
-export const pickable = (item) =>
+export const pickable = (item: NativeFields): boolean =>
   nativeKnown(item) && item.issueDependenciesSummary.blockedBy === 0;
 /** How many open dependants this open ticket is the last open blocker for. */
-export const unblocks = (item) =>
+export const unblocks = (item: Pick<Issue, "state" | "blocking"> | null | undefined): number =>
   item?.state === "OPEN"
     ? (item.blocking?.nodes ?? []).filter(
         (n) => n.state === "OPEN" && n.issueDependenciesSummary?.blockedBy === 1,
       ).length
     : 0;
-export const dependencyDrift = (item, repository) =>
+export const dependencyDrift = (
+  item: Pick<Issue, "body" | "blockedBy">,
+  repository: string,
+): Reference[] =>
   declaredDependencies(item.body, repository).filter(
     (ref) => !(item.blockedBy?.nodes ?? []).some((n) => n.url === ref.url),
   );
-/**
- * @param {import("./types.js").Issue} item
- * @param {string} repository
- */
-export function dependencyFacts(item, repository) {
+export interface DependencyFacts {
+  number: number;
+  url: string;
+  title: string;
+  known: boolean;
+  summary: Issue["issueDependenciesSummary"] | null;
+  upstream: NativeNode[];
+  downstream: (NativeNode & { lastOpenBlocker: boolean })[];
+  drift: Reference[];
+  verdict: string;
+}
+export function dependencyFacts(
+  item: Pick<Issue, "number" | "url" | "title" | "body" | "state"> & NativeFields,
+  repository: string,
+): DependencyFacts {
   const known = nativeKnown(item);
   const blockers = item.blockedBy?.nodes ?? [];
   return {
@@ -71,7 +106,7 @@ export function dependencyFacts(item, repository) {
         node.issueDependenciesSummary?.blockedBy === 1,
     })),
     drift: dependencyDrift(item, repository),
-    verdict: !known
+    verdict: !nativeKnown(item)
       ? "Unknown native dependency evidence; refresh live."
       : blockers.some((n) => n.stateReason === "NOT_PLANNED")
         ? "A blocker was closed as not planned; human inspection required."
@@ -83,40 +118,47 @@ export function dependencyFacts(item, repository) {
           : "No open native blockers; pickup still requires ready, unclaimed and acceptance verification.",
   };
 }
-export async function readDependencyIssue(repository, number, query = ghQuery) {
+export async function readDependencyIssue(
+  repository: string,
+  number: number,
+  query: Query = ghQuery,
+): Promise<DependencyIssue & KnownNative> {
   const [owner, name] = repository.split("/");
   const data = await query(
     `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){number title body url state stateReason updatedAt labels(first:100){nodes{name} ${pageInfo}} ${nativeFields}}}}`,
     { owner, name, number },
   );
-  const item = data.repository?.issue;
+  const item = selected<DependencyIssue>(prop(data, "repository", "issue"));
   if (!item)
     throw new Error(`Issue #${number} unavailable; pull requests cannot be native blockers.`);
   return completeNative(item, repository, query);
 }
+export interface DependencyReport {
+  schemaVersion: 1;
+  repository: string;
+  startedAt: string;
+  fetchedAt: string;
+  tree: boolean;
+  nodes: DependencyFacts[];
+  cycles: string[][];
+  guidance: string;
+}
 /**
  * Read one ticket's native dependencies; with `tree`, walk upstream and downstream
  * transitively, reading each ticket once, and report upstream (blocked-by) cycles.
- * @param {string} repository
- * @param {number} number
- * @param {{ tree?: boolean }} [options]
- * @param {import("./github.js").Query} [query]
- * @param {() => Date} [now]
  */
 export async function dependencyReport(
-  repository,
-  number,
-  { tree = false } = {},
-  query = ghQuery,
-  now = () => new Date(),
-) {
+  repository: string,
+  number: number,
+  { tree = false }: { tree?: boolean } = {},
+  query: Query = ghQuery,
+  now: () => Date = () => new Date(),
+): Promise<DependencyReport> {
   const startedAt = now().toISOString();
-  /** @type {Map<string, ReturnType<typeof dependencyFacts>>} */
-  const nodes = new Map();
-  /** @type {[string, number][]} */
-  const pending = [[repository, number]];
-  while (pending.length) {
-    const [repo, n] = pending.shift();
+  const nodes = new Map<string, DependencyFacts>();
+  const pending: [string, number][] = [[repository, number]];
+  for (let next = pending.shift(); next; next = pending.shift()) {
+    const [repo, n] = next;
     const key = `${repo}#${n}`;
     if (nodes.has(key)) continue;
     const item = await readDependencyIssue(repo, n, query);
@@ -127,12 +169,10 @@ export async function dependencyReport(
   }
   // Directed DFS over blocked-by edges: a reverse (blocking) relationship is not a cycle.
   const byUrl = new Map([...nodes.values()].map((node) => [node.url, node]));
-  /** @type {string[][]} */
-  const cycles = [];
-  const done = new Set();
-  /** @type {string[]} */
-  const stack = [];
-  function detect(url) {
+  const cycles: string[][] = [];
+  const done = new Set<string>();
+  const stack: string[] = [];
+  function detect(url: string): void {
     const at = stack.indexOf(url);
     if (at >= 0) {
       cycles.push([...stack.slice(at), url]);
@@ -157,7 +197,7 @@ export async function dependencyReport(
       "Native blockers are authoritative. Closed blockers do not prove behavior was delivered. Body drift is migration context only.",
   };
 }
-export function dependencyText(report) {
+export function dependencyText(report: DependencyReport): string {
   return (
     [
       `Native issue dependencies: ${report.repository}`,
@@ -182,17 +222,14 @@ export function dependencyText(report) {
 // Contract: doc/issue-dependencies.md, "deps add and deps remove" and
 // "Rules for commands that change tickets".
 
-/**
- * The only GitHub write boundary: `gh` with explicit arguments, never a shell.
- * @typedef {(args: string[]) => Promise<void>} GhRun
- * @type {GhRun}
- */
-export const ghRun = async (args) => {
+/** The only GitHub write boundary: `gh` with explicit arguments, never a shell. */
+export type GhRun = (args: string[]) => Promise<void>;
+export const ghRun: GhRun = async (args) => {
   try {
     await execute("gh", args, { timeout: 60_000 });
   } catch (error) {
     // Keep only a rate-limit discriminator; never echo arguments, stderr or response bodies.
-    if (isRateLimit(`${error?.stderr ?? ""}\n${error?.stdout ?? ""}`))
+    if (isRateLimit(`${outputText(prop(error, "stderr"))}\n${outputText(prop(error, "stdout"))}`))
       throw new RateLimitError(`gh ${args[0]} ${args[1]} was rate limited by GitHub.`);
     throw new Error(`gh ${args[0]} ${args[1]} failed. Check gh auth status and rate limits.`);
   }
@@ -201,17 +238,31 @@ export const ghRun = async (args) => {
 export class RateLimitError extends Error {
   rateLimited = true;
 }
-/** @param {string} text */
-export const isRateLimit = (text) => /rate limit|abuse detection|HTTP 429|retry-after/i.test(text);
+const outputText = (value: unknown): string =>
+  typeof value === "string" ? value : Buffer.isBuffer(value) ? value.toString() : "";
+export const isRateLimit = (text: string): boolean =>
+  /rate limit|abuse detection|HTTP 429|retry-after/i.test(text);
 
+type Blocker =
+  | { __typename: "Issue"; number: number; url: string; state: string }
+  | {
+      __typename: "PullRequest";
+      number: number;
+      url: string;
+      closingIssuesReferences?: { nodes: { number: number }[] } | null;
+    };
 /** Resolve a proposed blocker: an issue, a pull request (refused), or missing. */
-async function readBlocker(repository, number, query) {
+async function readBlocker(
+  repository: string,
+  number: number,
+  query: Query,
+): Promise<Blocker | null> {
   const [owner, name] = repository.split("/");
   const data = await query(
     `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on Issue{number url state} ... on PullRequest{number url closingIssuesReferences(first:20){nodes{number}}}}}}`,
     { owner, name, number },
   );
-  return data.repository?.issueOrPullRequest ?? null;
+  return selected<Blocker>(prop(data, "repository", "issueOrPullRequest"));
 }
 
 /**
@@ -219,12 +270,16 @@ async function readBlocker(repository, number, query) {
  * If so, making `target` blocked by `from` would close a cycle.
  * @returns {Promise<string[] | null>} the path from `from` to `target`, or null.
  */
-async function upstreamPath(repository, from, targetUrl, query) {
-  const seen = new Set();
-  /** @type {[string, number, string[]][]} */
-  const pending = [[repository, from, []]];
-  while (pending.length) {
-    const [repo, n, path] = pending.shift();
+async function upstreamPath(
+  repository: string,
+  from: number,
+  targetUrl: string,
+  query: Query,
+): Promise<string[] | null> {
+  const seen = new Set<string>();
+  const pending: [string, number, string[]][] = [[repository, from, []]];
+  for (let next = pending.shift(); next; next = pending.shift()) {
+    const [repo, n, path] = next;
     const item = await readDependencyIssue(repo, n, query);
     const here = [...path, item.url];
     if (item.url === targetUrl) return here;
@@ -237,19 +292,49 @@ async function upstreamPath(repository, from, targetUrl, query) {
 }
 
 /** The one explanatory comment posted on a changed ticket. */
-export function commentFor(action, blockers, note) {
+export type DependencyAction = "add" | "remove";
+export function commentFor(action: DependencyAction, blockers: number[], note: string): string {
   const verb = action === "add" ? "Added" : "Removed";
   const noun = blockers.length === 1 ? "dependency" : "dependencies";
   return `${verb} native blocked-by ${noun}: ${blockers.map((n) => `#${n}`).join(", ")}.\n\nWhy: ${note}\n\nRecorded with \`github-triage deps ${action}\`; labels are unchanged (doc/issue-dependencies.md).`;
 }
 
-/**
- * Plan a dependency change from fresh live reads. Changes nothing.
- * @param {string} repository
- * @param {{ action: "add" | "remove", number: number, on: number[], note: string }} request
- * @param {import("./github.js").Query} [query]
- */
-export async function planDependencyChange(repository, request, query = ghQuery) {
+export type ChangeStatus = "apply" | "refused" | "noop" | "done" | "failed" | "skipped";
+export interface DependencyChange {
+  blocker: number;
+  url: string | null;
+  status: ChangeStatus;
+  reason: string;
+  command: string[] | null;
+}
+export interface DependencyRequest {
+  action: DependencyAction;
+  number: number;
+  on: number[];
+  note: string;
+}
+export interface DependencyPlan {
+  schemaVersion: 1;
+  repository: string;
+  action: DependencyAction;
+  target: { number: number; url: string; title: string };
+  note: string;
+  changes: DependencyChange[];
+  comment: string | null;
+  commentCommand: string[] | null;
+}
+export interface DependencyChangeResult extends DependencyPlan {
+  dryRun: false;
+  commentStatus: string;
+  rateLimited: boolean;
+  exitCode: number;
+}
+/** Plan a dependency change from fresh live reads. Changes nothing. */
+export async function planDependencyChange(
+  repository: string,
+  request: DependencyRequest,
+  query: Query = ghQuery,
+): Promise<DependencyPlan> {
   const { action, number, note } = request;
   const target = await readDependencyIssue(repository, number, query);
   // --on numbers name issues in this repository; ignore same-numbered cross-repository blockers.
@@ -260,9 +345,15 @@ export async function planDependencyChange(repository, request, query = ghQuery)
       .map((n) => n.number),
   );
   const flag = action === "add" ? "--add-blocked-by" : "--remove-blocked-by";
-  const changes = [];
+  const changes: DependencyChange[] = [];
   for (const on of new Set(request.on)) {
-    const change = { blocker: on, url: null, status: "apply", reason: "", command: null };
+    const change: DependencyChange = {
+      blocker: on,
+      url: null,
+      status: "apply",
+      reason: "",
+      command: null,
+    };
     changes.push(change);
     if (on === number) {
       Object.assign(change, { status: "refused", reason: "A ticket cannot depend on itself." });
@@ -325,12 +416,13 @@ export async function planDependencyChange(repository, request, query = ghQuery)
 /**
  * Apply a plan one edge at a time, then post one explanatory comment.
  * Exit codes follow the shared rules: 0 all done, 2 partly done, 1 nothing done.
- * @param {Awaited<ReturnType<typeof planDependencyChange>>} plan
- * @param {GhRun} [run]
  */
-export async function applyDependencyChange(plan, run = ghRun) {
+export async function applyDependencyChange(
+  plan: DependencyPlan,
+  run: GhRun = ghRun,
+): Promise<DependencyChangeResult> {
   const results = plan.changes.map((c) => ({ ...c }));
-  const applied = [];
+  const applied: DependencyChange[] = [];
   let rateLimited = false;
   for (const change of results.filter((c) => c.status === "apply")) {
     if (rateLimited) {
@@ -342,12 +434,13 @@ export async function applyDependencyChange(plan, run = ghRun) {
       continue;
     }
     try {
-      await run(change.command);
+      // A planned "apply" change always carries its command.
+      await run(change.command ?? []);
       change.status = "done";
       applied.push(change);
     } catch (error) {
-      rateLimited = !!error?.rateLimited;
-      Object.assign(change, { status: "failed", reason: error.message });
+      rateLimited = !!prop(error, "rateLimited");
+      Object.assign(change, { status: "failed", reason: prop(error, "message") });
     }
   }
   // The comment names only what actually changed, and is what the result reports.
@@ -368,7 +461,7 @@ export async function applyDependencyChange(plan, run = ghRun) {
       await run(commentCommand);
       commentStatus = "posted";
     } catch (error) {
-      commentStatus = error?.rateLimited ? "failed: rate limited" : "failed";
+      commentStatus = prop(error, "rateLimited") ? "failed: rate limited" : "failed";
     }
   const unfinished = results.some((c) => c.status !== "done" && c.status !== "noop");
   const exitCode = !applied.length
@@ -391,7 +484,9 @@ export async function applyDependencyChange(plan, run = ghRun) {
 }
 
 /** Text rendering shared by dry runs and applied results. */
-export function dependencyChangeText(result) {
+export function dependencyChangeText(
+  result: DependencyPlan & { dryRun: boolean; commentStatus?: string },
+): string {
   const lines = [
     `deps ${result.action}: #${result.target.number} ${result.target.title} ${result.target.url}`,
     result.dryRun ? "DRY RUN: no changes made." : "",

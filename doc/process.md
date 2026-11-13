@@ -2,6 +2,8 @@
 
 **Status: proposal for [adaptation review #12](https://github.com/trebizondoculpepper/github_triage/issues/12).** This mirrors poker_blocks main at `2dec9d10e81a21a9dfaa60fe89ac081eadb0b84e`, with CLI-specific references and examples. The exact source snapshot is [poker-blocks-process.md](poker-blocks-process.md). Existing [AGENTS.md](../AGENTS.md) remains the active guide until adoption is reviewed. This proposal does not assert that branch protection or reviewer integrations are configured.
 
+**Adaptation reviewed:** [the current-project audit](reports/process-adaptation-audit.md) recommends the active AGENTS/merged-contract process rather than wholesale adoption. This mirrored proposal is historical context; later owner decisions take precedence.
+
 The user, contributors and several coding agents may work on this project at once. This page describes how work moves from a ticket to `main`; [design-implementation.md](design-implementation.md) describes design ownership, documentation and evidence. The CLI and dependency contracts live in [github-triage-cli.md](github-triage-cli.md) and [issue-dependencies.md](issue-dependencies.md).
 
 ## Design, research and implementation roles

@@ -1,12 +1,23 @@
 /** Compact presentation of the registered findings; contract #698. */
 import { owners, excerpt } from "./briefing.js";
 import { unblocks } from "./dependencies.js";
+import type { Briefing, BriefingOptions, Bounded, CheckOutcome } from "./briefing.js";
+import type { Action, Issue, PullRequest, Snapshot } from "./types.js";
 
-export const ruleMetadata = new Map([
-  ...["ownership-conflict", "readiness-inconsistent", "claimed-ready"].map((key) => [
-    key,
-    "hygiene",
-  ]),
+export type RuleGroup =
+  | "hygiene"
+  | "context"
+  | "decisions"
+  | "decision-needed"
+  | "documentation-needed"
+  | "dependencies"
+  | "available"
+  | "addressed"
+  | "review";
+export const ruleMetadata = new Map<string, RuleGroup>([
+  ...["ownership-conflict", "readiness-inconsistent", "claimed-ready"].map(
+    (key): [string, RuleGroup] => [key, "hygiene"],
+  ),
   ["question-candidate", "context"],
   ["attention-label", "decisions"],
   ["design-decision-needed", "decision-needed"],
@@ -15,12 +26,13 @@ export const ruleMetadata = new Map([
   ["ready-prerequisites-unverified", "dependencies"],
   ["blocker-explanation", "dependencies"],
   ["ready-unclaimed", "available"],
+  ["addressed-attention", "addressed"],
   ...[
     "native-evidence-unknown",
     "retired-blocker-label",
     "dependency-not-planned",
     "dependency-drift",
-  ].map((key) => [key, "hygiene"]),
+  ].map((key): [string, RuleGroup] => [key, "hygiene"]),
   ...[
     "pr-failed-checks",
     "pr-review-findings",
@@ -29,9 +41,16 @@ export const ruleMetadata = new Map([
     "pr-inspect-merge",
     "pr-verification-needed",
     "pr-merge-state",
-  ].map((key) => [key, "review"]),
+  ].map((key): [string, RuleGroup] => [key, "review"]),
 ]);
-export function sourceContext(item) {
+/** Chronology and excerpts of an item's body and latest comment. */
+export interface SourceContext {
+  body: { at: string | null; excerpt: string; url: string };
+  latestComment: { at: string | null; excerpt: string; url: string } | null;
+  chronology: string;
+  guidance: string;
+}
+export function sourceContext(item: Issue): SourceContext {
   const latest = item.comments.nodes.at(-1);
   const bodyAt = item.lastEditedAt ?? item.createdAt ?? null;
   const commentAt = latest?.updatedAt ?? latest?.createdAt ?? null;
@@ -50,8 +69,33 @@ export function sourceContext(item) {
       "Reconcile current body and comment history with --issue; chronology is not semantic authority.",
   };
 }
-export function compactBriefing(snapshot, options, expanded) {
-  const bound = (items, size = 3) => ({
+/** Issues and pull requests share one subject shape; PR-only fields are optional here. */
+type Subject = Issue & Partial<Pick<PullRequest, "closingIssuesReferences" | "headRefOid">>;
+export interface CompactPullRequest {
+  head: string;
+  checks: CheckOutcome[];
+  unresolvedThreads: number;
+  linkedIssues: { number: number; url: string }[];
+}
+export interface CompactSubject {
+  url: string;
+  number: number;
+  title: string;
+  owners: string[];
+  labels: string[];
+  updatedAt: string;
+  source: SourceContext;
+  dependencies: Briefing["dependencies"][number] | null;
+  findings: Action[];
+  detailCommand: string;
+  pullRequest?: CompactPullRequest;
+}
+export function compactBriefing(
+  snapshot: Snapshot,
+  options: Pick<BriefingOptions, "limit" | "agent">,
+  expanded: Briefing,
+) {
+  const bound = <T>(items: T[], size = 3): Bounded<T> => ({
     total: items.length,
     omitted: Math.max(0, items.length - size),
     items: items.slice(0, size),
@@ -59,17 +103,28 @@ export function compactBriefing(snapshot, options, expanded) {
   // Run expanded analysis without presentation limits so grouping never drops hidden findings.
   const facts = expanded;
   const objects = [...snapshot.issues, ...snapshot.pullRequests];
-  const byUrl = new Map(objects.map((item) => [item.url, item]));
-  const isMine = (item) => !!options.agent && owners(item).includes(`agent:${options.agent}`);
-  const linkedMine = (item) =>
-    isMine(item) ||
-    (item.closingIssuesReferences?.nodes ?? []).some((ref) =>
-      isMine(byUrl.get(ref.url) ?? { labels: { nodes: [] } }),
+  const byUrl = new Map<string, Subject>(objects.map((item) => [item.url, item]));
+  const isMine = (item: Pick<Issue, "labels">): boolean =>
+    !!options.agent && owners(item).includes(`agent:${options.agent}`);
+  // The addressed-attention rule itself is registered in briefing.js; here it only orders and
+  // keeps addressed items visible regardless of role, ownership or parking.
+  const labelNames = (item: Subject): string[] => item.labels.nodes.map(({ name }) => name);
+  const isAddressed = (item: Subject | undefined): boolean =>
+    !!options.agent && !!item && labelNames(item).includes(`attention:${options.agent}`);
+  // Targets and section entries always come from snapshot objects, so a lookup by URL is
+  // defined at runtime; an undefined item fails exactly as the untyped code did.
+  const linkedMine = (item: Subject | undefined): boolean =>
+    isMine(defined(item)) ||
+    (defined(item).closingIssuesReferences?.nodes ?? []).some((ref) =>
+      isMine(byUrl.get(ref.url) ?? unlabelled),
     );
-  const grouped = new Map();
+  const unlabelled: Pick<Issue, "labels"> = {
+    labels: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+  };
+  const grouped = new Map<string, Action[]>();
   for (const finding of facts.actions.items) {
     if (!grouped.has(finding.target)) grouped.set(finding.target, []);
-    grouped.get(finding.target).push(finding);
+    grouped.get(finding.target)?.push(finding);
   }
   for (const item of snapshot.issues.filter(isMine)) {
     const findings = grouped.get(item.url) ?? [];
@@ -89,24 +144,27 @@ export function compactBriefing(snapshot, options, expanded) {
   const next = groups
     .filter(({ target, findings }) => {
       const item = byUrl.get(target);
+      if (isAddressed(item)) return true;
       return (
         !item?.labels.nodes.some(({ name }) => name === "status:parked") &&
-        findings.some((f) => !["context", "hygiene"].includes(ruleMetadata.get(f.rule))) &&
+        findings.some((f) => !["context", "hygiene"].includes(ruleMetadata.get(f.rule) ?? "")) &&
         (!options.agent ||
-          !owners(item).length ||
+          !owners(defined(item)).length ||
           linkedMine(item) ||
           findings.some((f) => ruleMetadata.get(f.rule) === "review"))
       );
     })
     .sort(
       (a, b) =>
+        Number(isAddressed(byUrl.get(b.target))) - Number(isAddressed(byUrl.get(a.target))) ||
         Number(linkedMine(byUrl.get(b.target))) - Number(linkedMine(byUrl.get(a.target))) ||
         b.findings[0].priority - a.findings[0].priority ||
-        unblocks(byUrl.get(b.target)) - unblocks(byUrl.get(a.target)) ||
+        unblocksOf(byUrl.get(b.target)) - unblocksOf(byUrl.get(a.target)) ||
         a.target.localeCompare(b.target),
     );
-  const sections = Object.fromEntries(
+  const sections: Record<string, Bounded<string>> = Object.fromEntries(
     [
+      "addressed",
       "review",
       "available",
       "decision-needed",
@@ -139,8 +197,8 @@ export function compactBriefing(snapshot, options, expanded) {
     ...actions.items.map((item) => item.target),
     ...Object.values(sections).flatMap((s) => s.items),
   ]);
-  const subjects = [...urls].map((url) => {
-    const item = byUrl.get(url);
+  const subjects = [...urls].map((url): CompactSubject => {
+    const item = defined(byUrl.get(url));
     return {
       url,
       number: item.number,
@@ -170,7 +228,7 @@ export function compactBriefing(snapshot, options, expanded) {
     };
   });
   return {
-    schemaVersion: 2,
+    schemaVersion: 2 as const,
     repository: snapshot.repository,
     freshness: facts.freshness,
     completeness: facts.completeness,
@@ -187,10 +245,13 @@ export function compactBriefing(snapshot, options, expanded) {
     subjects,
     changes: facts.changes,
     detail: facts.detail,
-    guidance: facts.guidance,
+    guidance: options.agent
+      ? facts.guidance
+      : `${facts.guidance} No --agent given: addressed attention and owned-work focus are unavailable (identity is never inferred from the GitHub login).`,
   };
 }
-export function compactText(report, maxChars = 10000) {
+export type CompactBriefing = ReturnType<typeof compactBriefing>;
+export function compactText(report: CompactBriefing, maxChars = 10000): string {
   const subjects = new Map(report.subjects.map((s) => [s.url, s]));
   const lines = [
     `GitHub action briefing: ${report.repository}`,
@@ -198,12 +259,12 @@ export function compactText(report, maxChars = 10000) {
     `${report.summary.issues} issues; ${report.summary.pullRequests} PRs; ${report.summary.findings} findings on ${report.summary.distinctSubjects} subjects.`,
     report.guidance,
   ];
-  const rows = [];
-  const shown = new Set();
-  const add = (title, section) => {
+  const rows: string[] = [];
+  const shown = new Set<string>();
+  const add = (title: string, section: Bounded<string>): void => {
     rows.push(`\n${title} (${section.total}; ${section.omitted} omitted)`);
     for (const url of section.items) {
-      const s = subjects.get(url);
+      const s = defined(subjects.get(url));
       if (shown.has(url)) {
         rows.push(`- #${s.number}: ${url}`);
         continue;
@@ -215,7 +276,7 @@ export function compactText(report, maxChars = 10000) {
     }
   };
   add("NEXT STEPS", report.actions);
-  const titles = {
+  const titles: Record<string, string> = {
     "decision-needed": "DECISION NEEDED",
     "documentation-needed": "AGREED, NEEDS DOCUMENTATION",
   };
@@ -241,4 +302,16 @@ export function compactText(report, maxChars = 10000) {
   }
   if (report.detail) lines.push(`\nFULL ISSUE DETAIL\n${JSON.stringify(report.detail, null, 2)}`);
   return lines.join("\n") + "\n";
+}
+
+/** Open dependants an item unblocks; 0 for an unknown item, as before. */
+const unblocksOf = (item: Issue | undefined): number => (item ? unblocks(item) : 0);
+/**
+ * Narrow a lookup that is defined by construction. A missing value throws a TypeError at
+ * the first property access, matching the previous untyped behavior.
+ */
+function defined<T>(value: T | undefined): T {
+  // Narrowly justified: the runtime failure mode for an impossible miss is preserved
+  // deliberately rather than invented; callers only pass lookups of known keys.
+  return value as T;
 }

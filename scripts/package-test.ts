@@ -16,9 +16,40 @@ import { promisify } from "node:util";
 
 const run = promisify(execFile);
 const windows = process.platform === "win32";
-const npm = (args, cwd) => run(windows ? "npm.cmd" : "npm", args, { cwd, shell: windows });
+const npm = (args: string[], cwd: string) =>
+  run(windows ? "npm.cmd" : "npm", args, { cwd, shell: windows });
 const root = resolve(".");
 const expected = ["LICENSE", "README.md", "dist/cli.mjs", "package.json"];
+
+interface PackResult {
+  filename: string;
+  name: string;
+  files: { path: string }[];
+}
+
+/** Validate `npm pack --json` output instead of trusting its shape. */
+function parsePack(stdout: string): PackResult {
+  const parsed: unknown = JSON.parse(stdout);
+  const first: unknown = Array.isArray(parsed) ? parsed[0] : undefined;
+  if (
+    typeof first === "object" &&
+    first !== null &&
+    "filename" in first &&
+    typeof first.filename === "string" &&
+    "name" in first &&
+    typeof first.name === "string" &&
+    "files" in first &&
+    Array.isArray(first.files)
+  ) {
+    const files = first.files.map((f: unknown) => {
+      if (typeof f === "object" && f !== null && "path" in f && typeof f.path === "string")
+        return { path: f.path };
+      throw new Error("npm pack reported a file without a path.");
+    });
+    return { filename: first.filename, name: first.name, files };
+  }
+  throw new Error("npm pack --json returned an unexpected result.");
+}
 
 const work = await mkdtemp(join(tmpdir(), "triage-package-"));
 try {
@@ -26,7 +57,7 @@ try {
     ["pack", "--json", "--pack-destination", work, "--ignore-scripts"],
     root,
   );
-  const [packed] = JSON.parse(stdout);
+  const packed = parsePack(stdout);
   const files = packed.files.map((f) => f.path).sort();
   if (JSON.stringify(files) !== JSON.stringify(expected))
     throw new Error(
@@ -52,8 +83,11 @@ try {
   const packageDir = windows
     ? join(prefix, "node_modules", ...packed.name.split("/"))
     : join(prefix, "lib", "node_modules", ...packed.name.split("/"));
-  const manifest = JSON.parse(await readFile(join(packageDir, "package.json"), "utf8"));
-  if (manifest.scripts?.postinstall || manifest.scripts?.install || manifest.scripts?.preinstall)
+  // Only optional fields are read, each through optional chaining, so any JSON shape is safe.
+  const manifest: { scripts?: Record<string, unknown> } | null = JSON.parse(
+    await readFile(join(packageDir, "package.json"), "utf8"),
+  );
+  if (manifest?.scripts?.postinstall || manifest?.scripts?.install || manifest?.scripts?.preinstall)
     throw new Error("The package must not run install scripts on installation.");
   console.log("ok   installed globally into an isolated prefix without install scripts");
 
@@ -63,13 +97,13 @@ try {
   for (const dir of checkouts) await mkdir(dir);
   for (const cwd of checkouts) {
     // With shell: true, Windows needs the .cmd path quoted (temporary paths may contain spaces).
-    const cli = (args) => run(windows ? `"${bin}"` : bin, args, { cwd, shell: windows });
+    const cli = (args: string[]) => run(windows ? `"${bin}"` : bin, args, { cwd, shell: windows });
     const help = await cli(["--help"]);
     if (!help.stdout.startsWith("Usage:"))
       throw new Error(`Installed bin printed no help in ${cwd}.`);
     const invalid = await cli(["--no-such-option"]).then(
       () => null,
-      (error) => error,
+      (error: { code?: unknown }) => error,
     );
     if (invalid?.code !== 1)
       throw new Error(`Invalid arguments exited ${invalid?.code ?? 0}, not 1, in ${cwd}.`);
@@ -77,7 +111,14 @@ try {
     // globally installed copy, run from this working directory.
     await run(
       process.execPath,
-      [join(root, "scripts", "smoke.mjs"), join(packageDir, "dist", "cli.mjs")],
+      [
+        // The smoke script is TypeScript, run through the development-only tsx loader; the
+        // CLI under test is the installed compiled artifact.
+        "--import",
+        import.meta.resolve("tsx"),
+        join(root, "scripts", "smoke.ts"),
+        join(packageDir, "dist", "cli.mjs"),
+      ],
       {
         cwd,
       },
