@@ -74,6 +74,8 @@ const SETUP = "github-triage setup complexity";
 const DISABLE = "github-triage config set complexity.enabled false";
 /** Bound on pages (100 open issues each) of native field values read per briefing. */
 export const MAX_VALUE_PAGES = 10;
+/** Bound on conflicting-size inspection lines in text output. */
+export const MAX_CONFLICT_LINES = 10;
 
 const valuesQuery = `query($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {
@@ -209,7 +211,8 @@ export async function collectEstimationInput(
   };
 }
 
-export type EstimateState = "estimated" | "unestimated" | "stale" | "unknown";
+/** "conflicting" (#151, additive): several recognized size labels; inspect, never choose one. */
+export type EstimateState = "estimated" | "unestimated" | "stale" | "conflicting" | "unknown";
 
 export interface RecordedEstimate {
   size: ComplexitySize;
@@ -248,6 +251,8 @@ export interface EstimationReport {
   queue: { total: number; omitted: number; items: EstimateEntry[] } | null;
   /** Open tickets whose native value could not be read. */
   unknown: number;
+  /** Open tickets with conflicting size evidence: inspection candidates, never queued (#151). */
+  conflicts: EstimateEntry[];
   /** Per-ticket state for compact visibility, keyed by URL. */
   entries: EstimateEntry[];
   boundaries: string;
@@ -273,10 +278,59 @@ function newestRecord(issue: Issue, fieldId: string | null): RecordedEstimate | 
   return found;
 }
 
+/**
+ * One issue's current-size evidence, as read by a size reader (native field today; the prepared
+ * label reader in complexitylabels.ts, #151). "conflict" is an inspection case: no size is chosen.
+ */
+export type SizeReading =
+  | { kind: "known"; size: ComplexitySize | null }
+  | { kind: "unknown"; reason: string }
+  | { kind: "conflict"; sizes: ComplexitySize[]; reason: string };
+
+/** Report inputs shared by every size reader. */
+export interface SizeSource {
+  status: EstimationStatus;
+  fieldId: string | null;
+  unavailable: string | null;
+  findings: EstimationFinding[];
+  /** Restrict provenance markers to this field; null accepts any marker. */
+  provenanceFieldId: string | null;
+  /** Human noun for the authoritative size evidence, e.g. "native value". */
+  evidence: string;
+  read: (issue: Issue) => SizeReading;
+}
+
 /** Classify every open issue and build the bounded queue. Pure. */
 export function estimationReport(
   issues: Issue[],
   input: EstimationInput | undefined,
+  options: PickupContext & { limit: number; requested?: boolean },
+): EstimationReport {
+  return sizeReport(
+    issues,
+    input && {
+      status: input.status,
+      fieldId: input.fieldId,
+      unavailable: input.unavailable,
+      findings: input.findings,
+      provenanceFieldId: input.fieldId,
+      evidence: "native value",
+      read: (issue) =>
+        input.values.has(issue.number)
+          ? { kind: "known", size: input.values.get(issue.number) ?? null }
+          : {
+              kind: "unknown",
+              reason: `native value unknown (${input.unavailable ?? "not read"})`,
+            },
+    },
+    options,
+  );
+}
+
+/** Shared report builder over any size reader. Pure. */
+export function sizeReport(
+  issues: Issue[],
+  input: SizeSource | undefined,
   options: PickupContext & { limit: number; requested?: boolean },
 ): EstimationReport {
   const base = {
@@ -296,33 +350,39 @@ export function estimationReport(
         : "Complexity state was not collected; estimation queue unknown.",
       queue: null,
       unknown: 0,
+      conflicts: [],
       entries: [],
     };
   const entries = issues
     .filter((issue) => issue.state === "OPEN")
     .map((issue): EstimateEntry => {
-      const known = input.values.has(issue.number);
-      const size = input.values.get(issue.number) ?? null;
-      const recorded = newestRecord(issue, input.fieldId);
+      const reading = input.read(issue);
+      const recorded = newestRecord(issue, input.provenanceFieldId);
       const reasons: string[] = [];
       let state: EstimateState;
-      if (!known || recorded === undefined) {
+      let size: ComplexitySize | null = null;
+      if (reading.kind === "unknown") {
         state = "unknown";
-        reasons.push(
-          !known
-            ? `native value unknown (${input.unavailable ?? "not read"})`
-            : "comment history incomplete; provenance unknown",
-        );
-      } else if (size === null) {
+        reasons.push(reading.reason);
+      } else if (reading.kind === "conflict") {
+        state = "conflicting";
+        reasons.push(reading.reason);
+      } else if (recorded === undefined) {
+        state = "unknown";
+        reasons.push("comment history incomplete; provenance unknown");
+      } else if (reading.size === null) {
         state = "unestimated";
-        reasons.push("no native complexity value");
+        reasons.push(`no ${input.evidence}`);
       } else {
+        size = reading.size;
         state = "estimated";
         if (!recorded) reasons.push("no recorded rationale (value set outside github-triage)");
         else {
           if (recorded.size !== size) {
             state = "stale";
-            reasons.push(`native value ${size} differs from recorded estimate ${recorded.size}`);
+            reasons.push(
+              `${input.evidence} ${size} differs from recorded estimate ${recorded.size}`,
+            );
           }
           if ((recorded.guidanceVersion ?? 0) < complexityGuidance.guidanceVersion) {
             state = "stale";
@@ -343,7 +403,7 @@ export function estimationReport(
         title: issue.title,
         url: issue.url,
         createdAt: issue.createdAt,
-        size: state === "unknown" ? null : size,
+        size,
         state,
         recorded: recorded ?? null,
         implementation: pickupEligibility(issue, options).status,
@@ -351,6 +411,9 @@ export function estimationReport(
       };
     });
   const unknown = entries.filter((e) => e.state === "unknown").length;
+  const conflicts = entries
+    .filter((e) => e.state === "conflicting")
+    .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.number - b.number);
   if (input.status !== "available")
     return {
       ...base,
@@ -366,6 +429,7 @@ export function estimationReport(
             : `Estimation queue unavailable: ${input.unavailable ?? "complexity state unknown"}. Unknown is not unestimated.`,
       queue: null,
       unknown,
+      conflicts,
       entries,
     };
   const queued = entries
@@ -374,13 +438,14 @@ export function estimationReport(
   return {
     ...base,
     status: "available",
-    detail: `${queued.length} ticket(s) to estimate (unestimated or stale, blocked included)${unknown ? `; ${unknown} unknown (${input.unavailable ?? "unreadable"}), not queued` : ""}.`,
+    detail: `${queued.length} ticket(s) to estimate (unestimated or stale, blocked included)${conflicts.length ? `; ${conflicts.length} with conflicting size evidence to inspect, not queued` : ""}${unknown ? `; ${unknown} unknown (${input.unavailable ?? "unreadable"}), not queued` : ""}.`,
     queue: {
       total: queued.length,
       omitted: Math.max(0, queued.length - options.limit),
       items: queued.slice(0, options.limit),
     },
     unknown,
+    conflicts,
     entries,
   };
 }
@@ -389,11 +454,13 @@ export function estimationReport(
 export function estimateLine(e: EstimateEntry): string {
   const r = e.recorded;
   const size =
-    e.state === "unknown"
-      ? `size unknown${r ? ` (last recorded ${r.size}, unverified)` : ""}`
-      : e.size
-        ? `size ${e.size}`
-        : "unestimated";
+    e.state === "conflicting"
+      ? "conflicting sizes"
+      : e.state === "unknown"
+        ? `size unknown${r ? ` (last recorded ${r.size}, unverified)` : ""}`
+        : e.size
+          ? `size ${e.size}`
+          : "unestimated";
   const facts = [
     `${size} [${e.state}]`,
     `implementation ${e.implementation}`,
@@ -420,6 +487,11 @@ export function estimationText(report: EstimationReport): string[] {
       );
     if (report.queue.omitted) lines.push(`${report.queue.omitted} more omitted; increase --limit.`);
   }
+  const shown = report.conflicts.slice(0, MAX_CONFLICT_LINES);
+  for (const e of shown)
+    lines.push(`#${e.number} ${e.title} — inspect: ${estimateLine(e)}\n  ${e.url}`);
+  if (report.conflicts.length > shown.length)
+    lines.push(`${report.conflicts.length - shown.length} more conflicting ticket(s) omitted.`);
   lines.push(report.boundaries);
   return lines;
 }
