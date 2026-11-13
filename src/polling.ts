@@ -36,7 +36,7 @@ export const pollingDefaults = {
 };
 
 export const baselineRule =
-  "The first complete observation after this process started is the baseline and emits no historical events. Later polls compare against the last complete observation; failed or incomplete polls never replace it. A restart starts a new baseline; nothing that happened while no process was watching is reconstructed.";
+  "The first complete observation after this process started is the baseline and emits no historical events. Later polls compare against the last complete observation; failed or incomplete polls never replace it. Each subject's baseline is established or replaced only from complete evidence for that subject; the first complete observation of a subject previously seen only incompletely establishes it silently. A restart starts a new baseline; nothing that happened while no process was watching is reconstructed.";
 
 export const pollingLimitations = [
   "History lives only in this MCP server process and is lost when it exits.",
@@ -281,24 +281,41 @@ export interface OperationOrigins {
 const noOrigins: OperationOrigins = { echoOf: () => null };
 
 /**
- * Compare a new observation to the baseline. Facts newly present produce event drafts;
- * subjects with incomplete evidence keep their baseline facts and produce nothing. Returns the
- * next baseline as well.
+ * Compare a new observation to the baseline. A subject's baseline facts are only ever
+ * established or replaced from complete evidence for that subject, and events are drafted only
+ * when both the prior and the current observation of that subject are complete:
+ * - current incomplete: keep a complete prior baseline unchanged; otherwise record the subject
+ *   as still lacking a complete baseline (so its later first sight is not "new");
+ * - current complete, prior incomplete: establish the subject's baseline silently, like a
+ *   first run (`established`), because the prior facts may be artefacts of truncation;
+ * - current complete, prior complete: diff and draft events;
+ * - current complete, no prior: a subject first seen after the baseline, diffed against nothing.
+ * Returns the next baseline as well.
  */
 export function diffObservations(
   baseline: Observation,
   next: Observation,
-): { drafts: { subject: SubjectObservation; fact: Fact }[]; merged: Observation } {
+): {
+  drafts: { subject: SubjectObservation; fact: Fact }[];
+  established: SubjectObservation[];
+  merged: Observation;
+} {
   const drafts: { subject: SubjectObservation; fact: Fact }[] = [];
+  const established: SubjectObservation[] = [];
   const merged = new Map<string, SubjectObservation>();
   for (const [url, subject] of next.subjects) {
     const before = baseline.subjects.get(url);
     if (!subject.complete) {
-      // Missing or truncated evidence is unknown, never absence: carry the baseline forward.
-      if (before) merged.set(url, before);
+      // Missing or truncated evidence is unknown, never absence: carry a complete baseline
+      // forward, and never let incomplete facts become one.
+      merged.set(url, before?.complete ? before : subject);
       continue;
     }
     merged.set(url, subject);
+    if (before && !before.complete) {
+      established.push(subject);
+      continue;
+    }
     for (const fact of subject.facts.values()) {
       if (before?.facts.has(fact.key)) continue;
       // Only a known-ineligible -> eligible transition counts; first sight is not a transition.
@@ -306,7 +323,7 @@ export function diffObservations(
       drafts.push({ subject, fact });
     }
   }
-  return { drafts, merged: { observedAt: next.observedAt, subjects: merged } };
+  return { drafts, established, merged: { observedAt: next.observedAt, subjects: merged } };
 }
 
 /** Opaque cursor: process generation and sequence. */
@@ -460,6 +477,8 @@ export interface WatcherStatus {
   lastRequestCount: number | null;
   stale: boolean;
   suppressedEchoes: number;
+  /** Subjects still lacking a baseline established from complete evidence. */
+  incompleteSubjects: number;
   baselineRule: string;
 }
 
@@ -623,26 +642,38 @@ export class Watcher {
     if (global.length) return "incomplete";
     const now = this.runtime.clock.now().toISOString();
     const next = observe(snapshot, now);
+    // A subject-scoped gap still leaves that subject without a trustworthy baseline, so the
+    // poll is reported as incomplete rather than describing the observation as complete.
+    const outcome: PollOutcome = [...next.subjects.values()].every((subject) => subject.complete)
+      ? "complete"
+      : "incomplete";
     if (!this.baseline) {
       this.baseline = next;
-      this.seedGenerations(next);
+      this.seedGenerations([...next.subjects.values()].filter((subject) => subject.complete));
       this.firstBaselineAt = now;
       this.lastSuccessAt = now;
-      return "complete";
+      return outcome;
     }
-    const { drafts, merged } = diffObservations(this.baseline, next);
+    const { drafts, established, merged } = diffObservations(this.baseline, next);
+    this.seedGenerations(established);
     for (const { subject, fact } of drafts) this.emit(subject, fact, now);
     this.baseline = merged;
     this.lastSuccessAt = now;
-    return "complete";
+    return outcome;
+  }
+
+  /** Subjects whose baseline is not yet established from complete evidence. */
+  private incompleteSubjects(): number {
+    if (!this.baseline) return 0;
+    return [...this.baseline.subjects.values()].filter((subject) => !subject.complete).length;
   }
 
   /**
    * Baseline facts start at generation 1, so a fact that genuinely clears and recurs gets a
    * new identity while repeated observation of an unchanged fact never re-emits.
    */
-  private seedGenerations(observation: Observation): void {
-    for (const subject of observation.subjects.values())
+  private seedGenerations(subjects: Iterable<SubjectObservation>): void {
+    for (const subject of subjects)
       for (const key of subject.facts.keys()) this.generations.set(`${subject.url}#${key}`, 1);
     this.boundGenerations();
   }
@@ -749,6 +780,7 @@ export class Watcher {
       stale:
         !this.lastSuccessAt || now - Date.parse(this.lastSuccessAt) > this.intervalMs * 2 + 60000,
       suppressedEchoes: this.suppressed,
+      incompleteSubjects: this.incompleteSubjects(),
       baselineRule,
     };
   }

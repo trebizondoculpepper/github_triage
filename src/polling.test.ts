@@ -287,6 +287,74 @@ describe("optional polling and domain events (#32)", () => {
     w.stop();
   });
 
+  it("never establishes a subject baseline from incomplete evidence on the first poll", async () => {
+    const time = fakeClock();
+    const labelsCut = {
+      warnings: [`${issue(1).url}: labels exceed 100; label analysis incomplete.`],
+    };
+    const { collect } = scripted([
+      // The status:ready label sits on an unseen label page, so the issue reads ineligible.
+      snap([issue(1, ["status:needs-design"])], [], labelsCut),
+      snap([issue(1, ["status:ready"])]),
+      snap([issue(1, ["status:needs-design"])]),
+      snap([issue(1, ["status:ready"])]),
+    ]);
+    const w = watch(collect, time.clock, 1);
+    w.start();
+    await time.advance(0);
+    expect(w.status()).toMatchObject({ lastOutcome: "incomplete", incompleteSubjects: 1 });
+    expect(eventsReport(w, undefined, 20).complete).toBe(false);
+    await time.advance(minute);
+    // The first complete read establishes the subject silently; no artefactual transition.
+    expect(kinds(w)).toEqual([]);
+    expect(w.status()).toMatchObject({ lastOutcome: "complete", incompleteSubjects: 0 });
+    await time.advance(minute);
+    await time.advance(minute);
+    // A genuine change after a complete baseline still emits.
+    expect(kinds(w)).toEqual(["work-became-eligible"]);
+    w.stop();
+  });
+
+  it("does not report review threads hidden by truncation as new feedback", async () => {
+    const time = fakeClock();
+    const threadsCut = { warnings: [`${pr().url}: review threads exceed the page bound.`] };
+    const { collect } = scripted([
+      snap([], [pr({ threads: ["1"] })], threadsCut),
+      snap([], [pr({ threads: ["1", "2", "3"] })]),
+      snap([], [pr({ threads: ["1", "2", "3", "4"] })]),
+    ]);
+    const w = watch(collect, time.clock, 1);
+    w.start();
+    await time.advance(0);
+    await time.advance(minute);
+    expect(kinds(w)).toEqual([]);
+    await time.advance(minute);
+    expect(kinds(w)).toEqual(["review-feedback"]);
+    w.stop();
+  });
+
+  it("diffs across a mid-stream incomplete read against the last complete baseline", async () => {
+    const time = fakeClock();
+    const labelsCut = {
+      warnings: [`${issue(1).url}: labels exceed 100; label analysis incomplete.`],
+    };
+    const { collect } = scripted([
+      snap([issue(1, ["status:needs-design"])]),
+      snap([issue(1, ["status:ready"])], [], labelsCut),
+      snap([issue(1, ["status:ready"])]),
+    ]);
+    const w = watch(collect, time.clock, 1);
+    w.start();
+    await time.advance(0);
+    await time.advance(minute);
+    expect(kinds(w)).toEqual([]);
+    expect(w.status().incompleteSubjects).toBe(0);
+    await time.advance(minute);
+    // Both sides of the comparison are complete for the subject, so the real change emits.
+    expect(kinds(w)).toEqual(["work-became-eligible"]);
+    w.stop();
+  });
+
   it("backs off with jitter on failures and waits for a rate-limit reset", async () => {
     const time = fakeClock();
     const reset = new Date(start + 45 * minute).toISOString();
