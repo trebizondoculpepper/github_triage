@@ -73,6 +73,14 @@ export interface PickupContext {
   platform?: string;
 }
 
+/** Open pull requests that would close the issue; such an issue is PR follow-up, not pickup. */
+export const openClosingPrs = (issue: Issue, prs: PullRequest[]): PullRequest[] =>
+  prs.filter(
+    (pr) =>
+      pickupPolicy.openStates.includes(pr.state) &&
+      pr.closingIssuesReferences.nodes.some((ref) => ref.url === issue.url),
+  );
+
 /**
  * The eligibility gates other than native blockers. Shared by the ticket itself and by the
  * dependants whose immediate unlock it would cause.
@@ -87,11 +95,7 @@ function otherwiseEligible(issue: Issue, context: PickupContext): Eligibility {
     hard.push(`not labelled ${pickupPolicy.available.join(" or ")}`);
   const prerequisites = tags.filter((tag) => pickupPolicy.prerequisites.includes(tag));
   if (prerequisites.length) hard.push(`outstanding prerequisite: ${prerequisites.join(", ")}`);
-  const linked = context.prs.filter(
-    (pr) =>
-      pickupPolicy.openStates.includes(pr.state) &&
-      pr.closingIssuesReferences.nodes.some((ref) => ref.url === issue.url),
-  );
+  const linked = openClosingPrs(issue, context.prs);
   if (linked.length)
     hard.push(`open closing PR ${linked.map((pr) => `#${pr.number}`).join(", ")} (PR follow-up)`);
   const platforms = platformsOf(issue);
