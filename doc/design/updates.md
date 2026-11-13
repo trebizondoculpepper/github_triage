@@ -18,6 +18,8 @@ Store channel-keyed last attempt/success timestamps, cached available version, a
 
 Use atomic replacement and a short-lived exclusive lock, bounded waiting and stale-lock recovery. Do not block useful work behind a stuck lock. Missing/corrupt/unwritable cache is recoverable; if safe coordination is unavailable, skip the optional check/notice rather than hammer npm. No SQLite/server. Do not persist secrets.
 
+Implementation defaults (#65): cache file `update-check.json` (schema version 1, channel-keyed ISO timestamps and versions only); lock file beside it, bounded wait 250 ms, stale after 10 s; registry timeout 1.5 s from #51. A lookup is the only time the lock is held for long, so a concurrent invocation that cannot get the lock within the wait skips its optional check.
+
 ## Acceptance
 
 Inject registry/clock/filesystem: compare equal/older/newer stable/prerelease versions; absent channel/version; timeouts/errors; offline/opt-out; stdout validity; first use/expiry; failed-attempt throttle; concurrent processes/stale lock; corrupt/unwritable cache; notification deduplication after an upgrade. Measure startup overhead. Default timeout and lock TTL are implementation choices documented and tested with bounded limits, not new product decisions.

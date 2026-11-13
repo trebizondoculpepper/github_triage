@@ -2411,6 +2411,264 @@ describe("version check (#51, doc/design/updates.md)", () => {
   });
 });
 
+describe("daily cached version check (#65, doc/design/updates.md)", () => {
+  const day = 24 * 60 * 60 * 1000;
+  const t0 = Date.parse("2026-11-13T12:00:00Z");
+  const installed = (version: string) => ({ version, installed: true });
+  const counting = (tags: Record<string, string> | Error, delayMs = 0) => {
+    const calls: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      calls.push(String(url));
+      if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+      if (tags instanceof Error) throw tags;
+      return { ok: true, status: 200, json: async () => tags } as Response;
+    }) as unknown as typeof fetch;
+    return { calls, fetchImpl };
+  };
+  const withDir = async (body: (dir: string) => Promise<void>) => {
+    const dir = await mkdtemp(join(tmpdir(), "triage-update-cache-"));
+    try {
+      await body(dir);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  };
+
+  it("checks on first use, reuses the result for 24 hours, then refreshes", async () => {
+    const { cachedCheckForUpdate, cacheFileName } = await import("./updatecache.js");
+    const { updateAdvisory } = await import("./updates.js");
+    await withDir(async (cacheDir) => {
+      let now = t0;
+      const reg = counting({ latest: "0.2.0", next: "0.3.0-next.1" });
+      const check = () =>
+        cachedCheckForUpdate({
+          cacheDir,
+          installed: installed("0.1.0"),
+          fetchImpl: reg.fetchImpl,
+          now: () => now,
+        });
+      const first = await check();
+      expect(first).toMatchObject({ status: "newer", available: "0.2.0", channel: "latest" });
+      expect(updateAdvisory(first)).toMatch(/0\.2\.0 is available/);
+      now += day - 1;
+      const repeat = await check();
+      expect(repeat).toMatchObject({ status: "newer", notify: false });
+      expect(updateAdvisory(repeat)).toBeNull();
+      expect(reg.calls).toHaveLength(1);
+      now += 2;
+      expect(updateAdvisory(await check())).not.toBeNull();
+      expect(reg.calls).toHaveLength(2);
+      // Human-readable, versioned, channel-keyed and free of anything but versions and times.
+      const file = JSON.parse(await readFile(join(cacheDir, cacheFileName), "utf8"));
+      expect(file).toEqual({
+        schemaVersion: 1,
+        channels: {
+          latest: {
+            lastAttempt: new Date(now).toISOString(),
+            lastSuccess: new Date(now).toISOString(),
+            available: "0.2.0",
+            lastWarningVersion: "0.2.0",
+            lastWarningAt: new Date(now).toISOString(),
+          },
+        },
+      });
+      // The prerelease channel has its own entry and its own lookup.
+      expect(
+        await cachedCheckForUpdate({
+          cacheDir,
+          installed: installed("0.2.1-next.1"),
+          fetchImpl: reg.fetchImpl,
+          now: () => now,
+        }),
+      ).toMatchObject({ status: "newer", channel: "next", available: "0.3.0-next.1" });
+      expect(reg.calls).toHaveLength(3);
+    });
+  });
+
+  it("stays silent when up to date and honours an upgrade against cached evidence", async () => {
+    const { cachedCheckForUpdate } = await import("./updatecache.js");
+    const { updateAdvisory } = await import("./updates.js");
+    await withDir(async (cacheDir) => {
+      const reg = counting({ latest: "0.2.0" });
+      const opts = { cacheDir, fetchImpl: reg.fetchImpl, now: () => t0 };
+      expect((await cachedCheckForUpdate({ ...opts, installed: installed("0.1.0") })).status).toBe(
+        "newer",
+      );
+      // After upgrading, the same cached evidence says current: no obsolete notice, no lookup.
+      const after = await cachedCheckForUpdate({ ...opts, installed: installed("0.2.0") });
+      expect(after.status).toBe("current");
+      expect(updateAdvisory(after)).toBeNull();
+      // Never a downgrade.
+      expect((await cachedCheckForUpdate({ ...opts, installed: installed("0.5.0") })).status).toBe(
+        "current",
+      );
+      expect(reg.calls).toHaveLength(1);
+    });
+  });
+
+  it("throttles failed lookups without caching them as up to date", async () => {
+    const { cachedCheckForUpdate, readCache, cacheFileName } = await import("./updatecache.js");
+    const nodeFs = await import("node:fs/promises");
+    await withDir(async (cacheDir) => {
+      let now = t0;
+      const down = counting(new Error("offline"));
+      const opts = { cacheDir, installed: installed("0.1.0"), now: () => now };
+      expect(await cachedCheckForUpdate({ ...opts, fetchImpl: down.fetchImpl })).toMatchObject({
+        status: "unknown",
+      });
+      const again = await cachedCheckForUpdate({ ...opts, fetchImpl: down.fetchImpl });
+      expect(again).toMatchObject({ status: "unknown", reason: expect.stringMatching(/failed/) });
+      expect(down.calls).toHaveLength(1);
+      const state = (await readCache(nodeFs, join(cacheDir, cacheFileName))).channels.latest;
+      expect(state.lastAttempt).toBeDefined();
+      expect(state.lastSuccess).toBeUndefined();
+      expect(state.available).toBeUndefined();
+      // An absent channel is a failure too; after 24 hours the lookup is retried.
+      now += day;
+      const up = counting({ next: "1.0.0-next.1" });
+      expect((await cachedCheckForUpdate({ ...opts, fetchImpl: up.fetchImpl })).status).toBe(
+        "unknown",
+      );
+      expect(up.calls).toHaveLength(1);
+    });
+  });
+
+  it("treats a corrupt or foreign cache as absent, never as up to date", async () => {
+    const { cachedCheckForUpdate, cacheFileName } = await import("./updatecache.js");
+    await withDir(async (cacheDir) => {
+      for (const content of [
+        "{not json",
+        JSON.stringify({ schemaVersion: 99, channels: { latest: { available: "0.1.0" } } }),
+        JSON.stringify({ schemaVersion: 1, channels: "x" }),
+      ]) {
+        await writeFile(join(cacheDir, cacheFileName), content);
+        const reg = counting({ latest: "0.2.0" });
+        expect(
+          await cachedCheckForUpdate({
+            cacheDir,
+            installed: installed("0.1.0"),
+            fetchImpl: reg.fetchImpl,
+            now: () => t0,
+          }),
+        ).toMatchObject({ status: "newer" });
+        expect(reg.calls).toHaveLength(1);
+      }
+    });
+  });
+
+  it("skips quietly, without hammering npm, when the cache cannot be written", async () => {
+    const { cachedCheckForUpdate } = await import("./updatecache.js");
+    const nodeFs = await import("node:fs/promises");
+    await withDir(async (cacheDir) => {
+      const denied = Object.assign(new Error("denied"), { code: "EACCES" });
+      const readOnly = { ...nodeFs, writeFile: async () => Promise.reject(denied) };
+      const reg = counting({ latest: "0.2.0" });
+      for (let i = 0; i < 3; i++)
+        expect(
+          await cachedCheckForUpdate({
+            cacheDir,
+            fs: readOnly as never,
+            installed: installed("0.1.0"),
+            fetchImpl: reg.fetchImpl,
+            now: () => t0,
+          }),
+        ).toMatchObject({ status: "unknown", reason: expect.stringMatching(/not writable/) });
+      expect(reg.calls).toEqual([]);
+      const noDir = { ...nodeFs, mkdir: async () => Promise.reject(denied) };
+      expect(
+        (
+          await cachedCheckForUpdate({
+            cacheDir,
+            fs: noDir as never,
+            installed: installed("0.1.0"),
+            fetchImpl: reg.fetchImpl,
+          })
+        ).status,
+      ).toBe("unknown");
+      // Renaming fails after the lock is held: the lookup is reported but not announced.
+      const noRename = { ...nodeFs, rename: async () => Promise.reject(denied) };
+      const result = await cachedCheckForUpdate({
+        cacheDir,
+        fs: noRename as never,
+        installed: installed("0.1.0"),
+        fetchImpl: reg.fetchImpl,
+        now: () => t0,
+      });
+      expect(result).toMatchObject({ status: "newer", notify: false });
+      expect(await readdir(cacheDir)).toEqual([]);
+    });
+  });
+
+  it("lets concurrent invocations share one lookup and one notice", async () => {
+    const { cachedCheckForUpdate } = await import("./updatecache.js");
+    const { updateAdvisory } = await import("./updates.js");
+    await withDir(async (cacheDir) => {
+      const reg = counting({ latest: "0.2.0" }, 50);
+      const results = await Promise.all(
+        Array.from({ length: 4 }, () =>
+          cachedCheckForUpdate({
+            cacheDir,
+            installed: installed("0.1.0"),
+            fetchImpl: reg.fetchImpl,
+            now: () => t0,
+          }),
+        ),
+      );
+      expect(reg.calls).toHaveLength(1);
+      expect(results.map(updateAdvisory).filter(Boolean)).toHaveLength(1);
+      expect((await readdir(cacheDir)).sort()).toEqual(["update-check.json"]);
+    });
+  });
+
+  it("breaks a stale lock but does not wait long behind a live one", async () => {
+    const { cachedCheckForUpdate, cacheFileName, lockWaitMs } = await import("./updatecache.js");
+    const { utimes } = await import("node:fs/promises");
+    await withDir(async (cacheDir) => {
+      const lock = join(cacheDir, `${cacheFileName}.lock`);
+      await writeFile(lock, "{}");
+      const reg = counting({ latest: "0.2.0" });
+      const opts = { cacheDir, installed: installed("0.1.0"), fetchImpl: reg.fetchImpl };
+      const started = Date.now();
+      expect(await cachedCheckForUpdate(opts)).toMatchObject({
+        status: "unknown",
+        reason: expect.stringMatching(/busy/),
+      });
+      expect(Date.now() - started).toBeLessThan(lockWaitMs + 500);
+      expect(reg.calls).toEqual([]);
+      const old = new Date(Date.now() - 60_000);
+      await utimes(lock, old, old);
+      expect((await cachedCheckForUpdate(opts)).status).toBe("newer");
+      expect(await readdir(cacheDir)).toEqual([cacheFileName]);
+    });
+  });
+
+  it("makes no cache or network access when skipped, and uses a per-user cache directory", async () => {
+    const { cachedCheckForUpdate, defaultCacheDir } = await import("./updatecache.js");
+    await withDir(async (cacheDir) => {
+      const reg = counting({ latest: "9.0.0" });
+      for (const c of [
+        { offline: true },
+        { optOut: true },
+        { installed: { version: "0.1.0", installed: false } },
+      ])
+        expect(
+          (
+            await cachedCheckForUpdate({
+              cacheDir,
+              installed: installed("0.1.0"),
+              fetchImpl: reg.fetchImpl,
+              ...c,
+            })
+          ).status,
+        ).toBe("skipped");
+      expect(reg.calls).toEqual([]);
+      expect(await readdir(cacheDir)).toEqual([]);
+    });
+    expect(defaultCacheDir()).toMatch(/github-triage/);
+    expect(defaultCacheDir().startsWith(process.cwd())).toBe(false);
+  });
+});
+
 describe("pr status: truncation and requested-reviewer matching", () => {
   const head = "a".repeat(40);
   const base = (o: Record<string, any> = {}) => ({
