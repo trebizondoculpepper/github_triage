@@ -5106,6 +5106,38 @@ describe("estimate N records a size label with provenance (#152)", () => {
     expect(t.json()).toMatchObject({ previous: ["S", "XL"], final: { sizes: ["M"] } });
     expect(t.names()).toEqual(["bug", "complexity:M"]);
   });
+  it("does not duplicate or talk over an assessment finished concurrently before the final read", async () => {
+    const record = (rationale: string) =>
+      provenanceComment({
+        schemaVersion: 2,
+        kind: "complexity-estimate",
+        storage: "labels",
+        size: "M",
+        previous: ["S"],
+        rationale,
+        assumptions: [],
+        references: [],
+        estimator: null,
+        revision: null,
+        guidanceVersion: 1,
+        recordedAt: "2026-11-13T00:00:00.000Z",
+      });
+    // The matching record appears on the third issue read (the final verification read).
+    const same = harness({
+      labels: ["complexity:S"],
+      concurrent: { afterQuery: 2, comment: record("few modules; bounded tests") },
+    });
+    expect(await same.call(...base)).toBe(0);
+    expect(same.json()).toMatchObject({ status: "unchanged", provenanceWritten: false });
+    expect(same.remote.comments).toHaveLength(1);
+    const other = harness({
+      labels: ["complexity:S"],
+      concurrent: { afterQuery: 2, comment: record("someone else's reasoning") },
+    });
+    expect(await other.call(...base)).toBe(2);
+    expect(other.json()).toMatchObject({ status: "conflict", provenanceWritten: false });
+    expect(other.remote.comments).toHaveLength(1);
+  });
   it("records only observed sizes when older provenance disagrees with the current label", async () => {
     // The label was changed by hand from S to M after an S estimate was recorded.
     const t = harness({ labels: ["complexity:M"] });

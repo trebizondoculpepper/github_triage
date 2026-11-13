@@ -521,12 +521,14 @@ export async function runEstimate(
       );
 
     const recorded = before.provenance;
-    const provenanceMatches =
-      recorded?.size === size &&
-      recorded.rationale === rationale &&
-      (recorded.estimator ?? null) === estimator &&
-      sameList(recorded.assumptions, assumptions) &&
-      sameList(recorded.references, references);
+    /** Whether a stored record is this same assessment (size, reasons and estimator). */
+    const isThisAssessment = (stored: typeof recorded) =>
+      stored?.size === size &&
+      stored.rationale === rationale &&
+      (stored.estimator ?? null) === estimator &&
+      sameList(stored.assumptions, assumptions) &&
+      sameList(stored.references, references);
+    const provenanceMatches = isThisAssessment(recorded);
     if (onlyTarget(before.sizes) && provenanceMatches) {
       // Nothing is written, so report the stored provenance (its real time and revision).
       result.provenance = recorded;
@@ -638,6 +640,25 @@ export async function runEstimate(
         String(result.recovery),
       );
       return await finish(final ? (failed.length ? "partial" : "conflict") : "unknown", 2);
+    }
+
+    // Another invocation may have finished an assessment between the pre-write check and this
+    // final read. A new record that is this same assessment means it is already recorded (do not
+    // duplicate it); a different one is a concurrent estimate this run must not talk over.
+    if (JSON.stringify(final.provenance ?? null) !== JSON.stringify(recorded ?? null)) {
+      if (isThisAssessment(final.provenance)) {
+        result.provenance = final.provenance;
+        result.provenanceWritten = false;
+        lines.push("Already recorded: a concurrent run completed this same assessment.");
+        return await finish("unchanged", 0);
+      }
+      result.provenanceWritten = false;
+      result.recovery = `Read the new estimate on #${number} and its rationale, then decide whether to estimate again.`;
+      lines.push(
+        `Conflict: another estimate was recorded on #${number} while this one was being written; no provenance comment was added.`,
+        String(result.recovery),
+      );
+      return await finish("conflict", 2);
     }
 
     const comment = await safely(
