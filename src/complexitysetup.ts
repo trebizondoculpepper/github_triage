@@ -223,6 +223,37 @@ const CREATE = `mutation($ownerId: ID!, $name: String!, $description: String!) {
 
 type Decision = { kind: "select"; fieldId: string } | { kind: "create" } | { kind: "none" };
 
+/**
+ * Why `--create` cannot proceed for this discovery, or null when it may. Shared with Ticket
+ * Doctor so it never recommends a creation that setup would refuse.
+ */
+export function createRefusal(
+  discovery: Discovery,
+): { code: string; message: string; recovery: string } | null {
+  if (discovery.status !== "available")
+    return {
+      code: "incomplete-discovery",
+      message: discovery.detail,
+      recovery: "Retry when the full field list can be read.",
+    };
+  if (discovery.canCreate !== true)
+    return {
+      code: "not-permitted",
+      message: `You are not verified as able to create issue fields for ${discovery.owner!.login}.`,
+      recovery: "Ask an owner/organization administrator to create it, then use --select FIELD_ID.",
+    };
+  const existing = discovery.fields.find((f) => f.name.toLowerCase() === "complexity");
+  if (existing)
+    return {
+      code: "exists",
+      message: `A field named "${existing.name}" already exists (${existing.id}; ${existing.reason}); not creating a duplicate.`,
+      recovery: existing.compatible
+        ? `github-triage setup complexity --select ${existing.id}`
+        : "Choose or fix a field in GitHub yourself; existing options and visibility are never changed by this tool.",
+    };
+  return null;
+}
+
 class SetupRefusal extends Error {
   constructor(
     readonly code: string,
@@ -353,27 +384,8 @@ export async function runSetup(
     }
 
     if (decision.kind === "create") {
-      if (discovery.status !== "available")
-        throw new SetupRefusal(
-          "incomplete-discovery",
-          discovery.detail,
-          "Retry when the full field list can be read.",
-        );
-      if (discovery.canCreate !== true)
-        throw new SetupRefusal(
-          "not-permitted",
-          `You are not verified as able to create issue fields for ${discovery.owner!.login}.`,
-          "Ask an owner/organization administrator to create it, then use --select FIELD_ID.",
-        );
-      const existing = discovery.fields.find((f) => f.name.toLowerCase() === "complexity");
-      if (existing)
-        throw new SetupRefusal(
-          "exists",
-          `A field named "${existing.name}" already exists (${existing.id}; ${existing.reason}); not creating a duplicate.`,
-          existing.compatible
-            ? `github-triage setup complexity --select ${existing.id}`
-            : "Choose or fix a field in GitHub yourself; existing options and visibility are never changed by this tool.",
-        );
+      const refusal = createRefusal(discovery);
+      if (refusal) throw new SetupRefusal(refusal.code, refusal.message, refusal.recovery);
       if (prompt) {
         const answer = await prompt(
           `${ownership(discovery)}\nCreate single-select field "Complexity" (XS..XXL) for ${discovery.owner!.login}? [y/N] `,
