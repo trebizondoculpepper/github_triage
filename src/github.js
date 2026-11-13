@@ -94,7 +94,7 @@ export async function locateIssue(repository, number, rest = ghRest) {
         ...base,
         state: "pull-request",
         detail: `#${number} is a pull request.`,
-        next: `github-triage pr ${number} --repo ${repository}`,
+        next: `gh pr view ${number} --repo ${repository}`,
       };
     return {
       ...base,
@@ -268,15 +268,26 @@ export async function collect(repository, options = {}, query = ghQuery, now = (
       ? nodes.filter((node) => Date.parse(node.updatedAt) >= Date.parse(cutoff))
       : nodes;
   };
+  const locate = options.locate ?? locateIssue;
+  /**
+   * For --issue N, a failed GraphQL read gets the read-only REST diagnosis. The failure itself
+   * is never transfer evidence: only REST's own answer decides, and "unknown" keeps the error.
+   */
+  const diagnoseFailure = async (error) => {
+    if (!options.issue) throw error;
+    const diagnosis = await locate(repository, options.issue);
+    if (diagnosis.state === "unknown") throw error;
+    throw new IssueUnavailable(diagnosis);
+  };
   const [issues, pullRequests] = await Promise.all([
     collection("issues", `${common} stateReason ${nativeFields}`, ",states:OPEN"),
     collection("pullRequests", prFields, ",states:OPEN"),
-  ]);
+  ]).catch(diagnoseFailure);
   const issueSource = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){${common} stateReason ${nativeFields}}}}`;
   if (options.issue && !issues.some((issue) => issue.number === options.issue)) {
-    const detail = (await request(issueSource, { number: options.issue })).issue;
-    if (!detail)
-      throw new IssueUnavailable(await (options.locate ?? locateIssue)(repository, options.issue));
+    const detail = (await request(issueSource, { number: options.issue }).catch(diagnoseFailure))
+      .issue;
+    if (!detail) throw new IssueUnavailable(await locate(repository, options.issue));
     issues.push(detail);
   }
   // All comments are available for semantic reconciliation, even if the briefing shows excerpts.

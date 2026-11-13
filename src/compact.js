@@ -13,6 +13,7 @@ export const ruleMetadata = new Map([
   ["ready-prerequisites-unverified", "dependencies"],
   ["blocker-explanation", "dependencies"],
   ["ready-unclaimed", "available"],
+  ["addressed-attention", "addressed"],
   ...[
     "native-evidence-unknown",
     "retired-blocker-label",
@@ -59,6 +60,11 @@ export function compactBriefing(snapshot, options, expanded) {
   const objects = [...snapshot.issues, ...snapshot.pullRequests];
   const byUrl = new Map(objects.map((item) => [item.url, item]));
   const isMine = (item) => !!options.agent && owners(item).includes(`agent:${options.agent}`);
+  // The addressed-attention rule itself is registered in briefing.js; here it only orders and
+  // keeps addressed items visible regardless of role, ownership or parking.
+  const labelNames = (item) => item.labels.nodes.map(({ name }) => name);
+  const isAddressed = (item) =>
+    !!options.agent && !!item && labelNames(item).includes(`attention:${options.agent}`);
   const linkedMine = (item) =>
     isMine(item) ||
     (item.closingIssuesReferences?.nodes ?? []).some((ref) =>
@@ -87,6 +93,7 @@ export function compactBriefing(snapshot, options, expanded) {
   const next = groups
     .filter(({ target, findings }) => {
       const item = byUrl.get(target);
+      if (isAddressed(item)) return true;
       return (
         !item?.labels.nodes.some(({ name }) => name === "status:parked") &&
         findings.some((f) => !["context", "hygiene"].includes(ruleMetadata.get(f.rule))) &&
@@ -98,20 +105,23 @@ export function compactBriefing(snapshot, options, expanded) {
     })
     .sort(
       (a, b) =>
+        Number(isAddressed(byUrl.get(b.target))) - Number(isAddressed(byUrl.get(a.target))) ||
         Number(linkedMine(byUrl.get(b.target))) - Number(linkedMine(byUrl.get(a.target))) ||
         b.findings[0].priority - a.findings[0].priority ||
         unblocks(byUrl.get(b.target)) - unblocks(byUrl.get(a.target)) ||
         a.target.localeCompare(b.target),
     );
   const sections = Object.fromEntries(
-    ["review", "available", "decisions", "dependencies", "hygiene", "context"].map((name) => [
-      name,
-      bound(
-        groups
-          .filter(({ findings }) => findings.some((f) => ruleMetadata.get(f.rule) === name))
-          .map(({ target }) => target),
-      ),
-    ]),
+    ["addressed", "review", "available", "decisions", "dependencies", "hygiene", "context"].map(
+      (name) => [
+        name,
+        bound(
+          groups
+            .filter(({ findings }) => findings.some((f) => ruleMetadata.get(f.rule) === name))
+            .map(({ target }) => target),
+        ),
+      ],
+    ),
   );
   sections.current = bound(
     objects
@@ -176,7 +186,9 @@ export function compactBriefing(snapshot, options, expanded) {
     subjects,
     changes: facts.changes,
     detail: facts.detail,
-    guidance: facts.guidance,
+    guidance: options.agent
+      ? facts.guidance
+      : `${facts.guidance} No --agent given: addressed attention and owned-work focus are unavailable (identity is never inferred from the GitHub login).`,
   };
 }
 export function compactText(report, maxChars = 10000) {

@@ -42,7 +42,7 @@ Read-only LLM action briefing. Requires authenticated gh and Node 20+.
   --cache PATH          Save full successful snapshot atomically
   --offline             Read explicit cache; no GitHub queries/checkpoint advancement
   --full                Expanded version-1 report
-  --agent NAME          Focus current work on explicit inbox owner
+  --agent NAME          Your identity: attention:NAME first, then agent:NAME work
   --max-chars N         Compact text budget (default 10000)
   --limit N             Next steps (default 5 compact, 10 expanded)
   --no-update-check     Skip the npm version check (also ${optOutEnv}=1)
