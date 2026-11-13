@@ -3913,3 +3913,117 @@ describe("bundled complexity guidance (#118)", () => {
     await expect(main(["estimate"], async () => {}, offline)).rejects.toThrow("Usage:");
   });
 });
+
+describe("config get/set/list/help commands (#117)", () => {
+  const root = "/repo";
+  const path = join(root, CONFIG_PATH);
+  function setup(
+    initial?: string,
+    remotes = "origin\thttps://github.com/owner/name.git (fetch)\n",
+  ) {
+    const files = new Map<string, string>(initial === undefined ? [] : [[path, initial]]);
+    const fs: ConfigFileSystem = {
+      readText: async (file) => files.get(file) ?? null,
+      writeText: async (file, text) => void files.set(file, text),
+      rename: async (from, to) => {
+        files.set(to, files.get(from)!);
+        files.delete(from);
+      },
+      remove: async (file) => void files.delete(file),
+      makeDirectory: async () => undefined,
+    };
+    const git: GitRunner = async (args) =>
+      args[0] === "rev-parse" ? `${root}\n` : args[0] === "remote" ? remotes : "";
+    const out: string[] = [];
+    const call = (...args: string[]) =>
+      main(["config", ...args, "--no-update-check"], async (t) => void out.push(t), {
+        collect: async () => {
+          throw new Error("no GitHub");
+        },
+        currentRepository: async () => {
+          throw new Error("no GitHub");
+        },
+        config: { fs, git, cwd: root },
+      });
+    return { files, out, call, json: () => JSON.parse(out.at(-1)!) };
+  }
+
+  it("gets effective defaults with provenance without creating the file", async () => {
+    const t = setup();
+    expect(await t.call("get", "complexity.enabled")).toBe(0);
+    expect(t.out[0]).toBe("complexity.enabled = true (default)\n");
+    expect(await t.call("get", "complexity.fieldId", "--json")).toBe(0);
+    expect(t.json()).toMatchObject({
+      schemaVersion: 1,
+      kind: "config-get",
+      repository: "owner/name",
+      key: "complexity.fieldId",
+      value: null,
+      source: "default",
+    });
+    expect(t.files.size).toBe(0);
+  });
+
+  it("sets through the service, is idempotent, and disabling keeps the field mapping", async () => {
+    const t = setup('{"schemaVersion":1,"complexity":{"fieldId":"PVTF_1"}}');
+    expect(await t.call("set", "complexity.enabled", "false", "--json")).toBe(0);
+    expect(t.json()).toMatchObject({ changed: true, value: false, source: "explicit" });
+    const written = JSON.parse(t.files.get(path)!);
+    expect(written.complexity).toEqual({ enabled: false, fieldId: "PVTF_1" });
+    expect(await t.call("set", "complexity.enabled", "false")).toBe(0);
+    expect(t.out.at(-1)).toContain("unchanged");
+    expect(await t.call("list", "--json")).toBe(0);
+    expect(t.json().settings).toEqual([
+      expect.objectContaining({ key: "complexity.enabled", value: false, source: "explicit" }),
+      expect.objectContaining({ key: "complexity.fieldId", value: "PVTF_1", source: "explicit" }),
+    ]);
+    expect(await t.call("list")).toBe(0);
+    expect(t.out.at(-1)).toContain("complexity.fieldId = PVTF_1 (explicit)");
+  });
+
+  it("refuses bad keys, values, scopes and syntax with recovery, as JSON or text", async () => {
+    const t = setup();
+    expect(await t.call("set", "complexity.enabled", "nope", "--json")).toBe(1);
+    expect(t.json()).toMatchObject({
+      kind: "config-error",
+      code: "invalid-value",
+      recovery: "github-triage config set complexity.enabled true|false",
+    });
+    expect(await t.call("get", "colour", "--json")).toBe(1);
+    expect(t.json()).toMatchObject({ code: "unknown-key" });
+    expect(t.json().recovery).toContain("complexity.enabled");
+    expect(await t.call("list", "--global", "--json")).toBe(1);
+    expect(t.json()).toMatchObject({ code: "unsupported-scope" });
+    await expect(t.call("set", "complexity.enabled")).rejects.toThrow(
+      /Usage: github-triage config/,
+    );
+    await expect(t.call("frobnicate")).rejects.toThrow(/Unknown config command/);
+    expect(t.files.size).toBe(0);
+  });
+
+  it("refuses a repository that does not match the checkout and malformed files untouched", async () => {
+    const t = setup("{oops");
+    expect(
+      await t.call("set", "complexity.enabled", "false", "--repo", "other/repo", "--json"),
+    ).toBe(1);
+    expect(t.json()).toMatchObject({ code: "repository-mismatch" });
+    expect(await t.call("set", "complexity.enabled", "false", "--json")).toBe(1);
+    expect(t.json()).toMatchObject({ code: "malformed" });
+    expect(t.files.get(path)).toBe("{oops");
+  });
+
+  it("explains keys, defaults and valid values in text and JSON help", async () => {
+    const t = setup();
+    expect(await t.call("help")).toBe(0);
+    expect(t.out[0]).toContain("complexity.enabled (boolean; default true; valid: true, false)");
+    expect(await t.call("help", "complexity.fieldId", "--json")).toBe(0);
+    expect(t.json()).toMatchObject({
+      kind: "config-help",
+      keys: [{ key: "complexity.fieldId", defaultValue: null }],
+    });
+    expect(await t.call("--help")).toBe(0);
+    const top: string[] = [];
+    await main(["--help", "--no-update-check"], async (x) => void top.push(x));
+    expect(top.join("")).toContain("config get KEY | set KEY VALUE | list | help [KEY]");
+  });
+});

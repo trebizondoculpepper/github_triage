@@ -26,6 +26,8 @@ import { briefing, textReport } from "./briefing.js";
 import { pickupOrders } from "./ranking.js";
 import type { PickupOrder } from "./ranking.js";
 import { complexityGuidanceJson, complexityGuidanceText } from "./complexity.js";
+import { runConfig } from "./configcli.js";
+import type { ConfigRuntime } from "./configcli.js";
 import type { GhRun } from "./dependencies.js";
 import type { Query } from "./github.js";
 import type { Snapshot } from "./types.js";
@@ -59,6 +61,8 @@ export interface Runtime {
   now?: () => Date;
   updateCheck?: typeof checkForUpdate;
   stderr?: (text: string) => void;
+  /** Filesystem, git and working directory for `config`; tests never touch the real checkout. */
+  config?: ConfigRuntime;
 }
 
 type Output = (text: string) => Promise<void>;
@@ -77,6 +81,8 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   who N [--stale-hours N]  Read-only: who is working on ticket N? Claims, PRs, activity,
                         handoff evidence and contradictions in one operation
   ticket-doctor [--stale-hours N] [--limit N]  Read-only consistency scan of all open tickets
+  config get KEY | set KEY VALUE | list | help [KEY]  Repository settings in
+                        .github/triage.json of this checkout (config help)
   --repo owner/name     Repository (default: current gh checkout)
   --json                Versioned structured output (from a checkout: npm run --silent triage)
   --issue N             Include full issue body/history, even if closed; diagnoses
@@ -101,7 +107,8 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   version               Show the installed version and the update check result
   --help                Show usage
 Exit: 0 complete; 2 incomplete evidence; 1 invalid arguments/API/cache failure.
-The briefing never changes GitHub; only deps add/remove do. Hints require inspection.
+The briefing never changes GitHub; only deps add/remove, claim and needs-human do;
+config set changes only the local .github/triage.json. Hints require inspection.
 `;
 export const depsHelp = `Usage: github-triage deps N [--tree] [--json] [--repo owner/name]
        github-triage deps add N --on M [--on K] --note WHY [--dry-run] [--json]
@@ -384,7 +391,7 @@ export async function main(
     return 0;
   }
   // Help is instant; it should not wait on the network, so it is not an eligible invocation.
-  const eligible = !rest.includes("--help");
+  const eligible = !rest.includes("--help") && !(rest[0] === "config" && rest[1] === "help");
   const pending = eligible
     ? Promise.resolve()
         .then(() => check({ offline: rest.includes("--offline"), optOut }))
@@ -402,6 +409,7 @@ export async function main(
 
 /** The command itself; `main` adds the version check around it. */
 async function run(args: string[], output: Output, runtime: Runtime): Promise<number> {
+  if (args[0] === "config") return runConfig(args.slice(1), output, runtime.config);
   if (args[0] === "ticket-doctor") {
     const { values } = parseArgs({
       args: args.slice(1),
