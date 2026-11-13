@@ -35,20 +35,37 @@ export interface FileIdentity {
   inode?: { dev: number; ino: number };
 }
 
-/** Resolve `path` absolutely, through symlinks of the file or its existing parent directory. */
-export async function fileIdentity(path: string): Promise<FileIdentity> {
+/**
+ * Resolve `path` absolutely, through symlinks of the file or of its nearest existing ancestor.
+ * When the file does not exist, the nearest existing ancestor is realpath-ed and the missing
+ * components (already normalised by `resolve`) are re-appended, so two paths that differ only by
+ * a symlinked ancestor above a missing directory still compare equal.
+ */
+export async function fileIdentity(
+  path: string,
+  realpathOf: (path: string) => Promise<string> = realpath,
+): Promise<FileIdentity> {
   const resolved = resolve(path);
   let real = resolved;
   let inode: FileIdentity["inode"];
   try {
-    real = await realpath(resolved);
+    real = await realpathOf(resolved);
     const info = await stat(real);
     inode = { dev: info.dev, ino: info.ino };
   } catch {
-    try {
-      real = join(await realpath(dirname(resolved)), basename(resolved));
-    } catch {
-      // Neither the file nor its parent exists; the resolved path is the best identity.
+    const missing: string[] = [];
+    let ancestor = resolved;
+    for (;;) {
+      const parent = dirname(ancestor);
+      missing.unshift(basename(ancestor));
+      if (parent === ancestor) break;
+      ancestor = parent;
+      try {
+        real = join(await realpathOf(ancestor), ...missing);
+        break;
+      } catch {
+        // Keep walking up to the nearest existing ancestor.
+      }
     }
   }
   return { resolved, real, inode };

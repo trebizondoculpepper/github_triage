@@ -1,6 +1,6 @@
-import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 import { catchUp, catchUpJson, catchUpText } from "./catchup.js";
 import type { CatchUpReport } from "./catchup.js";
@@ -1254,6 +1254,40 @@ describe("briefing command: CLI, checkpoint and offline cache (#170)", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it("resolves a symlinked ancestor above a missing directory", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "briefing-identity-"));
+    try {
+      await mkdir(join(dir, "real"));
+      try {
+        await symlink(join(dir, "real"), join(dir, "link"), "dir");
+      } catch {
+        return; // Windows without symlink privilege.
+      }
+      const viaLink = await fileIdentity(join(dir, "link", "new", "state.json"));
+      const direct = await fileIdentity(join(dir, "real", "new", "state.json"));
+      expect(sameDestination(viaLink, direct)).toBe(true);
+      const dotted = await fileIdentity(join(dir, "link", "new", ".", "x", "..", "state.json"));
+      expect(sameDestination(dotted, direct)).toBe(true);
+      const other = await fileIdentity(join(dir, "real", "other", "state.json"));
+      expect(sameDestination(viaLink, other)).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("walks up to the nearest existing ancestor through the realpath boundary", async () => {
+    const root = resolve("/");
+    const realpathOf = async (path: string): Promise<string> => {
+      if (path === join(root, "work", "link")) return join(root, "work", "real");
+      if (path === join(root, "work") || path === root) return path;
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    };
+    const viaLink = await fileIdentity(join(root, "work", "link", "new", "state.json"), realpathOf);
+    const direct = await fileIdentity(join(root, "work", "real", "new", "state.json"), realpathOf);
+    expect(viaLink.real).toBe(join(root, "work", "real", "new", "state.json"));
+    expect(sameDestination(viaLink, direct)).toBe(true);
   });
 
   it("allows distinct --cache and --checkpoint files", async () => {
