@@ -1728,5 +1728,9 @@ describe("explicit publication helpers (#79)", () => {
     expect(validate).toBeLessThan(workflow.indexOf("npm ci"));
     expect(workflow).toContain('"$GITHUB_SHA" != "$SHA"');
     expect(workflow).toContain("next:main|latest:release");
+    // A queued request re-checks the live branch head right before publishing.
+    const live = workflow.indexOf('git ls-remote origin "refs/heads/$GITHUB_REF_NAME"');
+    expect(live).toBeGreaterThan(0);
+    expect(live).toBeLessThan(workflow.indexOf("npm publish --provenance"));
   });
 });

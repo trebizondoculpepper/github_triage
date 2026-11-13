@@ -86,6 +86,13 @@ jobs:
         run: |
           # The registry's read view can lag a publication by a minute or two (#57). If npm
           # reports the chosen prerelease as taken, move to the next one; never bump `latest`.
+          # The request may have waited in the queue: re-check the live branch head immediately
+          # before publishing, and refuse if it moved, so an outdated commit is never published.
+          live=$(git ls-remote origin "refs/heads/$GITHUB_REF_NAME" | cut -f1)
+          if [ "$live" != "$SHA" ]; then
+            echo "::error::$GITHUB_REF_NAME moved to $live while this request for $SHA was queued. Nothing was published; make a new explicit request."
+            exit 1
+          fi
           for attempt in 1 2 3 4 5; do
             npm version "$VERSION" --no-git-tag-version --allow-same-version
             npm pkg set gitHead="$SHA"
