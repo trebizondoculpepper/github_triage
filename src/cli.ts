@@ -60,7 +60,7 @@ type Output = (text: string) => Promise<void>;
 
 export const help = `Usage: github-triage [options]
        (from a source checkout: npm run triage -- [options])
-Read-only LLM action briefing. Requires authenticated gh and Node 20+.
+Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   deps N [--tree]       Read native upstream/downstream dependencies (deps --help)
   deps add|remove N --on M --note WHY [--dry-run]  Change native dependencies
   claim N --agent NAME [--branch B] [--platform P] [--dry-run]  Claim an eligible ticket

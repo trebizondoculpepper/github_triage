@@ -4,7 +4,7 @@ Status: packaging and trusted publishing are implemented, and since #79 **public
 
 ## Purpose and package
 
-Distribute `@trebizondoculpepper/github-triage`, executable `github-triage`, as one global CLI installation serving multiple project checkouts. Project identity remains local. Runtime requires Node 20+ and authenticated GitHub CLI for live queries.
+Distribute `@trebizondoculpepper/github-triage`, executable `github-triage`, as one global CLI installation serving multiple project checkouts. Project identity remains local. Runtime requires Node 26+ (current LTS; an install does not upgrade Node) and authenticated GitHub CLI for live queries.
 
 ```sh
 npm install -g @trebizondoculpepper/github-triage

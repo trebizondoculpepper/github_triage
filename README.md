@@ -10,7 +10,7 @@ Repeatedly searching issues, PRs, review feedback and dependencies costs agents 
 
 ## Get started
 
-Requires Node.js 20+ and an authenticated [GitHub CLI](https://cli.github.com/).
+Requires Node.js 26+ (the current LTS) and an authenticated [GitHub CLI](https://cli.github.com/).
 
 Install once globally, then use it from any project checkout:
 
@@ -41,7 +41,7 @@ See the [usage guide](doc/usage.md) for ticket intake, dependencies, catch-up, c
 
 ## Supported runtimes
 
-The CLI runs on Node.js 20 or later. CI tests it with Node.js 20, 22 and 24 on Ubuntu, macOS and Windows, using `npm ci` and the committed lockfile. Development tooling (Vite+ checks, tests and build) needs Node.js 22 or later, so the Node 20 jobs run the tooling on Node 22 and then smoke-test the built and source CLI on Node 20. Every job runs the Vite+ checks, the test suite, the build, the smoke tests and `npm run package-test`, which packs the real npm archive, checks its contents, installs it into a clean consumer and runs the installed command. Line endings are LF on every platform (`.gitattributes`). One test fakes `gh` with a POSIX shell script and is skipped on Windows. On Windows, `npm run smoke` covers the same ground: it makes `gh` unreachable to exercise the failure path and uses offline fixtures for the success and incomplete-evidence exit codes.
+The CLI and its development tooling target the current Node.js LTS, which is Node.js 26 as of 2026-11-13 ([runtime policy](doc/design/runtime.md)); `package.json` `engines` declares `>=26`. A global npm install or `npx` uses whatever Node is already installed and does not upgrade it, so upgrade Node first if `node --version` reports an older major. The minimum is not a claim that later majors have been tested; the baseline is updated deliberately when the LTS changes. CI tests Node.js 26 on Ubuntu, macOS and Windows, using `npm ci` and the committed lockfile. Every job runs the Vite+ checks, the test suite, the build, the smoke tests and `npm run package-test`, which packs the real npm archive, checks its contents, installs it into a clean consumer and runs the installed command. Line endings are LF on every platform (`.gitattributes`). One test fakes `gh` with a POSIX shell script and is skipped on Windows. On Windows, `npm run smoke` covers the same ground: it makes `gh` unreachable to exercise the failure path and uses offline fixtures for the success and incomplete-evidence exit codes.
 
 ## Development
 
@@ -55,7 +55,7 @@ node dist/cli.mjs --help
 npm run smoke    # credential-free exit-code smoke test of dist/cli.mjs
 ```
 
-Vite+ owns formatting, linting, type checking, testing, packaging and staged-file hooks. Runtime uses only Node built-ins and `gh`: no SDK, token handling or frontend. Source is strict TypeScript; `npm run triage` runs it through the `tsx` devDependency (Node 20 cannot execute `.ts`), while consumers run the built `dist/cli.mjs`. Tests use fixtures and injected boundaries, not live GitHub credentials.
+Vite+ owns formatting, linting, type checking, testing, packaging and staged-file hooks. Runtime uses only Node built-ins and `gh`: no SDK, token handling or frontend. Source is strict TypeScript; `npm run triage` runs it through the `tsx` devDependency for consistent module resolution, while consumers run the built `dist/cli.mjs`. Tests use fixtures and injected boundaries, not live GitHub credentials.
 
 Start with [HANDOFF.md](HANDOFF.md) for transferred issues, provenance, verified behavior and unfinished work. The [CLI contract](doc/github-triage-cli.md) and [dependency design](doc/issue-dependencies.md) describe the design inherited from the original repository. [npm releases](doc/npm-releases.md) records release behavior and owner setup. [CONTRIBUTING.md](CONTRIBUTING.md) covers contributions.
 
