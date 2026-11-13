@@ -100,5 +100,5 @@ export type Action = {
   reason: string;
   next: string;
   evidence: string[];
-  uncertainty: "factual" | "candidate";
+  uncertainty: "factual" | "candidate" | "unknown";
 };

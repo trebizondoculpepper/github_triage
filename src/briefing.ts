@@ -22,6 +22,11 @@ export const workflow = {
     "blocked:testing",
     "blocked:credential",
   ],
+  // Explicit, agent-maintained designer markers (#40); never inferred from chronology.
+  designMarkers: {
+    "design:decision-needed": "design-decision-needed",
+    "design:documentation-needed": "design-documentation-needed",
+  },
   // Manual pickup-order overrides (#43). Ordering only: never eligibility, claims or authority.
   urgency: { high: "urgency:high", low: "urgency:low" },
   ownerPrefix: "agent:",
@@ -262,6 +267,30 @@ analysisRules.set("addressed-attention", ({ issues, prs, viewer }) =>
           );
         })
     : [],
+);
+// Decision needed versus agreed-but-undocumented (#40, doc/design/briefings.md). Both markers
+// may be valid together for different parts of a ticket. The reason is the latest comment that
+// names the marker, as a source link; without one the reason is unknown, never guessed.
+analysisRules.set("design-markers", ({ issues }) =>
+  issues.flatMap((issue) =>
+    Object.entries(workflow.designMarkers)
+      .filter(([label]) => labels(issue).includes(label))
+      .map(([label, rule]) => {
+        const source = issue.comments.nodes.filter((c) => c.body?.includes(label)).at(-1);
+        const decision = rule === "design-decision-needed";
+        return action(
+          rule,
+          issue,
+          decision ? 72 : 68,
+          `${label}: ${source ? `"${excerpt(source.body, 160)}"` : "no comment names this marker, so the reason is unknown"}`,
+          decision
+            ? "Settle the outstanding question or choice with the owner, record the answer on the ticket, then update the marker."
+            : "Record the agreed decision in the design documents, then remove the marker; restore decision-needed if a question remains.",
+          source ? "factual" : "unknown",
+          source ? [issue.url, source.url] : [issue.url],
+        );
+      }),
+  ),
 );
 analysisRules.set("attention", ({ issues }) =>
   issues.flatMap((issue) => {

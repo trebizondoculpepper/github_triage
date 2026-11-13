@@ -2759,6 +2759,48 @@ describe("post-write ownership check with incomplete labels", () => {
   });
 });
 
+describe("designer groups: decision needed vs agreed-needs-documentation (#40)", () => {
+  it("groups explicit markers separately with source reasons; unknown without one", async () => {
+    const { compactBriefing, compactText } = await import("./compact.js");
+    const decide = issue(40, ["design:decision-needed"]);
+    decide.comments = page([
+      {
+        body: "design:decision-needed: which flag name?",
+        url: `${decide.url}#c1`,
+        author: null,
+        createdAt: time,
+      },
+    ]);
+    const record = issue(41, ["design:documentation-needed"]);
+    const both = issue(42, ["design:decision-needed", "design:documentation-needed"]);
+    const data = snapshot([decide, record, both], []);
+    const expanded = briefing(data, { limit: 100 }, new Date(time));
+    const rules = (n: number) =>
+      expanded.actions.items
+        .filter((a) => a.target.endsWith(`/${n}`) && a.rule.startsWith("design-"))
+        .map((a) => `${a.uncertainty}:${a.rule}`);
+    expect(rules(40)).toEqual(["factual:design-decision-needed"]);
+    expect(
+      expanded.actions.items.find(
+        (a) => a.rule === "design-decision-needed" && a.target === decide.url,
+      )!.evidence,
+    ).toContain(`${decide.url}#c1`);
+    expect(rules(41)).toEqual(["unknown:design-documentation-needed"]);
+    expect(rules(42).sort()).toEqual([
+      "unknown:design-decision-needed",
+      "unknown:design-documentation-needed",
+    ]);
+    const compact = compactBriefing(data, { limit: 10 }, expanded);
+    expect(compact.sections["decision-needed"].items).toEqual([decide.url, both.url]);
+    expect(compact.sections["documentation-needed"].items).toEqual([record.url, both.url]);
+    const text = compactText(compact, 50000);
+    expect(text).toContain("DECISION NEEDED (2;");
+    expect(text).toContain("AGREED, NEEDS DOCUMENTATION (2;");
+    expect(text).toContain(`which flag name?" Source: ${decide.url}#c1 Next:`);
+    expect(text.match(/Source: /g)).toHaveLength(1);
+  });
+});
+
 describe("pr status: formal reviews and in-progress reviews", () => {
   it("counts a formal review by the requested service and blocks while Codex is running", async () => {
     const { prStatus } = await import("./prstatus.js");

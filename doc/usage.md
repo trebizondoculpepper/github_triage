@@ -2,6 +2,10 @@
 
 The installed CLI needs Node 26+ (the current LTS) and authenticated `gh`. Check the existing session with `gh auth status`; the tool reuses it rather than handling tokens. For source development use Node 26+ too, `npm ci`, and prefix the examples below with `npm run --silent triage --` in place of `github-triage`.
 
+## Designer groups
+
+Two explicit, agent-maintained markers form separate briefing groups: `design:decision-needed` (DECISION NEEDED: an outstanding question or choice) and `design:documentation-needed` (AGREED, NEEDS DOCUMENTATION: a decision already reached that still has to be recorded). Both may be present for different parts of one ticket. The reason shown is the latest comment that names the marker, with its link; with no such comment the reason is reported as unknown. Nothing is inferred from timestamps or authorship, and neither marker is an approval gate.
+
 ## Manual urgency
 
 `urgency:high` and `urgency:low` override the calculated order of general pickup only: high first, then unlabelled, then low, and within each band the usual impact order. The briefing says when an override moved a ticket. Both labels together are reported as a conflict and ordered as unspecified. Urgency never changes eligibility, claims or authority, and explicit addressed attention stays ahead of it.

@@ -8,6 +8,8 @@ export type RuleGroup =
   | "hygiene"
   | "context"
   | "decisions"
+  | "decision-needed"
+  | "documentation-needed"
   | "dependencies"
   | "available"
   | "addressed"
@@ -18,6 +20,8 @@ export const ruleMetadata = new Map<string, RuleGroup>([
   ),
   ["question-candidate", "context"],
   ["attention-label", "decisions"],
+  ["design-decision-needed", "decision-needed"],
+  ["design-documentation-needed", "documentation-needed"],
   ["prerequisites-closed", "dependencies"],
   ["ready-prerequisites-unverified", "dependencies"],
   ["blocker-explanation", "dependencies"],
@@ -160,16 +164,24 @@ export function compactBriefing(
         a.target.localeCompare(b.target),
     );
   const sections: Record<string, Bounded<string>> = Object.fromEntries(
-    ["addressed", "review", "available", "decisions", "dependencies", "hygiene", "context"].map(
-      (name) => [
-        name,
-        bound(
-          groups
-            .filter(({ findings }) => findings.some((f) => ruleMetadata.get(f.rule) === name))
-            .map(({ target }) => target),
-        ),
-      ],
-    ),
+    [
+      "addressed",
+      "review",
+      "available",
+      "decision-needed",
+      "documentation-needed",
+      "decisions",
+      "dependencies",
+      "hygiene",
+      "context",
+    ].map((name) => [
+      name,
+      bound(
+        groups
+          .filter(({ findings }) => findings.some((f) => ruleMetadata.get(f.rule) === name))
+          .map(({ target }) => target),
+      ),
+    ]),
   );
   sections.current = bound(
     objects
@@ -260,12 +272,17 @@ export function compactText(report: CompactBriefing, maxChars = 10000): string {
       }
       shown.add(url);
       rows.push(
-        `- #${s.number} ${s.title} ${s.owners.join(", ")}\n  ${s.findings.map((f) => `[${f.uncertainty}] ${f.reason} Next: ${f.next}`).join(" ")}\n  ${url}${s.pullRequest ? `\n  Head ${s.pullRequest.head}; ${s.pullRequest.checks.map((c) => `${c.name}:${c.outcome}`).join(", ")}; ${s.pullRequest.unresolvedThreads} unresolved threads` : ""}\n  ${s.source.chronology}\n  ${s.detailCommand}`,
+        `- #${s.number} ${s.title} ${s.owners.join(", ")}\n  ${s.findings.map((f) => `[${f.uncertainty}] ${f.reason}${markerSource(f)} Next: ${f.next}`).join(" ")}\n  ${url}${s.pullRequest ? `\n  Head ${s.pullRequest.head}; ${s.pullRequest.checks.map((c) => `${c.name}:${c.outcome}`).join(", ")}; ${s.pullRequest.unresolvedThreads} unresolved threads` : ""}\n  ${s.source.chronology}\n  ${s.detailCommand}`,
       );
     }
   };
   add("NEXT STEPS", report.actions);
-  for (const [name, section] of Object.entries(report.sections)) add(name.toUpperCase(), section);
+  const titles: Record<string, string> = {
+    "decision-needed": "DECISION NEEDED",
+    "documentation-needed": "AGREED, NEEDS DOCUMENTATION",
+  };
+  for (const [name, section] of Object.entries(report.sections))
+    add(titles[name] ?? name.toUpperCase(), section);
   // Warnings are always shown, but bounded so they cannot exhaust the text budget alone;
   // JSON output keeps the full list.
   const warnings = report.completeness.warnings;
@@ -298,4 +315,15 @@ function defined<T>(value: T | undefined): T {
   // Narrowly justified: the runtime failure mode for an impossible miss is preserved
   // deliberately rather than invented; callers only pass lookups of known keys.
   return value as T;
+}
+
+/** Designer-marker findings (#40) cite the comment that supplied their reason, beyond the target. */
+const designMarkerRules: ReadonlySet<string> = new Set([
+  "design-decision-needed",
+  "design-documentation-needed",
+]);
+function markerSource(finding: Action): string {
+  if (!designMarkerRules.has(finding.rule)) return "";
+  const source = finding.evidence.slice(1).at(-1);
+  return source ? ` Source: ${source}` : "";
 }
