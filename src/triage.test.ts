@@ -1513,3 +1513,125 @@ describe("team view (#41, doc/design/diagnostics.md)", () => {
     }
   });
 });
+
+describe("version check (#51, doc/design/updates.md)", () => {
+  const installed = (version: string | null, isInstalled = true) => ({
+    version,
+    installed: isInstalled,
+  });
+  const registry = (tags: Record<string, string> | Error, seen: string[] = []) =>
+    (async (url: string) => {
+      seen.push(String(url));
+      if (tags instanceof Error) throw tags;
+      return { ok: true, status: 200, json: async () => tags } as Response;
+    }) as unknown as typeof fetch;
+  it("advises only when npm's matching channel is newer, never a downgrade", async () => {
+    const { checkForUpdate, updateAdvisory } = await import("./updates.js");
+    const tags = { latest: "0.2.0", next: "0.2.3-next.1" };
+    const stable = await checkForUpdate({
+      installed: installed("0.1.0"),
+      fetchImpl: registry(tags),
+    });
+    expect(stable).toMatchObject({ status: "newer", available: "0.2.0", channel: "latest" });
+    expect(updateAdvisory(stable)).toBe(
+      "github-triage 0.2.0 is available (installed 0.1.0). Update with: npm install -g @trebizondoculpepper/github-triage",
+    );
+    const pre = await checkForUpdate({
+      installed: installed("0.2.1-next.1"),
+      fetchImpl: registry(tags),
+    });
+    expect(pre).toMatchObject({
+      status: "newer",
+      channel: "next",
+      command: expect.stringMatching(/@next$/),
+    });
+    for (const v of ["0.2.0", "0.3.0"])
+      expect(
+        updateAdvisory(
+          await checkForUpdate({ installed: installed(v), fetchImpl: registry(tags) }),
+        ),
+      ).toBeNull();
+  });
+  it("skips without any network call for checkouts, unknown versions, offline and opt-out", async () => {
+    const { checkForUpdate } = await import("./updates.js");
+    const seen: string[] = [];
+    const cases = [
+      { installed: installed("0.1.0", false) },
+      { installed: installed(null) },
+      { installed: installed("1.0.0-beta.1") },
+      { installed: installed("0.1.0"), offline: true },
+      { installed: installed("0.1.0"), optOut: true },
+    ];
+    for (const c of cases)
+      expect(
+        (await checkForUpdate({ ...c, fetchImpl: registry({ latest: "9.0.0" }, seen) })).status,
+      ).toBe("skipped");
+    expect(seen).toEqual([]);
+  });
+  it("treats registry failure as unknown, never as up to date, and sends only the package name", async () => {
+    const { checkForUpdate } = await import("./updates.js");
+    const timeout = Object.assign(new Error("t"), { name: "TimeoutError" });
+    expect(
+      await checkForUpdate({ installed: installed("0.1.0"), fetchImpl: registry(timeout) }),
+    ).toMatchObject({
+      status: "unknown",
+      reason: expect.stringMatching(/did not answer/),
+    });
+    expect(
+      (await checkForUpdate({ installed: installed("0.1.0"), fetchImpl: registry({}) })).status,
+    ).toBe("unknown");
+    const seen: string[] = [];
+    await checkForUpdate({
+      installed: installed("0.1.0"),
+      fetchImpl: registry({ latest: "0.1.0" }, seen),
+    });
+    expect(seen).toEqual([
+      "https://registry.npmjs.org/-/package/@trebizondoculpepper%2fgithub-triage/dist-tags",
+    ]);
+  });
+  it("prints the advisory on stderr after the command, keeping JSON stdout valid", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "triage-version-"));
+    try {
+      const cache = join(dir, "cache.json");
+      await atomicJson(cache, snapshot([issue()], []));
+      let out = "";
+      const err: string[] = [];
+      const runtime = {
+        collect: async () => {
+          throw new Error("offline only");
+        },
+        currentRepository: async () => repo,
+        stderr: (t: string) => void err.push(t),
+        updateCheck: async () => ({
+          status: "newer",
+          installed: "0.1.0",
+          available: "0.2.0",
+          channel: "latest",
+          command: "npm install -g @trebizondoculpepper/github-triage",
+        }),
+      };
+      expect(
+        await main(["--offline", "--cache", cache, "--json"], async (t) => void (out = t), runtime),
+      ).toBe(0);
+      expect(() => JSON.parse(out)).not.toThrow();
+      expect(err.join("")).toMatch(/^github-triage 0\.2\.0 is available/);
+      // Help does not wait on the network.
+      let checked = 0;
+      await main(["--help"], async () => {}, {
+        ...runtime,
+        updateCheck: (async () => (checked++, { status: "current" })) as never,
+      });
+      expect(checked).toBe(0);
+      // --no-update-check is consumed before the command parses its own options.
+      expect(
+        await main(
+          ["--no-update-check", "--offline", "--cache", cache, "--json"],
+          async () => {},
+          runtime,
+        ),
+      ).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true });
+    }
+  });
+});
