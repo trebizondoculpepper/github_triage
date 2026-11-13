@@ -11,7 +11,7 @@ import { parseArgs } from "node:util";
 import { abbreviate, catchUp, catchUpJson, catchUpLimits, catchUpText } from "./catchup.js";
 import type { CatchUpReport } from "./catchup.js";
 import { parseDuration, parseSince, resolveWindow } from "./changes.js";
-import type { ComparisonWindow } from "./changes.js";
+import type { ComparisonWindow, WindowRequest } from "./changes.js";
 import type { collect } from "./github.js";
 import type { Snapshot } from "./types.js";
 
@@ -82,6 +82,33 @@ export function sameDestination(a: FileIdentity, b: FileIdentity): boolean {
     a.inode.ino === b.inode.ino
   );
 }
+/** The requested window cannot be resolved (e.g. it starts after T0); nothing was collected. */
+export class WindowRefusal extends Error {}
+
+/**
+ * Resolve one anchor T0 and collect a live snapshot with that change window. Shared by the CLI
+ * and the read-only MCP briefing mode (#171); a future start is rejected before collection.
+ */
+export async function collectBriefing(
+  collector: typeof collect,
+  repository: string,
+  request: WindowRequest,
+  now: () => Date,
+  signal?: AbortSignal,
+): Promise<{ window: ComparisonWindow; snapshot: Snapshot }> {
+  let window: ComparisonWindow;
+  try {
+    window = resolveWindow(request, now);
+  } catch (error) {
+    throw new WindowRefusal(error instanceof Error ? error.message : String(error));
+  }
+  const snapshot = await collector(repository, {
+    changeWindow: window,
+    ...(signal ? { signal } : {}),
+  });
+  return { window, snapshot };
+}
+
 export interface BriefingRuntime {
   collect: typeof collect;
   currentRepository: () => Promise<string>;
@@ -291,7 +318,6 @@ async function deliver(
       );
   }
   let snapshot: Snapshot;
-  let window: ComparisonWindow | null = null;
   if (options.offline) {
     const cache = options.cache!;
     try {
@@ -323,8 +349,12 @@ async function deliver(
       }
     }
     // One anchor T0 before collection; a future checkpoint or --since is rejected here.
-    window = resolveWindow({ last: options.last, since: options.since, checkpoint }, now);
-    snapshot = await runtime.collect(repository, { changeWindow: window });
+    ({ snapshot } = await collectBriefing(
+      runtime.collect,
+      repository,
+      { last: options.last, since: options.since, checkpoint },
+      now,
+    ));
     if (options.cache) {
       try {
         await files.atomicJson(options.cache, snapshot);

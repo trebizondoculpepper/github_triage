@@ -14,6 +14,9 @@ import * as z from "zod";
 import { collect, currentRepository } from "./github.js";
 import { dependencyReport } from "./dependencies.js";
 import { readBriefing, readDependencies } from "./service.js";
+import { catchUp, catchUpLimits, catchUpText } from "./catchup.js";
+import { collectBriefing, WindowRefusal } from "./catchupcli.js";
+import { parseDuration } from "./changes.js";
 import {
   eventsReport,
   eventsText,
@@ -143,13 +146,59 @@ const since = z
   .refine((text) => Number.isFinite(Date.parse(text)), "since must be a valid timestamp")
   .optional();
 
-export const briefingInput = z.strictObject({
-  repo,
-  agent,
-  since,
-  limit: z.number().int().min(1).max(100).default(5),
-  maxChars,
-});
+const last = z
+  .string()
+  .refine((text) => {
+    try {
+      parseDuration(text);
+      return true;
+    } catch {
+      return false;
+    }
+  }, "last must be a positive integer followed by m, h or d, for example 24h")
+  .optional();
+
+/**
+ * `mode` selects the action briefing (default, unchanged) or the read-only repository catch-up
+ * (#171, doc/design/briefing-mode.md slice 4). `last` belongs to briefing mode only, and at most
+ * one of `since`/`last` may be given. No checkpoint, cache, file-path or offline input exists.
+ */
+export const briefingInput = z
+  .strictObject({
+    repo,
+    agent,
+    mode: z.enum(["actions", "briefing"]).default("actions"),
+    since,
+    last,
+    limit: z
+      .number()
+      .int()
+      .min(catchUpLimits.limit.min)
+      .max(catchUpLimits.limit.max)
+      .default(catchUpLimits.limit.default),
+    maxChars,
+  })
+  .superRefine((args, ctx) => {
+    if (args.mode === "actions" && args.last !== undefined)
+      ctx.addIssue({
+        code: "custom",
+        path: ["last"],
+        message: 'last applies only to mode "briefing"; use since for an action briefing',
+      });
+    if (args.since !== undefined && args.last !== undefined)
+      ctx.addIssue({
+        code: "custom",
+        path: ["last"],
+        message: "Choose one window source: since or last, not both",
+      });
+  });
+
+/** MCP never advances a checkpoint; the report says so instead of offering a candidate. */
+export const mcpCheckpointPolicy = {
+  policy:
+    "Read-only MCP briefing: no checkpoint is read or advanced. Use the CLI with --checkpoint PATH to keep a cursor.",
+  candidate: null,
+} as const;
 export const issueInput = z.strictObject({ number, repo, agent, maxChars });
 export const eventsInput = z.strictObject({
   cursor: z.string().min(1).max(200).optional(),
@@ -173,7 +222,7 @@ const identitySource = z.enum([
 /** Versioned MCP envelope; `result` is the unchanged versioned CLI JSON. */
 export const envelope = z.object({
   schemaVersion: z.literal(1),
-  kind: z.enum(["briefing", "issue", "dependencies", "events"]),
+  kind: z.enum(["briefing", "repository-briefing", "issue", "dependencies", "events"]),
   status: z.enum(["complete", "incomplete", "error"]),
   selection: z.object({
     repository: z.string().nullable(),
@@ -203,6 +252,8 @@ const failures = {
     "No repository selected. Pass repo as owner/name, or start the server with --repo or --project.",
   "collection-failed":
     "GitHub evidence could not be collected. Check gh authentication and repository access, then retry.",
+  "invalid-window":
+    "The requested window starts after the collection start. Pass an earlier since, or a last duration such as 24h.",
   cancelled: "The request was cancelled before collection finished; no result is reported.",
 } as const;
 type FailureCode = keyof typeof failures;
@@ -442,28 +493,58 @@ export function createServer(
     {
       title: "Triage briefing",
       description:
-        "Evidence-linked action briefing for a GitHub repository: what needs attention and what to pick up next. Call at the start of work or with since to catch up.",
+        'Evidence-linked action briefing for a GitHub repository: what needs attention and what to pick up next. Call at the start of work or with since to catch up. mode "briefing" returns the repository-wide what-changed report for a window (since, or last such as 24h; default last 24h); it never reads or advances a checkpoint.',
       inputSchema: briefingInput,
       outputSchema: envelope,
       annotations,
     },
     async (args, ctx) =>
-      call("briefing", args, ctx.mcpReq.signal, async (selection) => {
-        const read = await readBriefing(reader, {
-          repository: selection.repository,
-          agent: selection.agent ?? undefined,
-          since: args.since ? new Date(args.since).toISOString() : undefined,
-          limit: args.limit,
-          maxChars: args.maxChars,
-          signal: ctx.mcpReq.signal,
-        });
-        if (read.kind === "unavailable") throw new Failure("collection-failed");
-        return {
-          status: read.complete ? "complete" : "incomplete",
-          result: plain(read.report),
-          text: read.text,
-        };
-      }),
+      args.mode === "briefing"
+        ? call("repository-briefing", args, ctx.mcpReq.signal, async (selection) => {
+            const now = runtime.now ?? (() => new Date());
+            let snapshot;
+            try {
+              ({ snapshot } = await collectBriefing(
+                runtime.collect,
+                selection.repository,
+                { since: args.since, last: args.last },
+                now,
+                ctx.mcpReq.signal,
+              ));
+            } catch (error) {
+              if (error instanceof WindowRefusal) throw new Failure("invalid-window");
+              throw error;
+            }
+            const built = catchUp(snapshot, {
+              agent: selection.agent ?? undefined,
+              limit: args.limit,
+              now,
+            });
+            // Completeness as the CLI judges it, before the checkpoint candidate is withheld.
+            const complete = built.checkpoint.candidate !== null;
+            const report = { ...built, offline: null, checkpoint: mcpCheckpointPolicy };
+            return {
+              status: complete ? "complete" : "incomplete",
+              result: plain(report),
+              text: catchUpText(report, args.maxChars),
+            };
+          })
+        : call("briefing", args, ctx.mcpReq.signal, async (selection) => {
+            const read = await readBriefing(reader, {
+              repository: selection.repository,
+              agent: selection.agent ?? undefined,
+              since: args.since ? new Date(args.since).toISOString() : undefined,
+              limit: args.limit,
+              maxChars: args.maxChars,
+              signal: ctx.mcpReq.signal,
+            });
+            if (read.kind === "unavailable") throw new Failure("collection-failed");
+            return {
+              status: read.complete ? "complete" : "incomplete",
+              result: plain(read.report),
+              text: read.text,
+            };
+          }),
   );
 
   server.registerTool(
