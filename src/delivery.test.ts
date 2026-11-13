@@ -166,6 +166,24 @@ describe("delivery fold scenarios (#189)", () => {
     expect(f.hasTrustedRecord).toBe(false);
     expect(f.ignored).toHaveLength(2);
     expect(f.ignored[0]).toMatch(/bound to example\/project#41, not example\/project#42/);
+    expect(f.ignored[0]).toContain(`copied record ${copied.databaseId} by writer, rejected`);
+    expect(f.ignored[1]).toContain(`copied record ${otherRepo.databaseId} by writer, rejected`);
+  });
+
+  it("S13 a copied record without a comment id is named by the no-id form", () => {
+    const copied = {
+      ...post(record("attach", { issue: 41, deliverables: [pr(5)] })),
+      databaseId: undefined,
+      url: "https://github.com/example/project/issues/41#issuecomment-x",
+    } as unknown as DeliveryComment;
+    const f = foldDelivery(
+      [{ comment: copied, login: "writer", status: "foreign", why: "record is bound elsewhere" }],
+      true,
+    );
+    expect(f.recordsUnknown).toBe(false);
+    expect(f.ignored).toEqual([
+      "copied record (no id, https://github.com/example/project/issues/41#issuecomment-x) by writer, rejected (record is bound elsewhere)",
+    ]);
   });
 
   it("S14 record half: a detach of the only member is recorded with its reason and stays in history", async () => {
