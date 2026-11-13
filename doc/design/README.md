@@ -17,7 +17,7 @@ The tool reduces GitHub searching and encodes agreed lifecycle prerequisites and
 
 #14 owns this consolidation, not a giant implementation. Implement each delivery ticket separately against its applicable section; reuse shared collectors, fact records, command/rule/role registries and eligibility policy. No repository, named-agent or issue-number special cases. Preserve existing schema compatibility or version any incompatible result contract explicitly. Every result states repository, observation window, completeness, evidence and omissions. Unknown is not clean, eligible, answered or approved.
 
-Ready after contract merge: ranking/role views (#1/#40/#43/#45), PR diagnosis (#59), review-cycle analysis (#60), explicit-evidence team/ownership views (#41/#61), basic update check (#51), and read-only Ticket Doctor (#66). Follow-ups: #65 after #51; #67 after #66. New mutation operations #2/#62 need their focused transition/API implementation plan against the workflow contract. Local setup #70 and automatic MCP identity remain follow-ups requiring the standalone identity contract and their own verified local schema; explicit selection is supported. They have no external-service dependency.
+Ready after contract merge: ranking/role views (#1/#40/#43/#45), PR diagnosis (#59), review-cycle analysis (#60), explicit-evidence team/ownership views (#41/#61), basic update check (#51), and read-only Ticket Doctor (#66). Follow-ups: #65 after #51; #67 after #66. New mutation operations #2/#62 need their focused transition/API implementation plan against the workflow contract. Local identity uses the root-level ignored TOML file under [the clarified contract](identity.md): setup/config #70, verified detection #38, Doctor #64 and MCP #25 share that resolver. Explicit selection remains supported, with no service/check-in requirement.
 
 Deferred by the owner: automatic migration apply/recovery #48, answer-recording convenience operation #63, and shared backend/SQLite/dashboard #42. They are not blockers for ordinary CLI/MCP. MCP #25 follows its focused [read-only interface contract](mcp.md); explicit project/identity and verified read-only lookup do not require enabling shared identity writes; platform wake-up adapters follow their research. Do not mark these ready just because product direction exists.
 
@@ -48,6 +48,8 @@ The owner accepts a recent Node requirement: [the current Node LTS](runtime.md),
 [Repository-relative complexity estimation](complexity-estimation.md) records default T-shirt guidance and proposed small delivery slices. Native-field integration and estimation queues are not implemented or implicitly approved. Historical recalibration is later work; risk assessment belongs in a separate change set.
 
 [Repository configuration](repository-configuration.md) defines the proposed repository-only config command boundary, defaults and migration responsibilities.
+
+[TOML-first formats](configuration-formats.md) separates urgent local identity from the later shared-settings conversion. [TOML library choice](../reports/toml-library-choice.md) recommends a parser without requiring another owner decision.
 
 [Labels-only complexity](complexity-estimation.md) supersedes native-field setup and permission work. The recognized labels are the only size authority; no field migration is required.
 

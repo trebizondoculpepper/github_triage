@@ -99,7 +99,7 @@ Each check has `id`, `status`, `source`, `detail` and `next` (supported recovery
 
 Current exit behavior is `1` for any missing/invalid/access finding; otherwise `2` if any unknown remains; otherwise `0`. Unsupported checks do not currently change that exit code, so exit 0 alone is not proof that every capability was verified: inspect statuses and summary. Doctor never repairs configuration, creates fields, refreshes credentials or changes Git tracking implicitly.
 
-Local identity behavior is under design reconciliation in #25/#64. Keep current checks until that contract is resolved; withdrawing external service/check-in requirements does not by itself remove a local identity file. Explicit selection remains supported. The earlier field-permission proposal is withdrawn; [labels-only complexity](design/complexity-estimation.md) is separate pending implementation work.
+The owner confirmed retaining root-level agent-inbox.toml for local identity; the clarified contract is doc/design/identity.md. Current checks remain, and external check-ins are not required. Explicit selection remains supported while shared persisted lookup/configuration is implemented under #70/#38/#64/#25. The earlier field-permission proposal is withdrawn; [labels-only complexity](design/complexity-estimation.md) is separate pending implementation work.
 
 ## Ticket Doctor: check ticket consistency
 

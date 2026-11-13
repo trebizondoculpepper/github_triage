@@ -18,7 +18,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # macOS is omitted by owner decision (2026-11-13): it is expected to behave like Linux and
+        # its hosted runners queue for long periods. Add it back only when explicitly requested.
+        os: [ubuntu-latest, windows-latest]
         # Current Node LTS (doc/design/runtime.md, #108); update deliberately as LTS changes.
         node: [26]
     runs-on: ${{ matrix.os }}

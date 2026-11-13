@@ -1,7 +1,7 @@
-# Identity isolation and configuration ownership
+# Local identity and service independence
 
-The owner withdrew earlier exploratory proposals to share identity configuration with a separate application. That investigation is no longer a prerequisite or implementation recommendation for this standalone project.
+The owner's clarified boundary retains `agent-inbox.toml` as the Git-ignored, non-versioned identity store at the repository root. Reuse its format and existing agent names; add only the selected agent's `triage_role` (`designer` or `implementer`) while preserving unrelated data. Setup creates the file when absent. The file is not retired.
 
-The relevant engineering lessons are retained: configuration writers must preserve unrelated keys, quote identifiers correctly, distinguish separate server entries and avoid claiming that harness metadata uniquely identifies an agent. Explicit agent selection remains supported; future automatic resolution and persistent local setup need their own reviewed contract and fixtures.
+The project requires no separate communications service, check-in, network account or personal configuration. Reusing a filename and format does not require that other software be installed. The previous interpretation that a separate triage-owned identity file was needed is withdrawn.
 
-No credentials, private integration instructions, external checkout paths or service-specific identity schema belong in this repository. See [the standalone identity contract](../design/identity.md). Historical issue references do not reactivate the withdrawn integration. This note does not claim a new identity implementation or completed setup feature.
+Follow [the persistent identity contract](../design/identity.md): shared resolution and config-mediated safe writes, verified harness/entry selection, local Git exclusion and read-only Doctor checks. A name persists across sessions but is not authentication or proof of presence. No live identity file or credentials changed in this documentation correction.
