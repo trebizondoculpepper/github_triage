@@ -8,12 +8,16 @@
 import { realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { catchUp, catchUpJson, catchUpLimits, catchUpText } from "./catchup.js";
+import { abbreviate, catchUp, catchUpJson, catchUpLimits, catchUpText } from "./catchup.js";
 import type { CatchUpReport } from "./catchup.js";
 import { parseDuration, parseSince, resolveWindow } from "./changes.js";
 import type { ComparisonWindow } from "./changes.js";
 import type { collect } from "./github.js";
 import type { Snapshot } from "./types.js";
+
+/** A checkpoint path for text output: long paths keep their start and end; --json has it whole. */
+export const checkpointLabel = (path: string): string =>
+  path.length <= 80 ? path : `${abbreviate(path, 80)} (path truncated; see --json)`;
 
 /** Filesystem boundary of the briefing command; tests inject failures per phase. */
 export interface BriefingFiles {
@@ -354,11 +358,17 @@ async function deliver(
     : options.checkpoint
       ? [
           complete
-            ? `Checkpoint ${options.checkpoint}: candidate ${built.checkpoint.candidate}, written only after this report is delivered.`
-            : `Checkpoint ${options.checkpoint}: NOT advanced (incomplete evidence); rerun to retry the same window.`,
+            ? `Checkpoint ${checkpointLabel(options.checkpoint)}: candidate ${built.checkpoint.candidate}, written only after this report is delivered.`
+            : `Checkpoint ${checkpointLabel(options.checkpoint)}: NOT advanced (incomplete evidence); rerun to retry the same window.`,
         ]
       : [];
-  await output(options.json ? catchUpJson(report) : catchUpText(report, options.maxChars, notices));
+  const text = options.json ? catchUpJson(report) : catchUpText(report, options.maxChars, notices);
+  // Invariant: a checkpoint only advances past text that showed the window it replaces.
+  if (!options.json && !/^Window /m.test(text))
+    throw new Error(
+      "Internal error: briefing text lost its comparison window; no checkpoint was advanced.",
+    );
+  await output(text);
   if (!options.offline && options.checkpoint && complete) {
     try {
       await files.atomicJson(options.checkpoint, {

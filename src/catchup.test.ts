@@ -421,6 +421,25 @@ describe("repository catch-up aggregation (#169)", () => {
     );
   });
 
+  it("bounds each notice and dynamic field so essential lines always fit the minimum budget", () => {
+    const warnings = Array.from(
+      { length: 40 },
+      (_, n) => `Collection warning ${n}: ${"x".repeat(900)}`,
+    );
+    const data = snap(current().issues, current().pullRequests, evidence(subjects), warnings);
+    const report = {
+      ...catchUp(data, { now: clock, limit: 100 }),
+      repository: `o/${"r".repeat(5000)}`,
+    };
+    for (const notice of ["n".repeat(250), "n".repeat(1000), "n".repeat(5000)]) {
+      const text = catchUpText(report, 1000, [notice, notice]);
+      expect(text.length).toBeLessThanOrEqual(1000);
+      expect(text).toMatch(/^Window /m);
+      expect(text).toContain("Scope: ");
+      expect(text).toContain(`INCOMPLETE: ${report.completeness.warnings.length} collection`);
+    }
+  });
+
   it("keeps the whole text, header and footer included, within every allowed budget", () => {
     const long = (n: number) => `Collection warning ${n}: ${"x".repeat(900)}`;
     for (const count of [0, 1, 5, 40])
@@ -1105,6 +1124,41 @@ describe("briefing command: CLI, checkpoint and offline cache (#170)", () => {
     expect(h.stdout.join("")).toContain(`Window ${inside(24)} → ${t0} (checkpoint)`);
     expect(h.stdout.join("")).toContain("written only after this report is delivered");
   });
+
+  it.each([250, 1000, 5000])(
+    "keeps window, scope and completeness under --max-chars 1000 with a %i-character checkpoint path",
+    async (length) => {
+      const path = `/${"d".repeat(length - 12)}/state.json`;
+      expect(path.length).toBe(length);
+      // A complete empty report: the missing checkpoint establishes a baseline and advances.
+      const h = harness();
+      expect(await h.run(["--checkpoint", path, "--max-chars", "1000"])).toBe(0);
+      const text = h.stdout.join("");
+      expect(text.length).toBeLessThanOrEqual(1000);
+      expect(text).toMatch(/^Window /m);
+      expect(text).toContain("Scope: ");
+      expect(text).toContain("Changes: ");
+      expect(text).toContain("state.json");
+      if (length > 80) expect(text).toContain("path truncated; see --json");
+      expect(h.calls).toEqual(["collect", `write ${path}`]);
+
+      // An incomplete report keeps its completeness lines and never advances.
+      const partial = harness({
+        collect: async (_r, o) => ({
+          ...current(),
+          changeEvidence: { ...evidence(subjects, false), window: o!.changeWindow! },
+        }),
+      });
+      expect(await partial.run(["--checkpoint", path, "--max-chars", "1000"])).toBe(2);
+      const incomplete = partial.stdout.join("");
+      expect(incomplete.length).toBeLessThanOrEqual(1000);
+      expect(incomplete).toMatch(/^Window /m);
+      expect(incomplete).toContain("Scope: ");
+      expect(incomplete).toMatch(/history [A-Z]+; counts below are not a complete account/);
+      expect(incomplete).toContain("NOT advanced (incomplete evidence)");
+      expect(partial.disk.size).toBe(0);
+    },
+  );
 
   it("never advances on output failure, collection failure or incomplete evidence", async () => {
     const h = harness();

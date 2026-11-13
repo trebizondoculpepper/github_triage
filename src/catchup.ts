@@ -1081,9 +1081,26 @@ const attentionHeadline: Record<AttentionStatus, string> = {
   unknown: "Owner attention: UNKNOWN — current collection is incomplete.",
 };
 
+/** Per-field bounds that keep every essential line within the minimum `--max-chars`. */
+export const essentialBounds = {
+  repository: { floor: 40, max: 100 },
+  notices: { floor: 60, max: 240 },
+  last: 24,
+} as const;
+
+/** Shorten `text` to `max` characters, keeping its start and end around an ellipsis. */
+export function abbreviate(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const keep = max - 1;
+  const start = Math.ceil(keep / 2);
+  return `${text.slice(0, start)}…${text.slice(text.length - (keep - start))}`;
+}
+
 /**
  * Bounded text. Window, completeness, scope and omission notices are kept before row detail.
  * `notices` are front-end lines (offline source, checkpoint policy) kept right after the title.
+ * Every essential line is bounded independently and its space is reserved before any row, so
+ * none is ever dropped; if they somehow could not fit, the text exceeds the budget instead.
  */
 export function catchUpText(
   report: CatchUpReport,
@@ -1100,12 +1117,10 @@ export function catchUpText(
     );
   const w = report.window;
   const s = report.summary;
-  const head = [
-    `Repository briefing: ${report.repository}`,
-    ...notices,
+  const fixed = [
     attentionHeadline[report.attentionStatus],
     w
-      ? `Window ${w.from ?? "(baseline)"} → ${w.through} (${w.source}${w.last ? ` ${w.last}` : ""}); observed ${report.observation.startedAt} → ${report.observation.fetchedAt}.`
+      ? `Window ${w.from ?? "(baseline)"} → ${w.through} (${w.source}${w.last ? ` ${abbreviate(w.last, essentialBounds.last)}` : ""}); observed ${report.observation.startedAt} → ${report.observation.fetchedAt}.`
       : "Window unknown: no retained change evidence.",
     report.completeness.history === "complete"
       ? `Changes: ${s.pullRequestsMerged} PR(s) merged; ${s.issuesCompleted} issue(s) completed; ${s.disposed} disposed; ${s.opened} opened; ${s.reviews} review(s); ${s.operations} reported operation(s); ${s.updatedOnly} updated with unknown operation.`
@@ -1177,6 +1192,25 @@ export function catchUpText(
   const reserve = footer.join("\n").length + budgetNotice.length + 4;
   const fit = (text: string, room: number) =>
     text.length <= room ? text : room > 1 ? `${text.slice(0, room - 1)}…` : "";
+  // Repository and notices are the only unbounded inputs: they share what the fixed essential
+  // lines leave, each within its own floor and ceiling, so no single field can crowd out the rest.
+  const repoTitle = "Repository briefing: ";
+  const left = maxChars - reserve - fixed.join("\n").length - repoTitle.length - 1 - notices.length;
+  const repoRoom = Math.max(
+    essentialBounds.repository.floor,
+    Math.min(essentialBounds.repository.max, Math.floor(left / 3)),
+  );
+  const noticeRoom = Math.max(
+    essentialBounds.notices.floor,
+    Math.min(essentialBounds.notices.max, left - Math.min(repoRoom, report.repository.length) - 80),
+  );
+  const head = [
+    `${repoTitle}${abbreviate(report.repository, repoRoom)}`,
+    ...notices.map((notice) =>
+      abbreviate(notice, Math.floor(noticeRoom / Math.max(1, notices.length))),
+    ),
+    ...fixed,
+  ];
   const essential = head.join("\n").length;
   if (warnings.length) {
     const prefix = `INCOMPLETE: ${warnings.length} collection warning(s)`;
@@ -1185,8 +1219,9 @@ export function catchUpText(
     const first = fit(warnings[0]!, Math.min(200, room));
     head.push(`${prefix}${first ? ` (first: ${first})` : ""}${suffix}`);
   }
-  const lines = head.map((line) => fit(line, maxChars - reserve));
-  while (lines.join("\n").length + reserve > maxChars && lines.length > 1) lines.pop();
+  // Essential lines are never popped or cut: dropping the window or completeness notice would let
+  // a checkpoint advance past text that never showed them.
+  const lines = [...head];
   let truncated = false;
   for (const line of body) {
     if (lines.join("\n").length + line.length + 1 + reserve > maxChars) {
