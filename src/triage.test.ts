@@ -4086,6 +4086,8 @@ describe("estimate N records a size with provenance (#121)", () => {
       concurrent?: { afterQuery: number; size: string };
       failSet?: Answer;
       failComment?: boolean;
+      /** Degrade the Nth query: GraphQL errors and/or issueFieldValues missing. */
+      degrade?: { onQuery: number; errors?: Answer["errors"]; dropValues?: boolean };
     } = {},
   ) {
     const files = new Map<string, string>();
@@ -4151,6 +4153,13 @@ describe("estimate N records a size with provenance (#121)", () => {
             query: async () => {
               queries += 1;
               const a = answer();
+              const d = options.degrade;
+              if (d && queries === d.onQuery) {
+                if (d.errors) a.errors = d.errors;
+                if (d.dropValues)
+                  delete (a.data as { repository: { issue: Record<string, unknown> } }).repository
+                    .issue.issueFieldValues;
+              }
               if (options.concurrent && queries === options.concurrent.afterQuery)
                 remote.current = options.concurrent.size;
               return a;
@@ -4265,6 +4274,54 @@ describe("estimate N records a size with provenance (#121)", () => {
     expect(await retry.call(...base)).toBe(0);
     expect(retry.json()).toMatchObject({ status: "recorded", valueWritten: false });
     expect(retry.mutations.map((m) => m.query.includes("addComment"))).toEqual([true]);
+  });
+  it("refuses an errored or incomplete value read instead of treating it as unset", async () => {
+    for (const degrade of [
+      { onQuery: 1, dropValues: true },
+      { onQuery: 1, errors: [{ type: "INTERNAL", message: "partial" }] },
+      { onQuery: 2, dropValues: true },
+      { onQuery: 2, errors: [{ type: "INTERNAL", message: "partial" }], dropValues: true },
+    ]) {
+      const t = harness({ current: "S", degrade });
+      // The reread (query 2) is only reached by an authorised replacement.
+      const replace = degrade.onQuery === 2 ? ["--replace", "S"] : [];
+      expect(await t.call(...base, ...replace)).toBe(2);
+      expect(t.json()).toMatchObject({ status: "failed:unknown", code: "value-unavailable" });
+      expect(t.json().recovery).toContain("Retry");
+      expect(t.mutations).toEqual([]);
+      expect(t.remote.current).toBe("S");
+    }
+  });
+  it("retries --replace idempotently after a partial write, repairing only provenance", async () => {
+    const t = harness({ current: "S", failComment: true });
+    expect(await t.call(...base, "--replace", "S")).toBe(2);
+    expect(t.json().status).toBe("partial");
+    const retry = harness({ current: "M", comments: t.remote.comments });
+    expect(await retry.call(...base, "--replace", "S")).toBe(0);
+    expect(retry.json()).toMatchObject({
+      status: "recorded",
+      valueWritten: false,
+      provenance: { previous: "S" },
+    });
+    expect(retry.mutations.map((m) => m.query.includes("addComment"))).toEqual([true]);
+    const conflict = harness({ current: "L" });
+    expect(await conflict.call(...base, "--replace", "S")).toBe(1);
+    expect(conflict.json().code).toBe("stale");
+  });
+  it("records new provenance when only the estimator identity changes", async () => {
+    const t = harness();
+    await t.call(...base);
+    const sets = () => t.mutations.filter((m) => m.query.includes("setIssueFieldValue")).length;
+    expect(await t.call(...base, "--agent", "kavya")).toBe(0);
+    expect(t.json()).toMatchObject({
+      status: "recorded",
+      valueWritten: false,
+      provenance: { estimator: "kavya" },
+    });
+    expect(sets()).toBe(1);
+    expect(parseProvenance(t.remote.comments.at(-1)!)?.estimator).toBe("kavya");
+    expect(await t.call(...base, "--agent", "kavya")).toBe(0);
+    expect(t.json().status).toBe("unchanged");
   });
   it("reports API denial of the value write without claiming success", async () => {
     const t = harness({ failSet: { data: null, errors: [{ type: "FORBIDDEN", message: "no" }] } });

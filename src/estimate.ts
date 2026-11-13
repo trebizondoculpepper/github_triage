@@ -50,7 +50,7 @@ Never claims, unblocks, relabels, splits or re-ranks; no field is ever created (
 Same size and provenance again: unchanged, nothing written. Retrying after a partial write
 records only the missing provenance.
 Exit: 0 recorded or unchanged; 2 disabled, setup required, field inaccessible/incompatible,
-or partial write; 1 invalid arguments, refused (existing/stale estimate), or API denial.`;
+partial write, or current value unreadable (retry); 1 invalid arguments, refused (existing/stale estimate), or API denial.`;
 
 export interface EstimateRuntime {
   readonly fs?: ConfigFileSystem;
@@ -171,12 +171,26 @@ function readIssue(answer: GraphqlAnswer, fieldId: string, number: number): Issu
       `Issue #${number} could not be read${denied(answer) ? ` (${denied(answer)})` : ""}.`,
       "Check the number, gh auth status and access; nothing was written.",
     );
+  // An errored or incomplete read is unknown evidence, never "unset": treating it as unset
+  // would let a later write overwrite an estimate without --replace.
   const values = prop(issue, "issueFieldValues", "nodes");
+  const unknown = (why: string) =>
+    new Refusal(
+      "value-unavailable",
+      "failed:unknown",
+      2,
+      `The current estimate of #${number} could not be read reliably (${why}); nothing was written.`,
+      "Retry the same command; a missing or partial read is never treated as no estimate.",
+    );
+  if (answer.errors.length) throw unknown(denied(answer) ?? "GitHub returned errors");
+  if (!Array.isArray(values)) throw unknown("issue field values missing from the response");
   let current: ComplexitySize | null = null;
-  for (const node of Array.isArray(values) ? values : [])
+  for (const node of values)
     if (prop(node, "field", "id") === fieldId) {
       const name = prop(node, "name");
-      current = COMPLEXITY_SIZES.includes(name as ComplexitySize) ? (name as ComplexitySize) : null;
+      if (!COMPLEXITY_SIZES.includes(name as ComplexitySize))
+        throw unknown(`unrecognised value ${JSON.stringify(name ?? null)}`);
+      current = name as ComplexitySize;
     }
   const comments = prop(issue, "comments", "nodes");
   let provenance: EstimateProvenance | null = null;
@@ -338,7 +352,9 @@ export async function runEstimate(
       kind: "complexity-estimate",
       fieldId,
       size,
-      previous: before.current === size ? (before.provenance?.previous ?? null) : before.current,
+      // A retry of `--replace OLD` after a partial write still records OLD as the previous size.
+      previous:
+        before.current === size ? (replace ?? before.provenance?.previous ?? null) : before.current,
       rationale,
       assumptions,
       references,
@@ -352,7 +368,9 @@ export async function runEstimate(
       `Complexity estimate for ${target.repository}#${number}: ${before.current ?? "unset"} -> ${size}`,
     );
 
-    if (replace !== undefined && before.current !== replace)
+    // Target already applied (e.g. retry after a partial write) is not stale: only a value
+    // that is neither the named OLD size nor the target is a genuine conflict.
+    if (replace !== undefined && before.current !== replace && before.current !== size)
       throw new Refusal(
         "stale",
         "refused:stale",
@@ -373,6 +391,7 @@ export async function runEstimate(
     const provenanceMatches =
       recorded?.size === size &&
       recorded.rationale === rationale &&
+      (recorded.estimator ?? null) === estimator &&
       sameList(recorded.assumptions, assumptions) &&
       sameList(recorded.references, references);
     if (before.current === size && provenanceMatches) {
