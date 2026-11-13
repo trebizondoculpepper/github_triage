@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -52,7 +53,7 @@ import {
   type Query,
 } from "./github.js";
 import { clauseFor, hedged, listWideHedge, planMigration } from "./migration.js";
-import { applyPlan, planClaim, planNeedsHuman } from "./claims.js";
+import { applyPlan, claimText, planClaim, planNeedsHuman, planRelease } from "./claims.js";
 import type { ClaimAccepted, ClaimPlan, ClaimRefusal } from "./claims.js";
 import { teamText, teamView } from "./team.js";
 import { ticketOwnership, ticketOwnershipText } from "./who.js";
@@ -62,6 +63,29 @@ import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
 
 const repo = "example/project";
 const time = "2026-11-12T10:00:00.000Z";
+/** Split a command as a POSIX shell would: single quotes, whitespace, and `#` comments. */
+const shellWords = (command: string): string[] => {
+  const words: string[] = [];
+  let word: string | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (ch === "'") {
+      const end = command.indexOf("'", i + 1);
+      if (end < 0) throw new Error(`Unterminated quote: ${command}`);
+      word = (word ?? "") + command.slice(i + 1, end);
+      i = end;
+    } else if (ch === "\\") {
+      word = (word ?? "") + (command[i + 1] ?? "");
+      i++;
+    } else if (/\s/.test(ch)) {
+      if (word !== null) words.push(word);
+      word = null;
+    } else if (ch === "#" && word === null) break;
+    else word = (word ?? "") + ch;
+  }
+  if (word !== null) words.push(word);
+  return words;
+};
 const page = <T>(nodes: T[], more = false, cursor: string | null = null): Page<T> => ({
   nodes,
   pageInfo: { hasNextPage: more, endCursor: cursor },
@@ -1541,6 +1565,16 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
     return { query, run, writes };
   };
   const at = (hoursAgo: number) => new Date(Date.parse(time) - hoursAgo * 3_600_000).toISOString();
+  /** A recorded release handoff comment, as `release` writes it. */
+  const doneBy = (
+    agent: string,
+    createdAt = "2026-11-12T10:00:00Z",
+    outcome = "done",
+    claimedAt: string | null = "2026-11-12T09:00:00Z",
+  ) => ({
+    body: `Handoff.\n\n<!-- github-triage:release:0123456789abcdef ${JSON.stringify({ v: 1, agent, outcome, target: "status:awaiting-review", remove: [], retained: [], claimedAt })} -->`,
+    createdAt,
+  });
   const claim = (t: Ticket, extra = {}) =>
     planClaim(repo, { number: 7, agent: "kavya", ...extra }, fake(t).query);
 
@@ -1622,10 +1656,97 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
     const owned = await claim({ labels: ["status:ready", "agent:other"] });
     expect(refused(owned).recovery.join(" ")).not.toMatch(/agent:other/);
     const other = await claim({ labels: ["status:ready"], claims: [9] });
-    expect(refused(other).recovery[0]).toMatch(/^manual \(release is #62/);
+    expect(refused(other).recovery[0]).toMatch(
+      /^github-triage release 9 --agent kavya --as incomplete/,
+    );
     expect(
       (await claim({ labels: ["status:incomplete", "platform:ori"] }, { platform: "ori" })).ok,
     ).toBe(true);
+  });
+  it("every suggested command keeps --repo executable: no shell comment swallows it", async () => {
+    const plans = [
+      await claim({ labels: ["status:ready"], claims: [9] }, { branch: "issue-7" }),
+      await claim({ labels: ["status:ready"], blockedBy: 1 }),
+      await claim({ labels: ["status:ready", "platform:ori"] }),
+      await claim({
+        labels: ["status:awaiting-review"],
+        openPrs: [70],
+        comments: [doneBy("kavya")],
+      }),
+      await claim({ labels: ["status:ready"], openPrs: [70], comments: [doneBy("kavya")] }),
+    ];
+    const commands = plans.flatMap((p) => refused(p).recovery);
+    expect(commands.filter((c) => c.startsWith("github-triage ")).length).toBeGreaterThan(5);
+    for (const c of commands) {
+      expect(c).not.toMatch(/(^|\s)#/);
+      const words = shellWords(c);
+      if (words[0] !== "github-triage" && words[0] !== "gh") continue;
+      expect(words.indexOf("--repo"), c).toBeGreaterThan(0);
+      expect(words[words.indexOf("--repo") + 1], c).toBe(repo);
+    }
+    // The alternatives to the active claim are separate entries, each a whole command.
+    const alternatives = refused(plans[0]).recovery.filter((c) => c.includes("release 9"));
+    expect(alternatives.map((c) => shellWords(c)[5])).toEqual(["--as", "--as", "--as"]);
+    expect(alternatives.map((c) => shellWords(c)[6])).toEqual(["incomplete", "ready", "done"]);
+  });
+  describe("review rework reclaim (doc/design/workflow.md: explicit reclaim)", () => {
+    const waiting = (extra: Partial<Ticket> = {}): Ticket => ({
+      labels: ["status:awaiting-review"],
+      openPrs: [70],
+      comments: [doneBy("kavya")],
+      ...extra,
+    });
+    it("refuses rework authorised only by a handoff with an unknown claim time", async () => {
+      const plan = await claim(
+        waiting({ comments: [doneBy("kavya", "2026-11-12T10:00:00Z", "done", null)] }),
+        { rework: true },
+      );
+      expect(plan).toMatchObject({ ok: false, error: "REWORK_NOT_AUTHORISED" });
+    });
+    it("refuses a plain claim on awaiting review but offers the explicit --rework reclaim", async () => {
+      const plan = await claim(waiting());
+      expect(plan).toMatchObject({ ok: false, error: "NOT_READY" });
+      expect(refused(plan).recovery[0]).toBe(
+        `github-triage claim 7 --agent kavya --rework --repo ${repo}`,
+      );
+    });
+    it("reclaims the caller's own awaiting-review issue: claims and leaves review state", async () => {
+      const env = fake({ ...waiting(), repoLabels: ["agent:kavya"] });
+      const plan = await planClaim(repo, { number: 7, agent: "kavya", rework: true }, env.query);
+      const result = await applyPlan(repo, plan, env);
+      expect(result.exitCode).toBe(0);
+      expect(env.writes[0]).toEqual([
+        "issue",
+        "edit",
+        "7",
+        "--repo",
+        repo,
+        "--add-label",
+        "agent:kavya",
+        "--remove-label",
+        "status:awaiting-review",
+      ]);
+      expect(env.writes[1].at(-1)).toMatch(/for review rework/);
+    });
+    it("is ownership-safe: refuses without the caller's own latest done handoff and an open PR", async () => {
+      const cases: Ticket[] = [
+        waiting({ comments: [doneBy("other")] }),
+        waiting({ comments: [doneBy("kavya", "2026-11-12T09:00:00Z"), doneBy("other")] }),
+        waiting({ comments: [doneBy("kavya", undefined, "incomplete")] }),
+        waiting({ comments: [] }),
+        waiting({ openPrs: [] }),
+        waiting({ labels: ["status:ready"] }),
+        waiting({ labels: ["status:awaiting-review", "agent:other"] }),
+      ];
+      for (const t of cases) {
+        const plan = await claim(t, { rework: true });
+        expect(plan.ok, JSON.stringify(t)).toBe(false);
+        expect(["REWORK_NOT_AUTHORISED", "OWNED_BY_OTHER"]).toContain(refused(plan).error);
+      }
+      // Another agent is never offered the rework reclaim.
+      const other = await planClaim(repo, { number: 7, agent: "nicole" }, fake(waiting()).query);
+      expect(refused(other).recovery.join(" ")).not.toMatch(/--rework/);
+    });
   });
   it("reports a competing claim found after writing instead of resolving it", async () => {
     const env = fake({
@@ -1666,7 +1787,7 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
     );
     expect(result.exitCode).toBe(2);
     expect(result.steps!.map((s) => s.status)).toEqual(["done", "done"]);
-    expect(result.conflict).toMatch(/could not be re-checked/);
+    expect(result.unverified).toMatch(/could not be re-checked/);
   });
   it("records questions first, then marks decision-needed and releases only the caller's claim", async () => {
     const env = fake({
@@ -3189,7 +3310,7 @@ describe("post-write ownership check with incomplete labels", () => {
       query: q,
     });
     expect(result.exitCode).toBe(2);
-    expect(result.conflict).toMatch(/ownership is unverified/);
+    expect(result.unverified).toMatch(/more than 100 labels/);
   });
 });
 
@@ -3678,6 +3799,12 @@ describe("next-action ranking (#45, doc/design/briefings.md acceptance examples)
     const r = await compact(snapshot([issue(1)], [pr()]), { limit: 5 });
     expect(r.sections.available.items).toEqual([]);
     expect(r.actions.items).toEqual([pr().url]);
+  });
+  it("awaiting review is a consistent readiness state but never implementation pickup (#62)", () => {
+    const waiting = issue(22, ["status:awaiting-review"]);
+    const r = brief(snapshot([waiting], []));
+    expect(r.ready.items.map((i) => i.number)).toEqual([]);
+    expect(r.actions.items.some((a) => a.rule === "readiness-inconsistent")).toBe(false);
   });
   it("prefers released incomplete work over unstarted work on an impact tie", () => {
     const ready = issue(20, ["status:ready"]);
@@ -6320,6 +6447,570 @@ describe("role-shaped briefings (#1, doc/design/briefings.md)", () => {
     expect(() => argumentsFor(["--role", "owner"])).toThrow(/implementer, designer/);
     expect(() => argumentsFor(["--role", "designer", "--full"])).toThrow(/--full/);
     expect(argumentsFor(["--role=designer"]).role).toBe("designer");
+  });
+});
+
+describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
+  type Live = {
+    labels: string[];
+    comments: { body: string; createdAt: string }[];
+    state?: string;
+    linkedOpenPr?: boolean;
+    prState?: string | null;
+    labelledAt?: string;
+    events: { __typename?: string; createdAt: string; label: { name: string } }[];
+  };
+  /** A mutable fake GitHub: writes through `run` change what later reads see. */
+  const live = (initial: Partial<Live> & { labels: string[] }) => {
+    const labelledAt = "labelledAt" in initial ? initial.labelledAt : "2026-11-12T09:00:00.000Z";
+    const s: Live = {
+      comments: [],
+      events: labelledAt ? [{ createdAt: labelledAt, label: { name: "agent:kavya" } }] : [],
+      ...initial,
+    };
+    // A monotonic clock, so label events and comments are ordered like GitHub's.
+    let ticks = 0;
+    const tick = () => new Date(Date.parse(time) + ++ticks * 1000).toISOString();
+    const addLabel = (name: string) => {
+      s.labels.push(name);
+      s.events.push({ createdAt: tick(), label: { name } });
+    };
+    const removeLabel = (name: string) => {
+      s.labels = s.labels.filter((l) => l !== name);
+      s.events.push({ __typename: "UnlabeledEvent", createdAt: tick(), label: { name } });
+    };
+    const writes: string[][] = [];
+    // Label history paged like GitHub's: the newest 50, then older pages of 100 by cursor.
+    const timeline = (end: number, size: number) => {
+      const start = Math.max(0, end - size);
+      return {
+        nodes: s.events.slice(start, end),
+        pageInfo: { hasPreviousPage: start > 0, startCursor: String(start) },
+      };
+    };
+    // Comments paged like GitHub's: the newest 100, then older pages of 100 by cursor.
+    const commentWindow = (end: number) => {
+      const start = Math.max(0, end - 100);
+      return {
+        nodes: s.comments.slice(start, end),
+        pageInfo: { hasPreviousPage: start > 0, startCursor: String(start) },
+      };
+    };
+    const query = async (source: string, variables: Record<string, unknown> = {}) => {
+      if (source.includes("comments(last:100,before:$before)"))
+        return {
+          repository: { issue: { comments: commentWindow(Number(variables.before)) } },
+        };
+      if (source.includes("before:$before"))
+        return {
+          repository: { issue: { timelineItems: timeline(Number(variables.before), 100) } },
+        };
+      if (source.includes("resource(url:"))
+        return {
+          resource: s.prState === null ? null : { __typename: "PullRequest", state: s.prState },
+        };
+      return {
+        repository: {
+          issueOrPullRequest: {
+            __typename: "Issue",
+            number: 7,
+            title: "T7",
+            url: `https://github.com/${repo}/issues/7`,
+            state: s.state ?? "OPEN",
+            updatedAt: time,
+            labels: page(s.labels.map((name) => ({ name }))),
+            issueDependenciesSummary: { blockedBy: 0 },
+            blockedBy: page([]),
+            closedByPullRequestsReferences: page(
+              s.linkedOpenPr
+                ? [{ number: 70, url: `https://github.com/${repo}/pull/70`, state: "OPEN" }]
+                : [],
+            ),
+            comments: commentWindow(s.comments.length),
+            timelineItems: timeline(s.events.length, 50),
+          },
+          claims: page([]),
+          ownerLabel: { name: "agent:kavya" },
+          questionLabel: null,
+          decisionLabel: null,
+          needsDesignLabel: null,
+          attentionLabel: null,
+          targetLabel: variables.target ? { name: variables.target } : null,
+        },
+      };
+    };
+    const run = async (args: string[]) => {
+      writes.push(args);
+      if (args[1] === "edit")
+        for (let i = 0; i < args.length; i++) {
+          if (args[i] === "--add-label") addLabel(args[i + 1]);
+          if (args[i] === "--remove-label") removeLabel(args[i + 1]);
+        }
+      if (args[1] === "comment")
+        s.comments.push({ body: args[args.indexOf("--body") + 1], createdAt: tick() });
+    };
+    return { s, query, run, writes, addLabel, removeLabel };
+  };
+  const pr = `https://github.com/${repo}/pull/70`;
+  const release = (env: ReturnType<typeof live>, extra: Record<string, unknown> = {}) =>
+    planRelease(repo, { number: 7, agent: "kavya", outcome: "incomplete", ...extra }, env.query);
+
+  it("releases incomplete work with a note: the recorded handoff comment first, then labels", async () => {
+    const env = live({ labels: ["agent:kavya", "bug", "question", "attention:nicole"] });
+    const result = await applyPlan(
+      repo,
+      await release(env, { note: "Parser done; CLI remains." }),
+      env,
+    );
+    expect(result.exitCode).toBe(0);
+    expect(env.writes.map((w) => w[1])).toEqual(["comment", "edit"]);
+    expect(env.s.labels.sort()).toEqual(
+      ["attention:nicole", "bug", "question", "status:incomplete"].sort(),
+    );
+    expect(env.s.comments[0].body).toContain("Parser done; CLI remains.");
+    expect(env.s.comments[0].body).toMatch(/<!-- github-triage:release:/);
+  });
+  it("every suggested release command keeps --repo executable", async () => {
+    const note = "Fix # parser, it's half done";
+    const plans = [
+      await release(live({ labels: [] })),
+      await release(live({ labels: ["agent:kavya"], state: "CLOSED" }), { pr }),
+      await release(live({ labels: ["agent:kavya"] }), { note }),
+    ];
+    const commands = plans.flatMap((p) => (p.ok ? [p.retry!] : [...p.recovery]));
+    expect(commands.length).toBeGreaterThan(3);
+    for (const c of commands) {
+      const words = shellWords(c);
+      if (words[0] !== "github-triage" && words[0] !== "gh") continue;
+      expect(words[words.indexOf("--repo") + 1], c).toBe(repo);
+    }
+    expect(shellWords(accepted(plans[2]).retry!)).toContain(note);
+  });
+  it("releases without a note: never a gate, but noted; parked maps to status:incomplete", async () => {
+    const env = live({ labels: ["agent:kavya"] });
+    const plan = await release(env, { outcome: "parked" });
+    expect(accepted(plan).notes!.join(" ")).toMatch(/No handoff note/);
+    const result = await applyPlan(repo, plan, env);
+    expect(result.exitCode).toBe(0);
+    expect(env.s.labels).toEqual(["status:incomplete"]);
+    expect(env.s.labels).not.toContain("status:parked");
+    expect(env.s.comments[0].body).toContain("No handoff note supplied");
+  });
+  it("ready returns untouched work to pickup and drops a stale awaiting-review label", async () => {
+    const env = live({ labels: ["agent:kavya", "status:awaiting-review"] });
+    await applyPlan(repo, await release(env, { outcome: "ready" }), env);
+    expect(env.s.labels).toEqual(["status:ready"]);
+  });
+  it("done with an open PR awaits review and leaves pickup; never closes", async () => {
+    const env = live({ labels: ["agent:kavya", "status:ready"], prState: "OPEN" });
+    const plan = await release(env, { outcome: "done", pr, note: "Ready for review." });
+    expect(plan).toMatchObject({
+      ok: true,
+      facts: { target: "status:awaiting-review", pullRequestState: "OPEN" },
+    });
+    const result = await applyPlan(repo, plan, env);
+    expect(result.exitCode).toBe(0);
+    expect(env.s.labels).toEqual(["status:awaiting-review"]);
+    expect(env.writes.flat().join(" ")).not.toMatch(/close/);
+    // A PR linked to the issue counts even without --pr.
+    const linked = live({ labels: ["agent:kavya"], linkedOpenPr: true });
+    expect(accepted(await release(linked, { outcome: "done" })).facts.target).toBe(
+      "status:awaiting-review",
+    );
+  });
+  it("done without an open PR releases without returning to pickup or closing; unknown PR stays unknown", async () => {
+    const env = live({ labels: ["agent:kavya", "status:incomplete"], prState: "MERGED" });
+    const plan = await release(env, { outcome: "done", pr });
+    expect(accepted(plan).facts.target).toBeNull();
+    await applyPlan(repo, plan, env);
+    expect(env.s.labels).toEqual([]);
+    const unknown = live({ labels: ["agent:kavya"], prState: null });
+    const u = accepted(await release(unknown, { outcome: "done", pr }));
+    expect(u.facts.pullRequestState).toBe("UNKNOWN");
+    expect(u.facts.target).toBeNull();
+    expect(u.notes!.join(" ")).toMatch(/UNKNOWN/);
+  });
+  it("refuses when the caller holds no claim or another agent owns it; keeps other owners", async () => {
+    const other = live({ labels: ["agent:other", "status:ready"], labelledAt: undefined });
+    expect(await release(other)).toMatchObject({ ok: false, error: "NOT_CLAIMED" });
+    // Someone else claimed after our label was removed: re-evaluate, never post.
+    const taken = live({ labels: ["agent:other", "status:incomplete"] });
+    expect(await release(taken)).toMatchObject({ ok: false, error: "NOT_CLAIMED" });
+    const shared = live({ labels: ["agent:kavya", "agent:other"] });
+    const plan = await release(shared);
+    expect(accepted(plan).notes!.join(" ")).toMatch(/Other owners kept: agent:other/);
+    await applyPlan(repo, plan, shared);
+    expect(shared.s.labels).toContain("agent:other");
+    const many = live({ labels: ["agent:kavya"] });
+    const q = async (source: string) => {
+      const d = (await many.query(source)) as ReturnType<typeof Object>;
+      (
+        d as {
+          repository: { issueOrPullRequest: { labels: { pageInfo: { hasNextPage: boolean } } } };
+        }
+      ).repository.issueOrPullRequest.labels.pageInfo.hasNextPage = true;
+      return d;
+    };
+    expect(
+      await planRelease(repo, { number: 7, agent: "kavya", outcome: "ready" }, q),
+    ).toMatchObject({
+      ok: false,
+      error: "EVIDENCE_INCOMPLETE",
+    });
+  });
+  it("reports a concurrent change after writing as a conflict", async () => {
+    const env = live({ labels: ["agent:kavya"] });
+    const plan = await release(env);
+    const racing = async (args: string[]) => {
+      await env.run(args);
+      if (args[1] === "edit") env.s.labels = env.s.labels.filter((l) => l !== "status:incomplete");
+    };
+    const result = await applyPlan(repo, plan, { run: racing, query: env.query });
+    expect(result.exitCode).toBe(2);
+    expect(result.conflict).toMatch(/status:incomplete is no longer/);
+  });
+  it("partial API failure: the recorded intent is visible, retry applies only its labels once", async () => {
+    const env = live({ labels: ["agent:kavya", "status:ready"] });
+    const failing = async (args: string[]) => {
+      if (args[1] === "edit") throw new Error("gh issue edit failed.");
+      await env.run(args);
+    };
+    const first = await applyPlan(repo, await release(env, { note: "half" }), {
+      run: failing,
+      query: env.query,
+    });
+    expect(first.exitCode).toBe(2);
+    expect(first.steps!.map((s) => s.status)).toEqual(["done", "failed"]);
+    expect(env.s.labels).toEqual(["agent:kavya", "status:ready"]);
+    const { claimText } = await import("./claims.js");
+    expect(claimText(first)).toMatch(
+      /Retry \(safe.*github-triage release 7 --agent kavya --as incomplete --note half --repo/,
+    );
+    const retry = await release(env, { note: "half" });
+    expect(accepted(retry).changes.map((c) => c.step)).toEqual(["labels"]);
+    expect((await applyPlan(repo, retry, env)).exitCode).toBe(0);
+    expect(env.s.labels).toEqual(["status:incomplete"]);
+    expect(env.s.comments).toHaveLength(1);
+    // A further retry, even with different wording, recognises the recorded handoff.
+    const again = await release(env, { note: "different" });
+    expect(again).toMatchObject({ ok: true, noop: true, changes: [] });
+    expect((await applyPlan(repo, again, env)).exitCode).toBe(0);
+    expect(env.s.comments).toHaveLength(1);
+  });
+  it("never treats a historical claim label as release authorisation", async () => {
+    // The claim was removed some other way: no recorded handoff, so nothing is stripped or posted.
+    const env = live({ labels: ["status:ready"] });
+    expect(await release(env, { outcome: "ready" })).toMatchObject({
+      ok: false,
+      error: "NOT_CLAIMED",
+    });
+    expect(await release(env, { outcome: "done" })).toMatchObject({
+      ok: false,
+      error: "NOT_CLAIMED",
+    });
+    // A marker with an unparsable plan is not authorisation either.
+    env.s.comments.push({
+      body: "<!-- github-triage:release:0123456789abcdef {broken -->",
+      createdAt: time,
+    });
+    expect(await release(env, { outcome: "ready" })).toMatchObject({ ok: false });
+  });
+  it("a retry keeps the owners the original release retained", async () => {
+    const env = live({ labels: ["agent:kavya", "agent:other"] });
+    const failing = async (args: string[]) => {
+      if (args[1] === "edit") throw new Error("gh issue edit failed.");
+      await env.run(args);
+    };
+    await applyPlan(repo, await release(env), { run: failing, query: env.query });
+    // The label write failed: our claim label is still there, so the step is unfinished.
+    expect(env.s.labels.sort()).toEqual(["agent:kavya", "agent:other"]);
+    const retry = accepted(await release(env));
+    expect(retry.changes.map((c) => c.step)).toEqual(["labels"]);
+    expect(retry.notes!.join(" ")).toMatch(/Other owners kept: agent:other/);
+    expect((await applyPlan(repo, retry, env)).exitCode).toBe(0);
+    expect(env.s.labels.sort()).toEqual(["agent:other", "status:incomplete"]);
+    expect(env.s.comments).toHaveLength(1);
+  });
+  it("refuses a retry when ownership or readiness changed after the recorded handoff", async () => {
+    const env = live({ labels: ["agent:kavya"] });
+    const failing = async (args: string[]) => {
+      if (args[1] === "edit") throw new Error("gh issue edit failed.");
+      await env.run(args);
+    };
+    await applyPlan(repo, await release(env), { run: failing, query: env.query });
+    env.addLabel("agent:newcomer");
+    expect(await release(env)).toMatchObject({ ok: false, error: "RELEASE_DIVERGED" });
+    const ready = live({ labels: ["agent:kavya"] });
+    await applyPlan(repo, await release(ready), {
+      run: async (args) => {
+        if (args[1] === "edit") throw new Error("failed");
+        await ready.run(args);
+      },
+      query: ready.query,
+    });
+    ready.addLabel("status:ready");
+    expect(await release(ready)).toMatchObject({ ok: false, error: "RELEASE_DIVERGED" });
+    // A different outcome cannot replace a recorded, unfinished one.
+    const pending = live({ labels: ["agent:kavya"] });
+    await applyPlan(repo, await release(pending), {
+      run: async (args) => {
+        if (args[1] === "edit") throw new Error("failed");
+        await pending.run(args);
+      },
+      query: pending.query,
+    });
+    expect(await release(pending, { outcome: "ready" })).toMatchObject({
+      ok: false,
+      error: "RELEASE_PENDING",
+    });
+  });
+  describe("records beyond the newest page of comments (Codex P2)", () => {
+    const noise = async (env: ReturnType<typeof live>, n: number) => {
+      for (let i = 0; i < n; i++)
+        await env.run(["issue", "comment", "7", "--repo", repo, "--body", `noise ${i}`]);
+    };
+    // A handoff whose comment posted but whose label write failed.
+    const interrupted = async () => {
+      const env = live({ labels: ["agent:kavya"] });
+      await applyPlan(repo, await release(env), {
+        run: async (args) => {
+          if (args[1] === "edit") throw new Error("failed");
+          await env.run(args);
+        },
+        query: env.query,
+      });
+      return env;
+    };
+    it("release finds an interrupted handoff buried under more than 100 comments", async () => {
+      const env = await interrupted();
+      await noise(env, 150);
+      // The recorded outcome still governs: a different outcome is not a new handoff.
+      expect(await release(env, { outcome: "ready" })).toMatchObject({
+        ok: false,
+        error: "RELEASE_PENDING",
+      });
+      const retry = await release(env);
+      expect(retry).toMatchObject({ ok: true, reason: expect.stringMatching(/already recorded/) });
+      expect(accepted(retry).changes.map((c) => c.step)).not.toContain("comment");
+    });
+    it("release refuses EVIDENCE_INCOMPLETE when the claim start is beyond the bounded read", async () => {
+      const env = await interrupted();
+      await noise(env, 700);
+      expect(await release(env, { outcome: "ready" })).toMatchObject({
+        ok: false,
+        error: "EVIDENCE_INCOMPLETE",
+      });
+    });
+    const handedOver = async (n: number) => {
+      const env = live({ labels: ["agent:kavya"], linkedOpenPr: true });
+      expect((await applyPlan(repo, await release(env, { outcome: "done" }), env)).exitCode).toBe(
+        0,
+      );
+      await noise(env, n);
+      return planClaim(repo, { number: 7, agent: "kavya", rework: true }, env.query);
+    };
+    it("rework finds the caller's done handoff buried under more than 100 comments", async () => {
+      expect(await handedOver(150)).toMatchObject({ ok: true, noop: false });
+    });
+    it("rework refuses EVIDENCE_INCOMPLETE when no handoff is within the bounded read", async () => {
+      expect(await handedOver(700)).toMatchObject({ ok: false, error: "EVIDENCE_INCOMPLETE" });
+    });
+  });
+  describe("post-write check with missing or truncated evidence (Codex P2)", () => {
+    const reread = (env: ReturnType<typeof live>, edit: (r: any) => void) => {
+      let writes = 0;
+      return {
+        run: async (args: string[]) => {
+          writes++;
+          await env.run(args);
+        },
+        query: async (source: string, variables: Record<string, unknown> = {}) => {
+          const r: any = await env.query(source, variables);
+          if (writes && r?.repository?.issueOrPullRequest) edit(r);
+          return r;
+        },
+      };
+    };
+    it("release reports unverified (exit 2) when the re-read issue is missing", async () => {
+      const env = live({ labels: ["agent:kavya"] });
+      const result = await applyPlan(
+        repo,
+        await release(env),
+        reread(env, (r) => (r.repository.issueOrPullRequest = null)),
+      );
+      expect(result.exitCode).toBe(2);
+      expect(result.conflict).toBeNull();
+      expect(result.unverified).toMatch(/could not be re-read/);
+      expect(result.unverified).toMatch(/who 7/);
+      expect(claimText(result)).toMatch(/UNVERIFIED/);
+    });
+    it("release reports unverified when the re-read label page is truncated", async () => {
+      const env = live({ labels: ["agent:kavya"] });
+      const result = await applyPlan(
+        repo,
+        await release(env),
+        reread(env, (r) => (r.repository.issueOrPullRequest.labels.pageInfo.hasNextPage = true)),
+      );
+      expect(result.exitCode).toBe(2);
+      expect(result.unverified).toMatch(/more than 100 labels/);
+    });
+    it("claim reports unverified when the re-read issue is missing", async () => {
+      const env = live({ labels: ["status:ready"], labelledAt: undefined });
+      const result = await applyPlan(
+        repo,
+        await planClaim(repo, { number: 7, agent: "kavya" }, env.query),
+        reread(env, (r) => (r.repository.issueOrPullRequest = null)),
+      );
+      expect(result.exitCode).toBe(2);
+      expect(result.unverified).toMatch(/could not be re-read/);
+    });
+  });
+  describe("claim identity beyond the first page of label history (Codex P2)", () => {
+    const at = (n: number) =>
+      new Date(Date.parse("2026-11-12T09:00:00.000Z") + n * 1000).toISOString();
+    // A handoff from an earlier acquisition whose claim time was never established.
+    const unknownHandoff = (outcome = "incomplete") => {
+      const op = `<!-- github-triage:release:${createHash("sha256")
+        .update(JSON.stringify([repo, 7, "kavya", null]))
+        .digest("hex")
+        .slice(0, 16)}`;
+      const plan = {
+        v: 1,
+        agent: "kavya",
+        outcome,
+        target: "status:incomplete",
+        remove: ["agent:kavya"],
+        retained: [],
+        claimedAt: null,
+      };
+      return { body: `Handoff.\n\n${op} ${JSON.stringify(plan)} -->`, createdAt: at(5) };
+    };
+    // The current claim's add event, followed by more noise than one page holds.
+    const buried = (noise: number) => {
+      const events: Live["events"] = [{ createdAt: at(10), label: { name: "agent:kavya" } }];
+      for (let i = 0; i < noise; i++)
+        events.push({
+          ...(i % 2 ? { __typename: "UnlabeledEvent" } : {}),
+          createdAt: at(11 + i),
+          label: { name: "noise" },
+        });
+      return events;
+    };
+    it("finds the claim time by paging back, so an older handoff is not matched", async () => {
+      const env = live({
+        labels: ["agent:kavya"],
+        comments: [unknownHandoff()],
+        events: buried(60),
+      });
+      const plan = await release(env, { outcome: "ready" });
+      expect(plan).toMatchObject({ ok: true, noop: false });
+      expect(accepted(plan).changes.map((c) => c.step)).toContain("comment");
+      expect(
+        accepted(plan)
+          .changes.find((c) => c.step === "comment")!
+          .command.at(-1),
+      ).toContain(`"claimedAt":"${at(10)}"`);
+    });
+    it("refuses EVIDENCE_INCOMPLETE when the claim time is beyond the bounded search", async () => {
+      const env = live({
+        labels: ["agent:kavya"],
+        comments: [unknownHandoff()],
+        events: buried(400),
+      });
+      const plan = await release(env, { outcome: "ready" });
+      expect(plan).toMatchObject({ ok: false, error: "EVIDENCE_INCOMPLETE" });
+      expect(refused(plan).recovery.length).toBeGreaterThan(0);
+      // Same outcome as the old handoff: still never replayed.
+      expect(await release(env)).toMatchObject({ ok: false, error: "EVIDENCE_INCOMPLETE" });
+    });
+    it("never matches a handoff recorded with no claim time, even with no visible claim", async () => {
+      const env = live({ labels: [], comments: [unknownHandoff()], labelledAt: undefined });
+      expect(await release(env)).toMatchObject({ ok: false, error: "NOT_CLAIMED" });
+    });
+  });
+  it("never restores labels from a completed handoff after others changed them", async () => {
+    // Codex P2: done with an open PR, PR merged, a maintainer removes the review label.
+    const env = live({ labels: ["agent:kavya"], linkedOpenPr: true });
+    expect((await applyPlan(repo, await release(env, { outcome: "done" }), env)).exitCode).toBe(0);
+    expect(env.s.labels).toEqual(["status:awaiting-review"]);
+    env.s.linkedOpenPr = false;
+    env.removeLabel("status:awaiting-review");
+    const rerun = await release(env, { outcome: "done" });
+    expect(rerun).toMatchObject({ ok: true, noop: true, changes: [] });
+    const before = env.writes.length;
+    expect((await applyPlan(repo, rerun, env)).exitCode).toBe(0);
+    expect(env.writes).toHaveLength(before);
+    expect(env.s.labels).toEqual([]);
+  });
+  it("refuses an unfinished retry when a plan label was removed after the handoff", async () => {
+    const env = live({ labels: ["agent:kavya"] });
+    await applyPlan(repo, await release(env), {
+      run: async (args) => {
+        if (args[1] === "edit") throw new Error("failed");
+        await env.run(args);
+      },
+      query: env.query,
+    });
+    // Someone applied the recorded target, then deliberately took it off again.
+    env.addLabel("status:incomplete");
+    env.removeLabel("status:incomplete");
+    expect(await release(env)).toMatchObject({ ok: false, error: "RELEASE_DIVERGED" });
+    expect(env.s.labels).toContain("agent:kavya");
+  });
+  it("done: a linked open closing PR awaits review even when the supplied --pr is merged or unknown", async () => {
+    for (const prState of ["MERGED", "CLOSED", null]) {
+      const env = live({ labels: ["agent:kavya"], prState, linkedOpenPr: true });
+      const plan = accepted(
+        await release(env, { outcome: "done", pr: `https://github.com/${repo}/pull/69` }),
+      );
+      expect(plan.facts.target).toBe("status:awaiting-review");
+    }
+  });
+  it("validates arguments and dry-runs without writing", async () => {
+    for (const bad of [
+      ["release", "7", "--agent", "a"],
+      ["release", "7", "--agent", "a", "--as", "closed"],
+      ["release", "7", "--agent", "a", "--as", "done", "--pr", pr, "--change", "https://x/y"],
+      ["release", "7", "--agent", "a", "--as", "done", "--pr", "not-a-url"],
+      ["release", "7", "--agent", "a", "--as", "ready", "--branch", "b"],
+      ["claim", "7", "--agent", "a", "--as", "ready"],
+    ])
+      await expect(main(bad, async () => {})).rejects.toThrow();
+    let help = "";
+    expect(await main(["release", "--help"], async (t) => void (help = t))).toBe(0);
+    expect(help).toMatch(/parked is a synonym/);
+    const env = live({ labels: ["agent:kavya"] });
+    let text = "";
+    const code = await main(
+      [
+        "release",
+        "7",
+        "--agent",
+        "kavya",
+        "--as",
+        "incomplete",
+        "--dry-run",
+        "--json",
+        "--repo",
+        repo,
+      ],
+      async (t) => void (text = t),
+      {
+        collect: async () => {
+          throw new Error("no briefing");
+        },
+        currentRepository: async () => repo,
+        query: env.query,
+        ghRun: env.run,
+      },
+    );
+    expect(code).toBe(0);
+    expect(env.writes).toEqual([]);
+    expect(JSON.parse(text)).toMatchObject({
+      schemaVersion: 1,
+      ok: true,
+      facts: { outcome: "incomplete" },
+    });
   });
 });
 
