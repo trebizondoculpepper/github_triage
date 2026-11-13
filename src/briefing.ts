@@ -67,6 +67,8 @@ export const workflow = {
 /** The labelled part of an issue or pull request. */
 export type Labelled = Pick<Issue, "labels">;
 const labels = (issue: Labelled): string[] => issue.labels.nodes.map(({ name }) => name);
+/** Deliberately parked by policy; excluded from next steps unless addressed. */
+export const isParked = (issue: Labelled): boolean => labels(issue).includes(workflow.parked);
 export const owners = (issue: Labelled): string[] =>
   labels(issue).filter((label) => label.startsWith(workflow.ownerPrefix));
 const active = (issue: Issue): boolean => workflow.openStates.includes(issue.state);

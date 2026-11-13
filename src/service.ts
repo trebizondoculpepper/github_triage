@@ -22,6 +22,8 @@ export interface PresentOptions extends Omit<BriefingOptions, "estimation"> {
   full?: boolean;
   /** Compact text budget. */
   maxChars: number;
+  /** Registered role view (#1) shaping the compact briefing. */
+  role?: string;
 }
 
 /** The versioned briefing report and its text rendering. */

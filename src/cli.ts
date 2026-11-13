@@ -14,6 +14,7 @@ import {
   ghRun,
   planDependencyChange,
 } from "./dependencies.js";
+import { roleNames, roleRegistry } from "./roles.js";
 import { prStatusText, pullRequestStatus } from "./prstatus.js";
 import { doctorStaleHours, ticketDoctor, ticketDoctorText } from "./ticketdoctor.js";
 import { applyPlan, claimText, planClaim, planNeedsHuman } from "./claims.js";
@@ -113,6 +114,10 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   --offline             Read explicit cache; no GitHub queries/checkpoint advancement
   --full                Expanded version-1 report
   --agent NAME          Your identity: attention:NAME first, then agent:NAME work
+  --role NAME           Shape the compact briefing for implementer (attention, PR follow-up,
+                        own work, pickup, unblock candidates, stale claims) or designer
+                        (attention, decisions, documentation, design review, new design).
+                        Presentation only: never authority; addressed attention always shown
   --platform P          Your platform (e.g. claude-code); platform:* tickets need a match.
                         Without it, restricted tickets are inspection context, not pickup
   --order MODE          Pickup order only: impact (default: urgency, immediate unlocks,
@@ -296,9 +301,14 @@ export function argumentsFor(args: string[]) {
       platform: { type: "string" },
       "stale-hours": { type: "string" },
       estimate: { type: "boolean" },
+      role: { type: "string" },
       help: { type: "boolean" },
     },
   });
+  if (values.role !== undefined && !roleRegistry.has(values.role))
+    throw new Error(`--role must be one of ${roleNames().join(", ")}.`);
+  if (values.role !== undefined && values.full)
+    throw new Error("--role shapes the compact briefing; it cannot be combined with --full.");
   if (values.repo && !/^[\w.-]+\/[\w.-]+$/.test(values.repo))
     throw new Error("--repo must be owner/name.");
   const order = values.order ?? "impact";
