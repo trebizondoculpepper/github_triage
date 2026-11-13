@@ -719,6 +719,25 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
         finding.uncertainty,
       );
   }
+  // Verification risk comes from the registered pull-requests rule, so the required-check
+  // contract (workflow.verify / verifySuccess) is not re-implemented here. Only reported when no
+  // more specific check row (failed, cancelled, pending, unknown) already explains the gap.
+  for (const finding of rule("pull-requests")) {
+    if (finding.rule !== "pr-verification-needed") continue;
+    const item = byUrl.get(finding.target);
+    if (!item || !workflow.openStates.includes(item.state)) continue;
+    const pr = snapshot.pullRequests.find((p) => p.url === item.url);
+    if (pr && verificationWord(pr) !== NOT_PROVEN_WORD) continue;
+    blocker(
+      item,
+      finding.rule,
+      "verification-not-proven",
+      finding.reason,
+      `Run or wait for the required verify check on PR #${item.number}.`,
+      finding.evidence,
+      finding.uncertainty,
+    );
+  }
   for (const stale of rule("stale-claim")) {
     const item = byUrl.get(stale.target);
     if (item)
@@ -1009,24 +1028,37 @@ function classifyChecks(pr: PullRequest) {
     ),
     /** False when the check connection was truncated: more outcomes exist than were seen. */
     complete: !pr.commits.nodes[0]?.commit.statusCheckRollup?.contexts.pageInfo?.hasNextPage,
+    /** The registered required check (workflow.verify) completed with a registered success. */
+    verified: checks.some(
+      (c) => c.name === workflow.verify && workflow.verifySuccess.includes(c.outcome),
+    ),
   };
 }
-const CANCELLED_WORD = "checks cancelled; verification incomplete";
-function prStatusWord(pr: PullRequest): string {
-  const { checks, failed, cancelled, pending, unknown, complete } = classifyChecks(pr);
-  if (pr.isDraft) return "draft";
-  if (workflow.conflicts.includes(pr.mergeable)) return "conflicting";
+const NOT_PROVEN_WORD = "verification not proven";
+/** Check-only status, shared by activity wording and the verification-risk blocker filter. */
+function verificationWord(pr: PullRequest): string {
+  const { failed, cancelled, pending, unknown, complete, verified } = classifyChecks(pr);
   if (failed.length) return "checks failing";
   if (cancelled.length) return CANCELLED_WORD;
   if (pending.length) return "checks pending";
+  if (unknown.length) return "checks unknown";
+  if (!complete) return "checks incomplete";
+  // Passing requires the registered required check, not merely any successful check.
+  if (!verified) return NOT_PROVEN_WORD;
+  return "checks passing";
+}
+const CANCELLED_WORD = "checks cancelled; verification incomplete";
+function prStatusWord(pr: PullRequest): string {
+  if (pr.isDraft) return "draft";
+  if (workflow.conflicts.includes(pr.mergeable)) return "conflicting";
+  const word = verificationWord(pr);
+  if (word === "checks failing" || word === CANCELLED_WORD || word === "checks pending")
+    return word;
   if (pr.reviewThreads.nodes.some((t) => !t.isResolved)) return "review findings open";
   // A reviewer can request changes without inline threads; same rule as the blocker section.
   if (pr.reviewDecision && workflow.changesRequested.includes(pr.reviewDecision))
     return "changes requested";
-  // Passing only when every observed outcome is a supported pass and none were left unseen.
-  if (!checks.length || unknown.length) return "checks unknown";
-  if (!complete) return "checks incomplete";
-  return "checks passing";
+  return word;
 }
 function nextFor(pr: PullRequest): string {
   const word = prStatusWord(pr);
@@ -1037,6 +1069,8 @@ function nextFor(pr: PullRequest): string {
   if (word === "review findings open" || word === "changes requested")
     return `Address review findings on PR #${pr.number}.`;
   if (word === "draft") return `Finish draft PR #${pr.number}.`;
+  if (word === NOT_PROVEN_WORD)
+    return `Run or wait for the required verify check on PR #${pr.number}.`;
   return `Review PR #${pr.number}; verify the current head before merging.`;
 }
 

@@ -816,6 +816,44 @@ describe("repository catch-up aggregation (#169)", () => {
     expect(fine.sections.activity.items[0]!.description).toContain("checks passing");
   });
 
+  const withChecks = (n: number, contexts: unknown[]) =>
+    pr(n, [], "SUCCESS", {
+      commits: {
+        nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS", contexts: page(contexts) } } }],
+      },
+    } as Partial<PullRequest>);
+  const verificationOf = (subject: PullRequest) => {
+    const report = catchUp(snap([], [subject], evidence([])), { now: clock, limit: 100 });
+    const row = report.sections.activity.items.find((r) => r.subject.number === subject.number)!;
+    const blockers = report.sections.blockers.items.filter(
+      (r) => r.subject.number === subject.number,
+    );
+    return { row, blockers };
+  };
+
+  it("reports a verification risk for an open PR with no checks", () => {
+    const { row, blockers } = verificationOf(withChecks(180, []));
+    expect(row.description).toContain("verification not proven");
+    expect(row.description).not.toContain("checks passing");
+    expect(row.next).toBe("Run or wait for the required verify check on PR #180.");
+    expect(blockers.map((r) => r.kind)).toEqual(["verification-not-proven"]);
+  });
+
+  it("does not treat an unrelated passing check as the required verify", () => {
+    const { row, blockers } = verificationOf(
+      withChecks(181, [{ name: "lint", status: "COMPLETED", conclusion: "SUCCESS" }]),
+    );
+    expect(row.description).toContain("verification not proven");
+    expect(row.description).not.toContain("checks passing");
+    expect(blockers.map((r) => r.kind)).toEqual(["verification-not-proven"]);
+  });
+
+  it("reports checks passing with no risk when the required verify succeeded", () => {
+    const { row, blockers } = verificationOf(pr(182, []));
+    expect(row.description).toContain("checks passing");
+    expect(blockers).toEqual([]);
+  });
+
   it("groups one PR closing two claimed issues into one contribution, in any order", () => {
     const a = issue(84, ["agent:ana", "status:ready"]);
     const b = issue(85, ["agent:bo"]);
