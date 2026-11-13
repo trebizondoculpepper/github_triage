@@ -44,7 +44,7 @@ Pure TypeScript is the preferred architecture. A file may use another language o
 ### Guardrails
 
 - Every non-TypeScript file under `src/`, `scripts/` or executable `doc/reports/examples/` appears in one checked-in allowlist with its purpose, integration boundary, runtime requirements, supported platforms and how it is validated. The allowlist names exact files; no directory is exempt wholesale.
-- CI fails on an unlisted `.js`, `.mjs`, `.cjs`, `.sh`, `.bat`, `.cmd`, `.ps1` or `.py` file in those directories, and on any import of an allowlisted file from `src/` or tests. Implementation is tracked in #113; until it lands, the check covers `src/` and the examples only.
+- CI fails on an unlisted `.js`, `.mjs`, `.cjs`, `.sh`, `.bat`, `.cmd`, `.ps1` or `.py` file in those directories, and on any import of an allowlisted file from `src/` or tests. The allowlist is `LANGUAGE_EXCEPTIONS` in `src/language-policy.ts`, enforced by the "TypeScript source boundary" test in `src/triage.test.ts` (#113).
 - An exception that gains branching or workflow logic, or a TypeScript importer, moves to TypeScript.
 
 ## Migration scope
