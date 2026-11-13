@@ -11,7 +11,8 @@
  * FORBIDDEN on user-owned accounts, API errors) is unknown, never "unestimated" or queued.
  *
  * Collection cost: provenance comes from the comments already in the snapshot; native values
- * cost one paginated query over open issues, only when complexity is enabled and mapped.
+ * cost one paginated query over open issues, only when complexity is enabled and mapped, and only
+ * after Ticket Doctor's discovery query verifies the mapped field exists and is compatible.
  */
 import { COMPLEXITY_SIZES, complexityGuidance } from "./complexity.js";
 import type { ComplexitySize } from "./complexity.js";
@@ -25,6 +26,7 @@ import {
   settingFor,
 } from "./config.js";
 import type { ConfigFileSystem, GitRunner } from "./config.js";
+import { diagnoseComplexityConfig } from "./complexitydoctor.js";
 import { ghFieldApi } from "./complexitysetup.js";
 import type { FieldApi, GraphqlAnswer } from "./complexitysetup.js";
 import { parseProvenance } from "./estimate.js";
@@ -40,7 +42,15 @@ export interface EstimationRuntime {
   readonly api?: FieldApi;
 }
 
-export type EstimationStatus = "available" | "disabled" | "setup-required" | "unknown";
+export type EstimationStatus =
+  | "available"
+  | "disabled"
+  | "setup-required"
+  | "missing"
+  | "incompatible"
+  | "inaccessible"
+  | "unsupported"
+  | "unknown";
 
 export interface EstimationFinding {
   rule: string;
@@ -122,6 +132,31 @@ export async function collectEstimationInput(
       },
     ]);
   if (offline) return unknownInput("unknown", fieldId, "offline: native values were not read");
+
+  // An absent value only means "unset" for a verified, compatible field: a deleted, foreign,
+  // inaccessible or incompatible mapping yields no matching values for every issue. Reuse
+  // Ticket Doctor's live verification (and its recovery commands) rather than duplicating it.
+  const doctor = await diagnoseComplexityConfig(repository, {}, runtime);
+  if (doctor.status !== "configured-compatible") {
+    const status: EstimationStatus =
+      doctor.status === "missing" ||
+      doctor.status === "incompatible" ||
+      doctor.status === "inaccessible" ||
+      doctor.status === "unsupported"
+        ? doctor.status
+        : doctor.status === "disabled"
+          ? "disabled"
+          : doctor.status === "unconfigured"
+            ? "setup-required"
+            : "unknown";
+    const findings = doctor.findings.map(({ rule, detail, next }) => ({ rule, detail, next }));
+    return unknownInput(
+      status,
+      fieldId,
+      `mapped complexity field ${fieldId} not verified compatible (${doctor.status})`,
+      findings,
+    );
+  }
 
   const api = runtime.api ?? ghFieldApi;
   const [owner, name] = repository.split("/") as [string, string];
@@ -323,7 +358,12 @@ export function estimationReport(
       detail:
         input.status === "setup-required"
           ? "Estimation queue unavailable: no complexity field is mapped (configuration finding)."
-          : `Estimation queue unavailable: ${input.unavailable ?? "complexity state unknown"}. Unknown is not unestimated.`,
+          : input.status === "missing" ||
+              input.status === "incompatible" ||
+              input.status === "inaccessible" ||
+              input.status === "unsupported"
+            ? `Estimation queue unavailable: ${input.unavailable ?? `complexity field ${input.status}`} (configuration finding, not an empty queue). Unknown is not unestimated.`
+            : `Estimation queue unavailable: ${input.unavailable ?? "complexity state unknown"}. Unknown is not unestimated.`,
       queue: null,
       unknown,
       entries,

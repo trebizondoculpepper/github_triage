@@ -4912,12 +4912,46 @@ describe("estimation queue and briefing visibility (#122)", () => {
     },
     errors: [],
   });
-  const apiOf = (answer: unknown) => {
+  const sizeOptions = ["XS", "S", "M", "L", "XL", "XXL"].map((name) => ({ name }));
+  const sizeField = {
+    __typename: "IssueFieldSingleSelect",
+    id: field,
+    name: "Complexity",
+    dataType: "SINGLE_SELECT",
+    visibility: "ALL",
+    options: sizeOptions,
+  };
+  /** Owner issue-field discovery answer (Ticket Doctor's verification query). */
+  const discoveryOf = (
+    fields: unknown[] | null,
+    errors: { type?: string; message?: string }[] = [],
+  ) => ({
+    data: {
+      viewer: { login: "owner" },
+      repository: {
+        owner: {
+          __typename: "User",
+          id: "U_1",
+          login: "owner",
+          issueFields: fields ? { pageInfo: { hasNextPage: false }, nodes: fields } : null,
+        },
+      },
+    },
+    errors,
+  });
+  const apiOf = (answer: unknown, discovery: unknown = discoveryOf([sizeField])) => {
+    /** Native value queries only; field verification is recorded separately. */
     const calls: unknown[] = [];
+    const verifications: unknown[] = [];
     return {
       calls,
+      verifications,
       api: {
-        query: async (_q: string, v: Record<string, string>) => {
+        query: async (q: string, v: Record<string, string>) => {
+          if (q.includes("issueFields(")) {
+            verifications.push(v);
+            return discovery as { data: unknown; errors: { type?: string; message?: string }[] };
+          }
           calls.push(v);
           if (answer instanceof Error) throw answer;
           return answer as { data: unknown; errors: { type?: string; message?: string }[] };
@@ -4952,8 +4986,9 @@ describe("estimation queue and briefing visibility (#122)", () => {
     answer: unknown,
     issues: Issue[],
     args: string[] = [],
+    discovery?: unknown,
   ) {
-    const { api, calls } = apiOf(answer);
+    const { api, calls } = apiOf(answer, discovery);
     let out = "";
     const code = await main(["--json", ...args], async (t) => void (out = t), {
       collect: async () => snapshot(issues, []),
@@ -5026,6 +5061,39 @@ describe("estimation queue and briefing visibility (#122)", () => {
     const thrown = await brief(mapped, new Error("network down"), [issue(1)]);
     expect(thrown.code).toBe(0);
     expect(thrown.report.estimation.status).toBe("unknown");
+  });
+  it("keeps the queue unavailable when the mapped field is deleted, incompatible or inaccessible", async () => {
+    const issues = [issue(1), blocked()];
+    // The values query succeeds with no matching values: without verification every
+    // issue would wrongly be queued as unestimated.
+    const empty = valuesAnswer({ 1: null, 2: null });
+    const other = { ...sizeField, id: "IF_other" };
+    const deleted = await brief(mapped, empty, issues, [], discoveryOf([other]));
+    expect(deleted.report.estimation).toMatchObject({ status: "missing", queue: null, unknown: 2 });
+    expect(deleted.report.estimation.findings[0]).toMatchObject({
+      rule: "complexity-field-missing",
+      next: [
+        "github-triage setup complexity --select IF_other",
+        "github-triage config set complexity.enabled false",
+      ],
+    });
+    const wrong = { ...sizeField, options: sizeOptions.slice(0, 3) };
+    const incompatible = await brief(mapped, empty, issues, [], discoveryOf([wrong]));
+    expect(incompatible.report.estimation).toMatchObject({ status: "incompatible", queue: null });
+    expect(incompatible.report.estimation.findings[0].rule).toBe("complexity-field-incompatible");
+    const forbidden = discoveryOf(null, [{ type: "FORBIDDEN", message: "no" }]);
+    const inaccessible = await brief(mapped, empty, issues, [], forbidden);
+    expect(inaccessible.report.estimation).toMatchObject({ status: "inaccessible", queue: null });
+    expect(inaccessible.report.estimation.findings[0]).toMatchObject({
+      rule: "complexity-field-api-inaccessible",
+      next: ["github-triage setup complexity", "github-triage config set complexity.enabled false"],
+    });
+    for (const r of [deleted, incompatible, inaccessible]) {
+      expect(r.code).toBe(0);
+      expect(r.calls).toEqual([]);
+      const subject = r.report.subjects.find((s: { number: number }) => s.number === 2);
+      expect(subject.complexity.state).toBe("unknown");
+    }
   });
   it("suppresses the queue when disabled and reports a missing mapping as a finding", async () => {
     const disabled = await brief(
