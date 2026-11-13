@@ -189,6 +189,8 @@ export async function planClaim(repository, request, query = ghQuery) {
         ? `Already claimed by ${agent}.`
         : `Claimed by ${agent}; posting the missing claim comment.`,
       changes: commented ? [] : [claimComment()],
+      // Completing a partly failed acquisition gets the same post-write ownership check.
+      ...(commented ? {} : { recheck: { agent } }),
     };
   }
   if (

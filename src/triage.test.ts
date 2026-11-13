@@ -1808,3 +1808,41 @@ describe("claim ownership needs complete labels", () => {
     }
   });
 });
+
+describe("claim comment repair re-checks ownership", () => {
+  it("reports a competing owner that appears while the missing claim comment is repaired", async () => {
+    let reads = 0;
+    const q = async () => {
+      reads++;
+      return {
+        repository: {
+          issueOrPullRequest: {
+            __typename: "Issue",
+            number: 7,
+            title: "T7",
+            url: `https://github.com/${repo}/issues/7`,
+            state: "OPEN",
+            updatedAt: time,
+            labels: page(
+              (reads > 1 ? ["agent:kavya", "agent:other"] : ["agent:kavya"]).map((name) => ({
+                name,
+              })),
+            ),
+            issueDependenciesSummary: { blockedBy: 0 },
+            blockedBy: page([]),
+            closedByPullRequestsReferences: page([]),
+            comments: page([]),
+            timelineItems: page([]),
+          },
+          claims: page([{ number: 7, title: "T7", url: issue(7).url }]),
+          ownerLabel: { name: "agent:kavya" },
+        },
+      };
+    };
+    const plan = await planClaim(repo, { number: 7, agent: "kavya" }, q);
+    expect(plan.changes!.map((c) => c.step)).toEqual(["comment"]);
+    const result = await applyPlan(repo, plan, { run: async () => {}, query: q });
+    expect(result.exitCode).toBe(2);
+    expect(result.conflict).toMatch(/agent:other/);
+  });
+});
