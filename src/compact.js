@@ -13,6 +13,7 @@ export const ruleMetadata = new Map([
   ["ready-prerequisites-unverified", "dependencies"],
   ["blocker-explanation", "dependencies"],
   ["ready-unclaimed", "available"],
+  ["urgency-conflict", "hygiene"],
   ["addressed-attention", "addressed"],
   ...[
     "native-evidence-unknown",

@@ -2479,3 +2479,31 @@ describe("addressed attention in the expanded briefing (#3)", () => {
     expect(anonymous.actions.items.some((a) => a.rule === "addressed-attention")).toBe(false);
   });
 });
+
+describe("manual urgency overrides in general pickup (#43)", () => {
+  it("orders high before unspecified before low, reports conflicts, and never changes eligibility", () => {
+    const high = issue(50, ["status:ready", "urgency:high"]);
+    const plain = issue(51, ["status:ready"]);
+    const low = issue(52, ["status:ready", "urgency:low"]);
+    const both = issue(53, ["status:ready", "urgency:high", "urgency:low"]);
+    const claimedHigh = issue(54, ["status:ready", "urgency:high", "agent:bo"]);
+    const r = briefing(
+      snapshot([low, both, plain, high, claimedHigh], []),
+      { limit: 100 },
+      new Date(time),
+    );
+    expect(r.ready.items.map((i) => i.number)).toEqual([50, 53, 51, 52]);
+    const pickup = r.actions.items
+      .filter((a) => a.rule === "ready-unclaimed")
+      .map((a) => a.target.split("/").pop());
+    expect(pickup).toEqual(["50", "51", "53", "52"]);
+    expect(
+      r.actions.items.find((a) => a.rule === "ready-unclaimed" && a.target === high.url)!.reason,
+    ).toMatch(/urgency:high override/);
+    expect(
+      r.actions.items.filter((a) => a.rule === "urgency-conflict").map((a) => a.target),
+    ).toEqual([both.url]);
+    // Urgency never makes claimed work pickable.
+    expect(pickup).not.toContain("54");
+  });
+});
