@@ -15,6 +15,7 @@ import {
   planDependencyChange,
 } from "./dependencies.js";
 import { compactBriefing, compactText } from "./compact.js";
+import { defaultStaleHours, teamText, teamView } from "./team.js";
 import { migrationPlanText, planMigration } from "./migration.js";
 import { briefing, textReport } from "./briefing.js";
 
@@ -23,6 +24,7 @@ export const help = `Usage: github-triage [options]
 Read-only LLM action briefing. Requires authenticated gh and Node 20+.
   deps N [--tree]       Read native upstream/downstream dependencies (deps --help)
   deps add|remove N --on M --note WHY [--dry-run]  Change native dependencies
+  team [--stale-hours N]  Read-only: each agent's claims, linked PRs, activity and warnings
   --repo owner/name     Repository (default: current gh checkout)
   --json                Versioned structured output (from a checkout: npm run --silent triage)
   --issue N             Include full issue body/history, even if closed
@@ -208,7 +210,7 @@ export async function checkpointSince(path, repository) {
 /**
  * @param {string[]} args
  * @param {(text: string) => Promise<void>} [output]
- * @param {{collect: typeof collect, currentRepository: typeof currentRepository, dependencyReport?: typeof dependencyReport, planDependencyChange?: typeof planDependencyChange, ghRun?: import("./dependencies.js").GhRun, planMigration?: typeof planMigration, migrationRuntime?: Record<string, any>}} [runtime]
+ * @param {{collect: typeof collect, currentRepository: typeof currentRepository, dependencyReport?: typeof dependencyReport, planDependencyChange?: typeof planDependencyChange, ghRun?: import("./dependencies.js").GhRun, planMigration?: typeof planMigration, migrationRuntime?: Record<string, any>, now?: () => Date}} [runtime]
  * @returns {Promise<number>}
  */
 export async function main(
@@ -219,6 +221,36 @@ export async function main(
     ),
   runtime = { collect, currentRepository, dependencyReport },
 ) {
+  if (args[0] === "team") {
+    const { values } = parseArgs({
+      args: args.slice(1),
+      options: {
+        repo: { type: "string" },
+        json: { type: "boolean" },
+        "stale-hours": { type: "string" },
+        cache: { type: "string" },
+        offline: { type: "boolean" },
+      },
+    });
+    if (values.repo && !/^[\w.-]+\/[\w.-]+$/.test(values.repo))
+      throw new Error("--repo must be owner/name.");
+    const staleHours =
+      values["stale-hours"] === undefined ? defaultStaleHours : Number(values["stale-hours"]);
+    if (!Number.isFinite(staleHours) || staleHours <= 0)
+      throw new Error("--stale-hours must be a positive number.");
+    if (values.offline && !values.cache) throw new Error("--offline requires --cache PATH.");
+    const snapshot = values.offline
+      ? await cachedSnapshot(values.cache, values.repo)
+      : await runtime.collect(values.repo ?? (await runtime.currentRepository()), {});
+    if (!values.offline && values.cache) await atomicJson(values.cache, snapshot);
+    const view = teamView(snapshot, {
+      staleHours,
+      now: runtime.now?.() ?? new Date(),
+      offline: !!values.offline,
+    });
+    await output(values.json ? JSON.stringify(view, null, 2) + "\n" : teamText(view));
+    return view.completeness.complete ? 0 : 2;
+  }
   if (args[0] === "deps") {
     const values = depsArgumentsFor(args.slice(1));
     if (values.help) {

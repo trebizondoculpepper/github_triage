@@ -19,6 +19,7 @@ npm run --silent triage -- --repo owner/repository --json
 npm run triage -- --repo owner/repository --issue 42
 npm run triage -- --repo owner/repository --agent inbox-name
 npm run triage -- deps 42 --repo owner/repository --tree
+npm run triage -- team --repo owner/repository    # each agent's claims, linked PRs, activity, warnings
 ```
 
 Without `--repo`, `gh repo view` resolves the repository from the **current working directory**. From this checkout that means `github_triage`, not `poker_blocks`. To inspect a different checkout while keeping its current-directory resolution:
