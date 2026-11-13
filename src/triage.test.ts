@@ -23,6 +23,7 @@ import {
   planDependencyChange,
 } from "./dependencies.js";
 import { briefing, dependencyDone, textReport } from "./briefing.js";
+import { complexityGuidance } from "./complexity.js";
 import {
   collect,
   declaredDependencies,
@@ -3553,5 +3554,50 @@ describe("who is working on a ticket (#61, doc/design/diagnostics.md)", () => {
     expect(JSON.parse(out).answer).toBe("recorded claim: ana");
     for (const bad of [["who"], ["who", "x"], ["who", "1", "--stale-hours", "0"]])
       await expect(main(bad, async () => {}, runtime)).rejects.toThrow();
+  });
+});
+
+describe("bundled complexity guidance (#118)", () => {
+  const offline = {
+    collect: async (): Promise<never> => {
+      throw new Error("guidance must not query GitHub");
+    },
+    currentRepository: async (): Promise<never> => {
+      throw new Error("guidance must not resolve a repository");
+    },
+    updateCheck: async () => ({ status: "skipped" as const, reason: "" }),
+  };
+  it("renders text and JSON help from one versioned definition without GitHub", async () => {
+    let text = "";
+    let json = "";
+    expect(await main(["estimate", "--help"], async (t) => void (text = t), offline)).toBe(0);
+    expect(
+      await main(["estimate", "--help", "--json"], async (t) => void (json = t), offline),
+    ).toBe(0);
+    const parsed = JSON.parse(json);
+    expect(parsed).toMatchObject({
+      schemaVersion: 1,
+      kind: "complexity-guidance",
+      guidanceVersion: complexityGuidance.guidanceVersion,
+      sizes: ["XS", "S", "M", "L", "XL", "XXL"],
+    });
+    expect(parsed.bands.map((b: { size: string }) => b.size)).toEqual(parsed.sizes);
+    for (const band of complexityGuidance.bands) expect(text).toContain(band.guidance);
+    expect(text).toContain(`version ${complexityGuidance.guidanceVersion}`);
+    expect(text).toMatch(/not hours/);
+    expect(text).toMatch(/waiting/);
+    expect(text).toMatch(/no anchors/);
+    expect(text).toContain("not yet available");
+    // Repository-neutral: no ticket/PR numbers from any repository are bundled.
+    expect(json).not.toMatch(/#\d+/);
+  });
+  it("lists estimate in top-level help and refuses unimplemented recording", async () => {
+    let text = "";
+    await main(["--help"], async (t) => void (text = t), offline);
+    expect(text).toContain("estimate --help");
+    await expect(main(["estimate", "12", "M"], async () => {}, offline)).rejects.toThrow(
+      "not yet available",
+    );
+    await expect(main(["estimate"], async () => {}, offline)).rejects.toThrow("Usage:");
   });
 });

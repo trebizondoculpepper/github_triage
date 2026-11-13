@@ -25,6 +25,7 @@ import { migrationPlanText, planMigration } from "./migration.js";
 import { briefing, textReport } from "./briefing.js";
 import { pickupOrders } from "./ranking.js";
 import type { PickupOrder } from "./ranking.js";
+import { complexityGuidanceJson, complexityGuidanceText } from "./complexity.js";
 import type { GhRun } from "./dependencies.js";
 import type { Query } from "./github.js";
 import type { Snapshot } from "./types.js";
@@ -67,6 +68,7 @@ export const help = `Usage: github-triage [options]
 Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   deps N [--tree]       Read native upstream/downstream dependencies (deps --help)
   deps add|remove N --on M --note WHY [--dry-run]  Change native dependencies
+  estimate --help       Complexity sizing guidance (XS..XXL); recording is not yet available
   pr N                  Why is pull request N not progressing? Every blocker at once
   claim N --agent NAME [--branch B] [--platform P] [--dry-run]  Claim an eligible ticket
   needs-human N --agent NAME --designer NAME --why TEXT --question TEXT... [--dry-run]
@@ -522,6 +524,20 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
       values.json ? JSON.stringify(report, null, 2) + "\n" : ticketOwnershipText(report),
     );
     return report.completeness.complete ? 0 : 2;
+  }
+  if (args[0] === "estimate") {
+    const { values, positionals } = parseArgs({
+      args: args.slice(1),
+      allowPositionals: true,
+      options: { help: { type: "boolean" }, json: { type: "boolean" } },
+    });
+    // Only the bundled guidance exists; never present recording as installed.
+    if (!values.help || positionals.length)
+      throw new Error(
+        "Usage: github-triage estimate --help [--json] (recording estimates is not yet available)",
+      );
+    await output(values.json ? complexityGuidanceJson() : complexityGuidanceText());
+    return 0;
   }
   if (args[0] === "pr") {
     const { values, positionals } = parseArgs({
