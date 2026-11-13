@@ -1,3 +1,4 @@
+import type { LockTiming } from "./filelock.js";
 import { describe, expect, it } from "vite-plus/test";
 import {
   chmod,
@@ -8893,30 +8894,43 @@ x = 1
     }
     const initial = '[agents.codex]\nname = "stable_one"\n\n[agents.ori]\nname = "other_agent"\n';
     /**
-     * Writer A pauses before its rename until writer B has made its final unchanged-since-read
-     * check (or 300 ms pass). Without the lock, B passes that check against the same document
-     * and its rename reverts A's change; with it, B cannot read until A has released.
+     * Explicit sequencing, no real-time head start (#177). Each writer's Git exclusion check
+     * runs before the lock and takes an unpredictable time, so a sleep cannot decide which
+     * writer locks first. Instead writer B is started only once writer A holds the lock, and A
+     * pauses before its rename until B has tried the lock and found it held. Without the lock, B
+     * would read the same document as A and its rename would revert A's change; with it, B can
+     * read only after A has released. Generous lock bounds keep the wait and stale thresholds
+     * out of play on a slow runner; B's polling is the only real delay left.
      */
-    function interleaved(path: string) {
-      let signal: () => void = () => undefined;
-      const bChecked = new Promise<void>((resolve) => (signal = resolve));
-      let bReads = 0;
+    const patient: LockTiming = { waitMs: 60_000, staleMs: 600_000, pollMs: 5 };
+    function sequenced(lockPath: string) {
+      let aLocked: () => void = () => undefined;
+      let bBlocked: () => void = () => undefined;
+      const aHoldsLock = new Promise<void>((resolve) => (aLocked = resolve));
+      const bFoundLockHeld = new Promise<void>((resolve) => (bBlocked = resolve));
       const a: ConfigFileSystem = {
         ...nodeFileSystem,
+        writeText: async (file, text, mode) => {
+          await nodeFileSystem.writeText(file, text, mode);
+          if (file === lockPath) aLocked();
+        },
         rename: async (from, to) => {
-          await Promise.race([bChecked, new Promise((r) => setTimeout(r, 300))]);
+          await bFoundLockHeld;
           await nodeFileSystem.rename(from, to);
         },
       };
       const b: ConfigFileSystem = {
         ...nodeFileSystem,
-        readText: async (file) => {
-          const text = await nodeFileSystem.readText(file);
-          if (file === path && ++bReads === 2) signal();
-          return text;
+        writeText: async (file, text, mode) => {
+          try {
+            await nodeFileSystem.writeText(file, text, mode);
+          } catch (error) {
+            if (file === lockPath && (error as NodeJS.ErrnoException).code === "EEXIST") bBlocked();
+            throw error;
+          }
         },
       };
-      return { a, b };
+      return { a, b, aHoldsLock };
     }
 
     it("keeps both agents' changes to different entries", async () => {
@@ -8924,10 +8938,16 @@ x = 1
         const target = await resolveIdentityTarget(dir, undefined);
         const path = join(target.root, IDENTITY_FILE);
         await writeFile(path, initial);
-        const { a, b } = interleaved(path);
-        const first = setIdentity(target, "codex", "identity.triage_role", "designer", { fs: a });
-        await new Promise((r) => setTimeout(r, 50));
-        const second = setIdentity(target, "ori", "identity.triage_role", "implementer", { fs: b });
+        const { a, b, aHoldsLock } = sequenced(join(target.root, IDENTITY_LOCK_FILE));
+        const first = setIdentity(target, "codex", "identity.triage_role", "designer", {
+          fs: a,
+          lockTiming: patient,
+        });
+        await aHoldsLock;
+        const second = setIdentity(target, "ori", "identity.triage_role", "implementer", {
+          fs: b,
+          lockTiming: patient,
+        });
         await Promise.all([first, second]);
         const after = await readFile(path, "utf8");
         expect(after).toMatch(/\[agents\.codex\][^[]*triage_role = "designer"/);
@@ -8941,11 +8961,15 @@ x = 1
         const target = await resolveIdentityTarget(dir, undefined);
         const path = join(target.root, IDENTITY_FILE);
         await writeFile(path, initial);
-        const { a, b } = interleaved(path);
-        const first = setIdentity(target, "codex", "identity.triage_role", "designer", { fs: a });
-        await new Promise((r) => setTimeout(r, 50));
+        const { a, b, aHoldsLock } = sequenced(join(target.root, IDENTITY_LOCK_FILE));
+        const first = setIdentity(target, "codex", "identity.triage_role", "designer", {
+          fs: a,
+          lockTiming: patient,
+        });
+        await aHoldsLock;
         const second = setIdentity(target, "codex", "identity.triage_role", "implementer", {
           fs: b,
+          lockTiming: patient,
         });
         expect(await Promise.all([first, second])).toMatchObject([
           { changed: true },
@@ -8954,6 +8978,7 @@ x = 1
         const record = await readIdentity(target.root, "codex");
         expect(record).toMatchObject({ name: "stable_one", triageRole: "implementer" });
         expect(await readFile(path, "utf8")).toContain('name = "other_agent"');
+        expect(await readdir(dir)).not.toContain(IDENTITY_LOCK_FILE);
       });
     });
 
