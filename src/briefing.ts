@@ -1,12 +1,12 @@
 /** Registered workflow rules. GitHub facts are evidence, not natural-language decisions. */
+import { dependencyDrift, dependencyFacts, nativeKnown, pickable } from "./dependencies.js";
 import {
-  dependencyDrift,
-  dependencyFacts,
-  nativeKnown,
-  pickable,
-  unblocks,
-} from "./dependencies.js";
-import { pickupEligibility, rankPickup, urgencyBand } from "./ranking.js";
+  compareImpact,
+  impactLookup,
+  pickupEligibility,
+  rankPickup,
+  urgencyBand,
+} from "./ranking.js";
 import type { PickupOrder } from "./ranking.js";
 import { estimationText } from "./estimation.js";
 import { labelEstimationReport } from "./complexitylabels.js";
@@ -75,8 +75,6 @@ export const isParked = (issue: Labelled): boolean => labels(issue).includes(wor
 export const owners = (issue: Labelled): string[] =>
   labels(issue).filter((label) => label.startsWith(workflow.ownerPrefix));
 const active = (issue: Issue): boolean => workflow.openStates.includes(issue.state);
-/** Open dependants this item is the last open blocker for; 0 for an unknown item. */
-const unblocksOf = (item: Issue | undefined): number => (item ? unblocks(item) : 0);
 export const dependencyDone = (dependency: Dependency): boolean =>
   dependency.available &&
   workflow.completedReasons.includes(dependency.stateReason ?? dependency.state ?? "");
@@ -543,6 +541,8 @@ export interface Bounded<T> {
 export function briefing(snapshot: Snapshot, options: BriefingOptions, now: Date = new Date()) {
   const issues = snapshot.issues.filter(active);
   const prs = snapshot.pullRequests.filter(active);
+  // One impact definition for every ordering (#208): the eligibility-filtered immediate unlocks.
+  const impactOf = impactLookup(issues, { prs, platform: options.platform });
   const actions = [...analysisRules.values()]
     .flatMap((handler) =>
       handler({
@@ -559,8 +559,7 @@ export function briefing(snapshot: Snapshot, options: BriefingOptions, now: Date
     .sort(
       (a, b) =>
         b.priority - a.priority ||
-        unblocksOf(issues.find((i) => i.url === b.target)) -
-          unblocksOf(issues.find((i) => i.url === a.target)) ||
+        compareImpact(impactOf(a.target), impactOf(b.target)) ||
         a.target.localeCompare(b.target) ||
         a.rule.localeCompare(b.rule),
     );
@@ -634,6 +633,7 @@ export function briefing(snapshot: Snapshot, options: BriefingOptions, now: Date
           rank: candidate.rank,
           urgency: candidate.urgency,
           unlocks: candidate.unlocks,
+          unlocksUnknown: candidate.unlocksUnknown,
           incomplete: candidate.incomplete,
           createdAt: candidate.createdAt,
           rankReason: candidate.reason,

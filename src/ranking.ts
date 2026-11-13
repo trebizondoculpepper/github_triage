@@ -170,32 +170,101 @@ export function pickupEligibility(issue: Issue, context: PickupContext): Eligibi
 }
 
 /**
- * Distinct open dependants that become otherwise eligible when this ticket, their last open
- * native blocker, completes. Distant descendants, dependants still needing design, dependants
- * absent from the snapshot, dependants without complete native dependency evidence and unknown
- * eligibility do not count.
+ * The one impact definition (#208): distinct open dependants that become otherwise eligible
+ * when this ticket, their last open native blocker, completes, plus why that count may be
+ * incomplete. Distant descendants, dependants still needing design or otherwise ineligible,
+ * and dependants with another open blocker do not count.
+ *
+ * Missing evidence is unknown impact, never zero: a truncated or uncollected `blocking`
+ * connection, or a possible unlock that cannot be resolved (absent from the snapshot, in another
+ * repository, or without complete native evidence of its own), adds a reason to `unknown`. The
+ * `unlocks` count is then only a proven lower bound.
  */
+export interface UnlockImpact {
+  /** Definite immediate unlocks, in `blocking` order. */
+  unlocks: Issue[];
+  /** Why more unlocks cannot be ruled out; empty when the count is complete. */
+  unknown: string[];
+}
 export function immediateUnlocks(
   issue: Issue,
   byUrl: ReadonlyMap<string, Issue>,
   context: PickupContext,
-): Issue[] {
-  if (!pickupPolicy.openStates.includes(issue.state)) return [];
+): UnlockImpact {
+  if (!pickupPolicy.openStates.includes(issue.state)) return { unlocks: [], unknown: [] };
+  const unknown: string[] = [];
+  const blocking = issue.blocking;
+  if (!blocking) unknown.push("dependants not collected");
+  else if (blocking.pageInfo?.hasNextPage) {
+    const total = issue.issueDependenciesSummary?.totalBlocking;
+    unknown.push(
+      `dependant list truncated (${blocking.nodes.length}${total === undefined ? "" : ` of ${total}`} seen)`,
+    );
+  }
   const seen = new Set<string>();
-  return (issue.blocking?.nodes ?? []).flatMap((node) => {
+  const unlocks = (blocking?.nodes ?? []).flatMap((node) => {
     if (seen.has(node.url)) return [];
     seen.add(node.url);
-    if (node.state !== "OPEN" || node.issueDependenciesSummary?.blockedBy !== 1) return [];
+    if (node.state !== "OPEN") return [];
+    const blockers = node.issueDependenciesSummary?.blockedBy;
+    if (blockers !== undefined && blockers !== 1) return [];
     const dependant = byUrl.get(node.url);
+    const name = `${node.repository?.nameWithOwner ?? "unknown repository"}#${node.number}`;
+    if (!dependant) {
+      unknown.push(`dependant ${name} not in this snapshot`);
+      return [];
+    }
     // The dependant's own native evidence must be complete and agree that this ticket is its
-    // only open blocker; otherwise its eligibility is unknown and it is not a definite unlock.
-    return dependant &&
-      nativeKnown(dependant) &&
-      dependant.issueDependenciesSummary.blockedBy === 1 &&
-      otherwiseEligible(dependant, context).status === "eligible"
-      ? [dependant]
-      : [];
+    // only open blocker; otherwise whether it unlocks is unknown.
+    if (blockers === undefined || !nativeKnown(dependant)) {
+      unknown.push(`dependant ${name} lacks native dependency evidence`);
+      return [];
+    }
+    if (dependant.issueDependenciesSummary.blockedBy !== 1) return [];
+    const eligibility = otherwiseEligible(dependant, context);
+    // Unknown eligibility (platform restriction without a viewer platform, truncated closing-PR
+    // evidence) is unknown impact, never a silent zero.
+    if (eligibility.status === "unknown") {
+      unknown.push(...eligibility.reasons.map((reason) => `dependant ${name}: ${reason}`));
+      return [];
+    }
+    return eligibility.status === "eligible" ? [dependant] : [];
   });
+  return { unlocks, unknown };
+}
+
+/**
+ * Impact comparison rule (#208), shared by every ordering that uses impact: compare the proven
+ * lower bound (definite unlocks) only. Unknown impact therefore never outranks a larger known
+ * count and never ranks below zero; equal lower bounds tie, whether known or not, and fall
+ * through to the next deterministic key.
+ */
+export const compareImpact = (a: UnlockImpact, b: UnlockImpact): number =>
+  b.unlocks.length - a.unlocks.length;
+
+/** Human-readable impact: a definite count, or a lower bound with the unknown reasons. */
+export function impactText(impact: UnlockImpact): string {
+  const numbers = impact.unlocks.map((d) => `#${d.number}`).join(", ");
+  const count = `${impact.unknown.length ? "at least " : ""}${impact.unlocks.length}`;
+  return `unlocks ${count}${numbers ? ` (${numbers})` : ""}${impact.unknown.length ? `; impact unknown: ${impact.unknown.join("; ")}` : ""}`;
+}
+
+/** Memoized impact by URL for orderings over arbitrary targets; non-issues have no impact. */
+export function impactLookup(
+  issues: Issue[],
+  context: PickupContext,
+): (url: string) => UnlockImpact {
+  const byUrl = new Map(issues.map((issue) => [issue.url, issue]));
+  const cache = new Map<string, UnlockImpact>();
+  return (url) => {
+    let impact = cache.get(url);
+    if (!impact) {
+      const item = byUrl.get(url);
+      impact = item ? immediateUnlocks(item, byUrl, context) : { unlocks: [], unknown: [] };
+      cache.set(url, impact);
+    }
+    return impact;
+  };
 }
 
 /** One ranked pickup candidate, with the metadata kept visible under every ordering. */
@@ -205,6 +274,8 @@ export interface RankedPickup {
   order: PickupOrder;
   urgency: string;
   unlocks: number[];
+  /** Why more unlocks cannot be ruled out (#208); empty when `unlocks` is complete. */
+  unlocksUnknown: string[];
   incomplete: boolean;
   createdAt: string;
   platforms: string[];
@@ -219,6 +290,7 @@ const numeric: Key = (a, b) => a.issue.number - b.issue.number;
 export const orderingPolicy: Record<PickupOrder, Key[]> = {
   impact: [
     (a, b) => urgencyBand(a.issue) - urgencyBand(b.issue),
+    // compareImpact: proven lower bound only; unknown neither outranks nor sinks (#208).
     (a, b) => b.unlocks.length - a.unlocks.length,
     (a, b) => Number(b.incomplete) - Number(a.incomplete),
     created,
@@ -242,17 +314,21 @@ export function rankPickup(
   const byUrl = new Map(issues.map((issue) => [issue.url, issue]));
   const candidates = issues
     .filter((issue) => pickupEligibility(issue, context).status === "eligible")
-    .map((issue): RankedPickup => ({
-      issue,
-      rank: 0,
-      order,
-      urgency: urgencyText(issue),
-      unlocks: immediateUnlocks(issue, byUrl, context).map((dependant) => dependant.number),
-      incomplete: names(issue).includes(pickupPolicy.incomplete),
-      createdAt: issue.createdAt,
-      platforms: platformsOf(issue),
-      reason: "",
-    }));
+    .map((issue): RankedPickup => {
+      const impact = immediateUnlocks(issue, byUrl, context);
+      return {
+        issue,
+        rank: 0,
+        order,
+        urgency: urgencyText(issue),
+        unlocks: impact.unlocks.map((dependant) => dependant.number),
+        unlocksUnknown: impact.unknown,
+        incomplete: names(issue).includes(pickupPolicy.incomplete),
+        createdAt: issue.createdAt,
+        platforms: platformsOf(issue),
+        reason: "",
+      };
+    });
   const keys = orderingPolicy[order];
   candidates.sort((a, b) => {
     for (const key of keys) {
@@ -265,7 +341,10 @@ export function rankPickup(
     const rank = index + 1;
     const facts = [
       `urgency ${candidate.urgency}`,
-      `unlocks ${candidate.unlocks.length}${candidate.unlocks.length ? ` (${candidate.unlocks.map((n) => `#${n}`).join(", ")})` : ""}`,
+      impactText({
+        unlocks: candidate.unlocks.map((number) => ({ number }) as Issue),
+        unknown: candidate.unlocksUnknown,
+      }),
       candidate.incomplete ? "released incomplete work" : "unstarted",
       `created ${candidate.createdAt}`,
       ...(candidate.platforms.length ? [`platform ${candidate.platforms.join("/")}`] : []),
