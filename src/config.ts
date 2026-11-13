@@ -485,3 +485,19 @@ export async function updateConfig(
   }
   return { changed: true, config: parseConfig(text, schema, target.root) };
 }
+
+/**
+ * Expected operating-system filesystem failures (permission, missing directory, full disk, …)
+ * become a structured refusal; anything else, including programming errors, still propagates.
+ */
+export function filesystemRefusal(error: unknown): ConfigError | null {
+  if (!(error instanceof Error)) return null;
+  const { code, path } = error as NodeJS.ErrnoException;
+  if (typeof code !== "string" || !/^E[A-Z]+$/.test(code)) return null;
+  const where = path ? ` (${path})` : "";
+  return new ConfigError(
+    "filesystem",
+    `Could not access the configuration file${where}: ${code}.`,
+    "Check the file and its directory exist and are readable/writable by you, and that the disk has space; then retry. Nothing was changed.",
+  );
+}

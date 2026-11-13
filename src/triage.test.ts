@@ -4322,12 +4322,15 @@ describe("Ticket Doctor: complexity configuration (#120)", () => {
   function run(
     config: string | null,
     answer: unknown,
-    options: { offline?: boolean; checkout?: boolean } = {},
+    options: { offline?: boolean; checkout?: boolean; readError?: Error } = {},
   ) {
     const writes: string[] = [];
     const queries: unknown[] = [];
     const fs: ConfigFileSystem = {
-      readText: async (file) => (file === path ? config : null),
+      readText: async (file) => {
+        if (options.readError) throw options.readError;
+        return file === path ? config : null;
+      },
       writeText: async (file) => void writes.push(file),
       rename: async (file) => void writes.push(file),
       remove: async (file) => void writes.push(file),
@@ -4418,6 +4421,19 @@ describe("Ticket Doctor: complexity configuration (#120)", () => {
       status: "unknown",
       findings: [{ rule: "config-unavailable" }],
     });
+  });
+  it("reports an unreadable configuration file as unknown instead of failing the report", async () => {
+    const denied = Object.assign(new Error("denied"), { code: "EACCES", path });
+    const { r, queries } = await run(mapped("IF_good"), owner(list(good)), { readError: denied });
+    expect(r).toMatchObject({
+      status: "unknown",
+      findings: [{ rule: "config-unavailable", certainty: "unknown" }],
+    });
+    expect(r.findings[0]!.detail).toContain("EACCES");
+    expect(queries).toEqual([]);
+    await expect(
+      run(mapped("IF_good"), owner(list(good)), { readError: new TypeError("bug") }),
+    ).rejects.toThrow("bug");
   });
   it("reports malformed configuration with recovery and never writes", async () => {
     const { r, writes, mutations } = await run("{not json", owner(list(good)));

@@ -10,6 +10,7 @@
  */
 import {
   ConfigError,
+  filesystemRefusal,
   loadConfig,
   nodeFileSystem,
   nodeGit,
@@ -95,9 +96,13 @@ export async function diagnoseComplexityConfig(
     );
     report.path = `${target.root}/.github/triage.json`;
     config = await loadConfig(target.root, runtime.fs ?? nodeFileSystem);
-  } catch (error) {
+  } catch (caught) {
+    const error = filesystemRefusal(caught) ?? caught;
     if (!(error instanceof ConfigError)) throw error;
-    const local = error.code === "not-a-repository" || error.code === "repository-mismatch";
+    const local =
+      error.code === "not-a-repository" ||
+      error.code === "repository-mismatch" ||
+      error.code === "filesystem";
     finding(
       local ? "config-unavailable" : "config-invalid",
       local ? "unknown" : "definite",
