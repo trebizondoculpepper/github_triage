@@ -26,6 +26,7 @@ const t = (number, o = {}) => ({
 const me = { name: "ana", platform: "macos" };
 
 /** The dozen decision scenarios: [name, tickets, agent, expected { pickup, must, mustNot, inspect }]. */
+/** @type {[string, any[], { name: string, platform: string | null }, Record<string, any>][]} */
 const scenarios = [
   ["plain ready ticket is eligible", [t(1)], me, { pickup: [1] }],
   [
@@ -110,12 +111,12 @@ for (const [name, tickets, agent, want] of scenarios) {
     mustNot: project(r, "must_not"),
     inspect: project(r, "inspect"),
   });
-  assert.deepEqual(norm(dl), norm(js), `evaluators disagree: ${String(name)}`);
+  assert.deepEqual(norm(dl), norm(js), `evaluators disagree: ${name}`);
   for (const k of Object.keys(want))
     assert.deepEqual(
       norm(js)[k],
-      k === "pickup" ? want[k] : [...want[k]].sort(),
-      `${String(name)}: ${k}`,
+      k === "pickup" ? want[k] : [...want[k]].sort((a, b) => String(a).localeCompare(String(b))),
+      `${name}: ${k}`,
     );
 }
 console.log(`${scenarios.length} scenarios: JS and DataScript agree and match expectations.\n`);
