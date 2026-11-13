@@ -95,6 +95,24 @@ const scenarios = [
     me,
     { pickup: [], mustNot: ["15:implement", "15:pick_up"] },
   ],
+  // Multi-valued parity (Codex review): the forbidding value comes first, so an engine that
+  // kept only the last value of each attribute would wrongly allow pickup.
+  [
+    "multi-valued labels, owners and platforms are all kept",
+    [
+      t(16, { labels: ["question", "status:ready"] }),
+      t(17, { owners: ["bo", "ana"] }),
+      t(18, { platforms: ["macos", "windows"] }),
+      t(19, { platforms: ["windows", "macos"] }),
+      t(20, { attention: ["ana", "bo"], labels: ["status:ready"] }),
+    ],
+    me,
+    {
+      pickup: [18, 19, 20],
+      must: ["20:respond"],
+      mustNot: ["16:implement", "16:pick_up", "17:pick_up"],
+    },
+  ],
 ];
 
 const project = (r, modality) =>

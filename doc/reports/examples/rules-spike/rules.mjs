@@ -330,7 +330,15 @@ function datoms(tickets, agent) {
  */
 export function evaluateDataScript(ds, tickets, agent, rules = RULES) {
   const { out, agentId, entity } = datoms(tickets, agent);
-  const conn = ds.create_conn();
+  // Array-backed attributes must be cardinality-many, or DataScript keeps only the last value.
+  const many = { ":db/cardinality": ":db.cardinality/many" };
+  const conn = ds.create_conn({
+    label: many,
+    owner: many,
+    attention: many,
+    "open-pr": many,
+    platform: many,
+  });
   ds.transact(
     conn,
     out.map(([e, a, v]) => [":db/add", e, a, v]),
