@@ -238,6 +238,16 @@ export const ghRun: GhRun = async (args) => {
 /** A write refused because of a GitHub (secondary) rate limit: stop all further writes. */
 export class RateLimitError extends Error {
   rateLimited = true;
+  /**
+   * Sanitized retry metadata only: seconds from GitHub's retry-after hint and/or the ISO
+   * time the quota resets. Never carries tokens, arguments or raw response bodies.
+   */
+  constructor(
+    message: string,
+    readonly retry: { retryAfterSeconds?: number | null; resetAt?: string | null } = {},
+  ) {
+    super(message);
+  }
 }
 const outputText = (value: unknown): string =>
   typeof value === "string" ? value : Buffer.isBuffer(value) ? value.toString() : "";

@@ -11,6 +11,8 @@ import {
 } from "./polling.js";
 import type { Clock, Collect, DomainEvent } from "./polling.js";
 import { createServer, envelope, mcpArguments } from "./mcp.js";
+import { RateLimitError } from "./dependencies.js";
+import { rateLimitFailure } from "./github.js";
 import type { McpRuntime } from "./mcp.js";
 import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
 
@@ -288,6 +290,36 @@ describe("optional polling and domain events (#32)", () => {
     w.stop();
   });
 
+  it("keeps distinct failed checks with the same name as separate evidence", async () => {
+    const time = fakeClock();
+    const failed = (id: number) => ({
+      name: "test",
+      status: "COMPLETED",
+      conclusion: "FAILURE",
+      detailsUrl: `https://github.com/${repo}/actions/runs/${id}/job/${id}`,
+      databaseId: id,
+    });
+    const withChecks = (checks: ReturnType<typeof failed>[]): PullRequest => {
+      const base = pr();
+      base.commits.nodes[0].commit.statusCheckRollup!.contexts = page(checks);
+      return base;
+    };
+    const one = snap([], [withChecks([failed(11)])]);
+    const two = snap([], [withChecks([failed(11), failed(22)])]);
+    const { collect } = scripted([one, two, two]);
+    const w = watch(collect, time.clock, 1);
+    w.start();
+    await time.advance(0);
+    expect(kinds(w)).toEqual([]);
+    await time.advance(minute);
+    const events = w.log.read(undefined, 100).items;
+    expect(events.map((event) => event.kind)).toEqual(["verification-problem"]);
+    expect(events[0].evidence).toEqual([`https://github.com/${repo}/actions/runs/22/job/22`]);
+    await time.advance(minute);
+    expect(kinds(w)).toHaveLength(1);
+    w.stop();
+  });
+
   it("gives a recurring transition a new identity but repeated reads the same one", async () => {
     const time = fakeClock();
     const failing = snap([], [pr({ verify: "FAILURE" })]);
@@ -451,6 +483,43 @@ describe("optional polling and domain events (#32)", () => {
     expect(calls).toHaveLength(5);
     expect(w.status()).toMatchObject({ state: "watching", lastOutcome: "complete" });
     w.stop();
+  });
+
+  it("keeps a rate-limited failure's retry-after deadline across the collector boundary", async () => {
+    const time = fakeClock();
+    const { collect, calls } = scripted([
+      snap(),
+      new RateLimitError("GitHub query was rate limited.", { retryAfterSeconds: 120 }),
+      snap(),
+    ]);
+    const w = watch(collect, time.clock, 1);
+    w.start();
+    await time.advance(0);
+    await time.advance(minute);
+    expect(w.status().lastOutcome).toBe("rate-limited");
+    // Ordinary jitter would be 45 s with random()=0.5; retry-after 120 wins.
+    expect(time.pendingDelays()).toEqual([120 * 1000]);
+    await time.advance(119 * 1000);
+    expect(calls).toHaveLength(2);
+    await time.advance(1000);
+    expect(calls).toHaveLength(3);
+    w.stop();
+  });
+
+  it("extracts sanitized retry metadata from gh rate-limit output", () => {
+    const limited = rateLimitFailure(
+      "gh: You have exceeded a secondary rate limit (HTTP 403)\nretry-after: 120\ntoken ghp_secret",
+      "",
+    );
+    expect(limited).toBeInstanceOf(RateLimitError);
+    expect(limited?.retry).toEqual({ retryAfterSeconds: 120, resetAt: null });
+    expect(limited?.message).not.toMatch(/ghp_|secondary/);
+    const graphql = rateLimitFailure(
+      "",
+      JSON.stringify({ errors: [{ type: "RATE_LIMITED", message: "API rate limit exceeded" }] }),
+    );
+    expect(graphql?.retry).toEqual({ retryAfterSeconds: null, resetAt: null });
+    expect(rateLimitFailure("gh: Could not resolve to a Repository", "")).toBeNull();
   });
 
   it("does not retry before an exhausted quota resets", async () => {

@@ -9,6 +9,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { analysisRules, prChecks, workflow } from "./briefing.js";
+import { RateLimitError } from "./dependencies.js";
 import type { collect as collectFn } from "./github.js";
 import { pickupEligibility } from "./ranking.js";
 import type { Issue, Snapshot } from "./types.js";
@@ -251,11 +252,16 @@ export function observe(snapshot: Snapshot, observedAt: string): Observation {
           destinations: routed,
           origin: null,
         });
-    for (const check of prChecks(pr)) {
+    const contexts = pr.commits.nodes[0]?.commit.statusCheckRollup?.contexts.nodes ?? [];
+    for (const [index, check] of prChecks(pr).entries()) {
       const problem = checkProblem(check.outcome);
       if (!problem) continue;
+      // A stable per-run identity keeps same-named checks (other workflows, re-runs on the
+      // same head) distinct, while an unchanged run still deduplicates across polls.
+      const source = contexts[index];
+      const identity = source?.databaseId != null ? `run:${source.databaseId}` : `url:${check.url}`;
       put(subject, {
-        key: `check/${head}/${check.name}/${problem}`,
+        key: `check/${head}/${check.name}/${identity}/${problem}`,
         kind: "verification-problem",
         evidence: [check.url],
         sourceEventAt: null,
@@ -523,6 +529,16 @@ export interface WatcherStatus {
   baselineRule: string;
 }
 
+/** The earliest retry time a rate-limited failure reported, if any. */
+function retryDeadline(error: RateLimitError, now: Date): string | null {
+  const times = [
+    error.retry.retryAfterSeconds != null
+      ? now.getTime() + error.retry.retryAfterSeconds * 1000
+      : NaN,
+    error.retry.resetAt ? Date.parse(error.retry.resetAt) : NaN,
+  ].filter(Number.isFinite);
+  return times.length ? new Date(Math.max(...times)).toISOString() : null;
+}
 const rateLimitPattern = /rate limit|secondary rate|abuse detection|retry-after/i;
 
 /** Per-repository poller owned by one MCP server process. */
@@ -634,7 +650,10 @@ export class Watcher {
     } catch (error) {
       if (this.stopped || controller.signal.aborted)
         outcome = this.stopped ? "cancelled" : "failed";
-      else
+      else if (error instanceof RateLimitError) {
+        outcome = "rate-limited";
+        this.resetAt = retryDeadline(error, clock.now()) ?? this.resetAt;
+      } else
         outcome = rateLimitPattern.test(error instanceof Error ? error.message : String(error))
           ? "rate-limited"
           : "failed";
