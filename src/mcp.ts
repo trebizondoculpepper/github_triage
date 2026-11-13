@@ -191,6 +191,8 @@ export function createServer(
       status: "complete" | "incomplete";
       result: Record<string, unknown>;
       text: string;
+      /** Bound the rendered text (issue intake); structuredContent stays complete. */
+      maxChars?: number;
     }>,
   ) => {
     let selection: Selection = {
@@ -216,7 +218,9 @@ export function createServer(
           result: outcome.result,
           error: null,
         },
-        notice + identityNotice(selection) + outcome.text,
+        outcome.maxChars === undefined
+          ? notice + identityNotice(selection) + outcome.text
+          : boundedIssueText(notice + identityNotice(selection) + outcome.text, outcome.maxChars),
       );
     } catch (error) {
       const code: FailureCode =
@@ -287,11 +291,13 @@ export function createServer(
             status: "incomplete",
             result: plain({ schemaVersion: 1, kind: "issue-unavailable", ...read.diagnosis }),
             text: read.text,
+            maxChars: args.maxChars,
           };
         return {
           status: read.complete ? "complete" : "incomplete",
           result: plain(read.report),
           text: read.text,
+          maxChars: args.maxChars,
         };
       }),
   );
@@ -314,6 +320,25 @@ export function createServer(
   );
 
   return server;
+}
+
+const detailMarker = "\nFULL ISSUE DETAIL\n";
+const detailNotice =
+  "\nFull issue intake (body, history, dependencies, ownership) omitted from text; it is in structuredContent.result.detail.\n";
+const truncatedNotice =
+  "\nText truncated at maxChars; the complete intake is in structuredContent.result.\n";
+
+/**
+ * MCP text for an issue intake, bounded by maxChars (doc/design/mcp.md: concise text with a
+ * detail/omission notice). The CLI appends the full serialized detail after its budget checks;
+ * here that detail stays only in structuredContent, so text never duplicates it unbounded.
+ */
+export function boundedIssueText(text: string, maxChars: number): string {
+  const at = text.indexOf(detailMarker);
+  const head = at === -1 ? text : `${text.slice(0, at).trimEnd()}\n`;
+  const tail = at === -1 ? "" : detailNotice;
+  if (head.length + tail.length <= maxChars) return head + tail;
+  return `${head.slice(0, maxChars - tail.length - truncatedNotice.length)}${truncatedNotice}${tail}`;
 }
 
 /** Production boundaries: authenticated gh through the existing argument-array runners. */

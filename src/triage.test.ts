@@ -5266,6 +5266,30 @@ describe("read-only MCP adapter (#25)", async () => {
     await client.close();
   });
 
+  it("bounds triage_issue text to maxChars while structuredContent keeps the full intake", async () => {
+    const long = "x".repeat(4000);
+    const comments = Array.from({ length: 30 }, (_, i) => ({
+      author: { login: `user${i}` },
+      body: `comment ${i} ${long}`,
+      createdAt: time,
+      url: `${issue().url}#issuecomment-${i}`,
+    }));
+    const big = { ...issue(1), body: `body ${long}`, comments: page(comments) } as unknown as Issue;
+    const runtime = fake({
+      collect: async (repository: string) => ({ ...snapshot([big]), repository }),
+    });
+    const client = await connect(runtime, { repo });
+    const result = await client.callTool({
+      name: "triage_issue",
+      arguments: { number: 1, maxChars: 2000 },
+    });
+    const body = text(result);
+    expect(body.length).toBeLessThanOrEqual(2000);
+    expect(body).toContain("omitted from text; it is in structuredContent.result.detail");
+    expect(JSON.stringify(structured(result).result)).toContain(`comment 29 ${long}`);
+    await client.close();
+  });
+
   it("rejects unknown properties and out-of-range values before collection", async () => {
     const runtime = fake();
     const client = await connect(runtime);
