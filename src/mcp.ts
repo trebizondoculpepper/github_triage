@@ -4,6 +4,7 @@
  * service; no mutation, shell, file-path, cache or checkpoint routes are registered.
  */
 import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -147,6 +148,50 @@ function plain(value: object): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+export const pathPlaceholder = "<local checkout>";
+
+/** Directories this server knows about whose names must not reach the MCP client. */
+function localPaths(project: string | undefined): string[] {
+  const candidates = [project, project ? resolve(project) : undefined, process.cwd(), homedir()];
+  return candidates.filter((path): path is string => !!path && path.length > 1);
+}
+
+// Absolute paths not part of a URL: Windows drive or UNC paths, POSIX paths with at least two
+// segments, and home-relative paths. The lookbehinds keep URL paths ("https://h/a/b") and
+// repository names ("owner/name") intact.
+const windowsPath = /(?<![\w/\\:])(?:[A-Za-z]:[\\/]|\\\\[^\s\\/]+[\\/])[^\s"'<>()|,;`]*/g;
+const posixPath = /(?<![\w.:/~>\\-])\/(?:[^\s/"'<>()|,;`]+\/)+[^\s/"'<>()|,;`]*/g;
+const homePath = /(?<![\w/])~[\\/][^\s"'<>()|,;`]*/g;
+
+/** Replace a matched path, leaving sentence punctuation that followed it in place. */
+const replacePath = (match: string): string => {
+  const trailing = /[.:!?]+$/.exec(match)?.[0] ?? "";
+  return pathPlaceholder + trailing;
+};
+
+/**
+ * Recursively replace local filesystem paths in strings with a neutral placeholder. The MCP
+ * contract (doc/design/mcp.md) prohibits returning private paths; the CLI keeps them.
+ */
+export function redactPaths<T>(value: T, known: readonly string[] = []): T {
+  if (typeof value === "string") {
+    let text: string = value;
+    for (const path of [...known].sort((a, b) => b.length - a.length))
+      text = text.split(path).join(pathPlaceholder);
+    text = text
+      .replace(windowsPath, replacePath)
+      .replace(posixPath, replacePath)
+      .replace(homePath, replacePath);
+    return text as T;
+  }
+  if (Array.isArray(value)) return value.map((item: unknown) => redactPaths(item, known)) as T;
+  if (typeof value === "object" && value !== null)
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, redactPaths(item, known)]),
+    ) as T;
+  return value;
+}
+
 /** Build one server for one connection; no state is shared between calls or connections. */
 export function createServer(
   options: McpOptions,
@@ -209,18 +254,21 @@ export function createServer(
         outcome.status === "incomplete"
           ? "INCOMPLETE evidence: do not treat missing findings as clean or eligible.\n"
           : "";
+      // Diagnostics (e.g. config errors) can name local directories; never return them.
+      const known = localPaths(options.project);
+      const body = redactPaths(outcome.text, known);
       return toolResult(
         {
           schemaVersion: 1,
           kind,
           status: outcome.status,
           selection,
-          result: outcome.result,
+          result: redactPaths(outcome.result, known),
           error: null,
         },
         outcome.maxChars === undefined
-          ? notice + identityNotice(selection) + outcome.text
-          : boundedIssueText(notice + identityNotice(selection) + outcome.text, outcome.maxChars),
+          ? notice + identityNotice(selection) + body
+          : boundedIssueText(notice + identityNotice(selection) + body, outcome.maxChars),
       );
     } catch (error) {
       const code: FailureCode =

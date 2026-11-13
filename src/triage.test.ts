@@ -5171,7 +5171,7 @@ describe("estimation queue and briefing visibility (#122)", () => {
 describe("read-only MCP adapter (#25)", async () => {
   const { Client } = await import("@modelcontextprotocol/client");
   const { InMemoryTransport } = await import("@modelcontextprotocol/server");
-  const { createServer, envelope, mcpArguments } = await import("./mcp.js");
+  const { createServer, envelope, mcpArguments, redactPaths } = await import("./mcp.js");
   const { IssueUnavailable } = await import("./github.js");
   type Runtime = import("./mcp.js").McpRuntime;
   type Options = import("./mcp.js").McpOptions;
@@ -5244,7 +5244,8 @@ describe("read-only MCP adapter (#25)", async () => {
       error: null,
     });
     const { checkpoint: _, ...cliBrief } = await cli(["--repo", repo]);
-    expect(brief.result).toEqual(cliBrief);
+    // Identical except that local paths in diagnostics are redacted for the MCP client.
+    expect(brief.result).toEqual(redactPaths(cliBrief, [process.cwd()]));
     const intake = structured(
       await client.callTool({ name: "triage_issue", arguments: { number: 1, agent: "ana" } }),
     );
@@ -5260,7 +5261,7 @@ describe("read-only MCP adapter (#25)", async () => {
       kind: "issue",
       selection: { agent: "ana", identitySource: "tool" },
     });
-    expect(intake.result).toEqual(cliIssue);
+    expect(intake.result).toEqual(redactPaths(cliIssue, [process.cwd()]));
     const deps = structured(
       await client.callTool({ name: "triage_dependencies", arguments: { number: 1, tree: true } }),
     );
@@ -5431,6 +5432,53 @@ describe("read-only MCP adapter (#25)", async () => {
     const outcome = await pending;
     expect("error" in outcome || structured(outcome.result).status === "error").toBe(true);
     await client.close();
+  });
+
+  it("never returns local filesystem paths from configuration diagnostics", async () => {
+    const leaks = ["/home/alice/private/checkout", "C:\\Users\\alice\\private\\checkout"];
+    for (const root of leaks) {
+      // The checkout's remote does not match the requested repository, so the estimation
+      // config error names the checkout directory.
+      const git: GitRunner = async (args) =>
+        args[0] === "rev-parse" ? `${root}\n` : "origin\thttps://github.com/other/thing (fetch)\n";
+      const client = await connect(fake({ estimation: { cwd: root, git } }), {
+        project: root,
+        repo,
+      });
+      for (const [name, args] of [
+        ["triage_briefing", {}],
+        ["triage_issue", { number: 1 }],
+      ] as const) {
+        const result = await client.callTool({ name, arguments: args });
+        const all = JSON.stringify(result);
+        expect(all, `${name} ${root}`).not.toContain("alice");
+        expect(all).toContain("<local checkout>");
+        expect(all).toContain("other/thing");
+        expect(all).toContain(`https://github.com/${repo}/issues/1`);
+      }
+      await client.close();
+    }
+  });
+
+  it("redacts absolute local paths without touching URLs or repository names", () => {
+    expect(
+      redactPaths(
+        {
+          a: ["The checkout at /srv/work/x is not owner/name (remotes: o/r)."],
+          b: "Restore C:\\Users\\bob\\proj\\.github\\triage.json from Git.",
+          c: "See https://github.com/owner/name/issues/2 and ~/secret/file",
+          d: "Mine: /opt/me/repo/src",
+          n: 3,
+        },
+        ["/opt/me/repo"],
+      ),
+    ).toEqual({
+      a: ["The checkout at <local checkout> is not owner/name (remotes: o/r)."],
+      b: "Restore <local checkout> from Git.",
+      c: "See https://github.com/owner/name/issues/2 and <local checkout>",
+      d: "Mine: <local checkout>/src",
+      n: 3,
+    });
   });
 
   it("validates startup arguments", () => {
