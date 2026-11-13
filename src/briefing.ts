@@ -23,6 +23,8 @@ export const workflow = {
     "status:needs-design",
     "status:blocked",
     "status:parked",
+    // A handed-over contribution with an open PR (#62); a state, but never implementation pickup.
+    "status:awaiting-review",
   ],
   ready: "status:ready",
   parked: "status:parked",
