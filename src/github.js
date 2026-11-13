@@ -47,6 +47,96 @@ export function graphqlAnswer(text) {
     return null;
   }
 }
+/**
+ * Read-only REST GET through gh (which follows GitHub's transfer redirects).
+ * @param {string} path
+ * @returns {Promise<{ status: number | null, body: any }>}
+ */
+export const ghRest = async (path) => {
+  try {
+    const { stdout } = await execute("gh", ["api", path], { timeout: 30_000 });
+    return { status: 200, body: JSON.parse(stdout) };
+  } catch (error) {
+    try {
+      const body = JSON.parse(error?.stdout ?? "");
+      return { status: Number(body.status) || null, body };
+    } catch {
+      return { status: null, body: null };
+    }
+  }
+};
+
+/**
+ * Why an issue number is unavailable (#39, doc/design/diagnostics.md): moved by transfer
+ * (authoritative only when GitHub resolves it to another repository), a pull request,
+ * missing, forbidden, or unknown. A missing or forbidden answer never implies a transfer.
+ * @param {string} repository
+ * @param {number} number
+ * @param {typeof ghRest} [rest]
+ */
+export async function locateIssue(repository, number, rest = ghRest) {
+  const url = `https://github.com/${repository}/issues/${number}`;
+  const { status, body } = await rest(`repos/${repository}/issues/${number}`);
+  const base = { repository, number, url };
+  const inspect = `gh api repos/${repository}/issues/${number}`;
+  if (status === 200 && body?.repository_url) {
+    const destination = String(body.repository_url).replace(/^.*\/repos\//, "");
+    if (destination.toLowerCase() !== repository.toLowerCase())
+      return {
+        ...base,
+        state: "moved",
+        destination: { repository: destination, number: body.number, url: body.html_url },
+        detail: `Transferred to ${body.html_url}. It is not this project's work, and the destination's ownership is not assumed.`,
+        next: `npm run --silent triage -- --repo ${destination} --issue ${body.number} --json`,
+      };
+    if (body.pull_request)
+      return {
+        ...base,
+        state: "pull-request",
+        detail: `#${number} is a pull request.`,
+        next: `github-triage pr ${number} --repo ${repository}`,
+      };
+    return {
+      ...base,
+      state: "unknown",
+      detail: "REST found the issue but GraphQL did not; retry.",
+      next: inspect,
+    };
+  }
+  if (status === 404)
+    return {
+      ...base,
+      state: "missing",
+      detail:
+        "Not found (deleted, never existed, or not visible to this account); not treated as a transfer.",
+      next: inspect,
+    };
+  if (status === 403 || status === 401)
+    return {
+      ...base,
+      state: "forbidden",
+      detail: "Access denied; check gh auth status and repository access.",
+      next: "gh auth status",
+    };
+  if (status === 410)
+    return { ...base, state: "missing", detail: "Deleted (HTTP 410).", next: inspect };
+  return {
+    ...base,
+    state: "unknown",
+    detail: "GitHub gave no authoritative answer.",
+    next: inspect,
+  };
+}
+
+/** Thrown when `--issue N` cannot be read; carries the location diagnosis. */
+export class IssueUnavailable extends Error {
+  /** @param {Awaited<ReturnType<typeof locateIssue>>} diagnosis */
+  constructor(diagnosis) {
+    super(`Issue #${diagnosis.number} is unavailable: ${diagnosis.state}. ${diagnosis.detail}`);
+    this.diagnosis = diagnosis;
+  }
+}
+
 export async function currentRepository() {
   try {
     const { stdout } = await execute(
@@ -185,7 +275,8 @@ export async function collect(repository, options = {}, query = ghQuery, now = (
   const issueSource = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){${common} stateReason ${nativeFields}}}}`;
   if (options.issue && !issues.some((issue) => issue.number === options.issue)) {
     const detail = (await request(issueSource, { number: options.issue })).issue;
-    if (!detail) throw new Error(`Issue #${options.issue} is unavailable.`);
+    if (!detail)
+      throw new IssueUnavailable(await (options.locate ?? locateIssue)(repository, options.issue));
     issues.push(detail);
   }
   // All comments are available for semantic reconciliation, even if the briefing shows excerpts.

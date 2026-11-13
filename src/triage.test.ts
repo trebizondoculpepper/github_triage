@@ -2429,3 +2429,67 @@ describe("post-write ownership check with incomplete labels", () => {
     expect(result.conflict).toMatch(/ownership is unverified/);
   });
 });
+
+describe("transferred issue inspection (#39, doc/design/diagnostics.md)", () => {
+  const rest = (status: number | null, body: any) => async () => ({ status, body });
+  it("distinguishes moved, pull request, missing, forbidden and unknown", async () => {
+    const { locateIssue } = await import("./github.js");
+    const moved = await locateIssue(
+      "o/old",
+      701,
+      rest(200, {
+        repository_url: "https://api.github.com/repos/o/new",
+        number: 2,
+        html_url: "https://github.com/o/new/issues/2",
+      }),
+    );
+    expect(moved).toMatchObject({
+      state: "moved",
+      url: "https://github.com/o/old/issues/701",
+      destination: { repository: "o/new", number: 2, url: "https://github.com/o/new/issues/2" },
+    });
+    const same = { repository_url: "https://api.github.com/repos/o/old", number: 5 };
+    expect((await locateIssue("o/old", 5, rest(200, { ...same, pull_request: {} }))).state).toBe(
+      "pull-request",
+    );
+    expect((await locateIssue("o/old", 5, rest(404, { status: "404" }))).state).toBe("missing");
+    expect((await locateIssue("o/old", 5, rest(403, { status: "403" }))).state).toBe("forbidden");
+    expect((await locateIssue("o/old", 5, rest(null, null))).state).toBe("unknown");
+    // Missing or forbidden never claims a transfer.
+    expect("destination" in (await locateIssue("o/old", 5, rest(404, {})))).toBe(false);
+  });
+  it("reports instead of failing, and follows a transfer only with --include-transferred", async () => {
+    const { IssueUnavailable } = await import("./github.js");
+    const diagnosis = {
+      repository: "o/old",
+      number: 701,
+      url: "https://github.com/o/old/issues/701",
+      state: "moved",
+      destination: { repository: "o/new", number: 2, url: "https://github.com/o/new/issues/2" },
+      detail: "Transferred.",
+      next: "x",
+    };
+    const seen: string[] = [];
+    const runtime = {
+      currentRepository: async () => "o/old",
+      collect: async (repository: string, options: { issue?: number }) => {
+        seen.push(`${repository}#${options.issue}`);
+        if (repository === "o/old") throw new IssueUnavailable(diagnosis);
+        return snapshot([issue(2)], []);
+      },
+    } as any;
+    let out = "";
+    const write = async (x: string) => void (out = x);
+    expect(await main(["--repo", "o/old", "--issue", "701", "--json"], write, runtime)).toBe(2);
+    expect(JSON.parse(out)).toMatchObject({ kind: "issue-unavailable", state: "moved" });
+    expect(seen).toEqual(["o/old#701"]);
+    const code = await main(
+      ["--repo", "o/old", "--issue", "701", "--json", "--include-transferred"],
+      write,
+      runtime,
+    );
+    expect(code).toBe(0);
+    expect(seen).toEqual(["o/old#701", "o/old#701", "o/new#2"]);
+    expect(JSON.parse(out).transferredFrom).toMatchObject({ url: diagnosis.url });
+  });
+});
