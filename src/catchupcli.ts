@@ -5,6 +5,8 @@
  * report `catchup.ts`. GitHub is only read. The checkpoint is written last, only after the
  * complete live report was delivered, and only to that report's candidate (the window end T0).
  */
+import { realpath, stat } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { catchUp, catchUpJson, catchUpLimits, catchUpText } from "./catchup.js";
 import type { CatchUpReport } from "./catchup.js";
@@ -19,6 +21,45 @@ export interface BriefingFiles {
   checkpointSince: (path: string, repository: string) => Promise<string | undefined>;
   cachedSnapshot: (path: string, repository: string | undefined) => Promise<Snapshot>;
   atomicJson: (path: string, value: unknown) => Promise<void>;
+  /** Where a path really lands; defaults to the real filesystem (`fileIdentity`). */
+  identity?: (path: string) => Promise<FileIdentity>;
+}
+/** Resolved destination of a path: absolute, symlink-free, and the inode when it exists. */
+export interface FileIdentity {
+  resolved: string;
+  real: string;
+  inode?: { dev: number; ino: number };
+}
+
+/** Resolve `path` absolutely, through symlinks of the file or its existing parent directory. */
+export async function fileIdentity(path: string): Promise<FileIdentity> {
+  const resolved = resolve(path);
+  let real = resolved;
+  let inode: FileIdentity["inode"];
+  try {
+    real = await realpath(resolved);
+    const info = await stat(real);
+    inode = { dev: info.dev, ino: info.ino };
+  } catch {
+    try {
+      real = join(await realpath(dirname(resolved)), basename(resolved));
+    } catch {
+      // Neither the file nor its parent exists; the resolved path is the best identity.
+    }
+  }
+  return { resolved, real, inode };
+}
+
+/** True when the two identities name the same destination file. */
+export function sameDestination(a: FileIdentity, b: FileIdentity): boolean {
+  if (a.resolved === b.resolved || a.real === b.real) return true;
+  // Hard links, and case-insensitive filesystems where the paths differ only by case.
+  return (
+    a.inode !== undefined &&
+    b.inode !== undefined &&
+    a.inode.dev === b.inode.dev &&
+    a.inode.ino === b.inode.ino
+  );
 }
 export interface BriefingRuntime {
   collect: typeof collect;
@@ -213,6 +254,21 @@ async function deliver(
   stderr: (text: string) => void,
 ): Promise<number> {
   const files = runtime.files;
+  if (!options.offline && options.cache !== undefined && options.checkpoint !== undefined) {
+    // Before any read or write: a shared file would let the cache overwrite the checkpoint.
+    const identify = files.identity ?? fileIdentity;
+    const [cache, checkpoint] = await Promise.all([
+      identify(options.cache),
+      identify(options.checkpoint),
+    ]);
+    if (sameDestination(cache, checkpoint))
+      throw new FileRefusal(
+        "cache",
+        options.cache,
+        `--cache and --checkpoint resolve to the same file (${checkpoint.real}); the cache would overwrite the checkpoint`,
+        "Give --cache and --checkpoint different file paths, for example --cache briefing-cache.json; nothing was read or written.",
+      );
+  }
   let snapshot: Snapshot;
   let window: ComparisonWindow | null = null;
   if (options.offline) {

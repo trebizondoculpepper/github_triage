@@ -1,7 +1,10 @@
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 import { catchUp, catchUpJson, catchUpText } from "./catchup.js";
 import type { CatchUpReport } from "./catchup.js";
-import { briefingArgumentsFor } from "./catchupcli.js";
+import { briefingArgumentsFor, fileIdentity, sameDestination } from "./catchupcli.js";
 import { help as cliHelp, main } from "./cli.js";
 import type { Runtime } from "./cli.js";
 import { changeSubject, resolveWindow } from "./changes.js";
@@ -1129,6 +1132,80 @@ describe("briefing command: CLI, checkpoint and offline cache (#170)", () => {
     expect(await partial.run(["--checkpoint", "cp.json", "--json"])).toBe(2);
     expect(JSON.parse(partial.stdout.join("")).checkpoint.candidate).toBeNull();
     expect(partial.disk.size).toBe(0);
+  });
+
+  it.each([
+    ["the same path", "state.json", "state.json"],
+    ["a relative and an absolute path", "state.json", `${process.cwd()}/state.json`],
+    ["a path containing ..", "state.json", "sub/../state.json"],
+  ])(
+    "refuses --cache and --checkpoint naming one file via %s, before any read or write",
+    async (_case, cache, checkpoint) => {
+      const h = harness();
+      expect(await h.run(["--cache", cache, "--checkpoint", checkpoint, "--json"])).toBe(1);
+      expect(JSON.parse(h.stdout.join(""))).toMatchObject({
+        kind: "repository-briefing-refusal",
+        file: "cache",
+        checkpointAdvanced: false,
+      });
+      expect(JSON.parse(h.stdout.join("")).next).toContain("different file paths");
+      expect(h.calls).toEqual([]);
+      expect(h.disk.size).toBe(0);
+    },
+  );
+
+  it("refuses a --cache symlink to the checkpoint, on stderr without --json", async () => {
+    const identity = async (path: string) => ({
+      resolved: `/work/${path}`,
+      real: path === "link.json" ? "/work/state.json" : `/work/${path}`,
+    });
+    const h = harness({ files: { identity } });
+    h.disk.set("state.json", "{}");
+    expect(await h.run(["--cache", "link.json", "--checkpoint", "state.json"])).toBe(1);
+    expect(h.errors.join("")).toContain("--cache and --checkpoint resolve to the same file");
+    expect(h.errors.join("")).toContain("Next: Give --cache and --checkpoint different");
+    expect(h.calls).toEqual([]);
+    expect(h.disk.get("state.json")).toBe("{}");
+  });
+
+  it("refuses paths that differ only by case when the filesystem says they are one file", async () => {
+    const identity = async (path: string) => ({
+      resolved: `/work/${path}`,
+      real: `/work/${path}`,
+      inode: { dev: 1, ino: 42 },
+    });
+    const h = harness({ files: { identity } });
+    expect(await h.run(["--cache", "State.json", "--checkpoint", "state.json", "--json"])).toBe(1);
+    expect(h.calls).toEqual([]);
+    expect(h.disk.size).toBe(0);
+  });
+
+  it("identifies a real symlink, a symlinked parent and .. as the same destination", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "briefing-identity-"));
+    try {
+      await writeFile(join(dir, "state.json"), "{}");
+      const target = await fileIdentity(join(dir, "state.json"));
+      let linked = true;
+      try {
+        await symlink(join(dir, "state.json"), join(dir, "link.json"));
+      } catch {
+        linked = false; // Windows without symlink privilege.
+      }
+      if (linked)
+        expect(sameDestination(await fileIdentity(join(dir, "link.json")), target)).toBe(true);
+      expect(sameDestination(await fileIdentity(join(dir, "x", "..", "state.json")), target)).toBe(
+        true,
+      );
+      expect(sameDestination(await fileIdentity(join(dir, "other.json")), target)).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("allows distinct --cache and --checkpoint files", async () => {
+    const h = harness();
+    expect(await h.run(["--cache", "cache.json", "--checkpoint", "cp.json", "--json"])).toBe(0);
+    expect(h.calls).toContain("write cache.json");
   });
 
   it("reports a checkpoint write failure on stderr only, with exit 1 and one JSON object", async () => {
