@@ -840,21 +840,33 @@ export async function convertConfig(
       config,
     };
   }
-  const json = parseConfig(stores.json, schema, root, "json");
+  // An explicit --prefer requires only the preferred file to be valid; the discarded file is
+  // removed or replaced only after a byte-for-byte unchanged-since-read check.
+  const prefer = stores.toml === null ? undefined : options.prefer;
+  // The preferred file (the only file, when the TOML is absent) must be valid: its parse error
+  // is the refusal. Without a preference, either file failing is a duplicate-config refusal.
+  const json =
+    stores.toml === null || prefer === "json"
+      ? parseConfig(stores.json, schema, root, "json")
+      : tryParse(stores.json, schema, root, "json");
   let toml: LoadedConfig | null = null;
   if (stores.toml !== null) {
-    toml = parseConfig(stores.toml, schema, root, "toml");
-    if (!sameValues(toml.explicit, json.explicit) && options.prefer === undefined) {
-      throw duplicateConfig(root, schema, stores);
-    }
+    toml =
+      prefer === "toml"
+        ? parseConfig(stores.toml, schema, root, "toml")
+        : tryParse(stores.toml, schema, root, "toml");
+    const agree = toml !== null && json !== null && sameValues(toml.explicit, json.explicit);
+    if (!agree && prefer === undefined) throw duplicateConfig(root, schema, stores);
   }
   const keepToml =
-    toml !== null && (options.prefer !== "json" || sameValues(toml.explicit, json.explicit));
+    toml !== null &&
+    (prefer !== "json" || (json !== null && sameValues(toml.explicit, json.explicit)));
   let written: LoadedConfig;
   if (keepToml) {
     written = toml!;
   } else {
-    const text = serializeConfig(json.explicit, schema.version, "toml");
+    const source = json!;
+    const text = serializeConfig(source.explicit, schema.version, "toml");
     await replaceAtomically(
       root,
       TOML_CONFIG_PATH,
@@ -863,9 +875,11 @@ export async function convertConfig(
       fs,
       options.token ?? temporaryToken,
     );
-    written = await verifyConverted(root, fs, schema, json);
+    written = await verifyConverted(root, fs, schema, source);
   }
-  // Remove the JSON file only if it is still exactly what was converted.
+  // Remove the JSON file only if the retained TOML still holds the verified settings and the
+  // JSON is still exactly what was read: another process may have changed either meanwhile.
+  await recheckRetainedToml(root, fs, schema, written, keepToml ? stores.toml : null);
   try {
     const latest = await fs.readText(join(root, LEGACY_CONFIG_PATH));
     if (latest !== stores.json) {
@@ -887,12 +901,65 @@ export async function convertConfig(
     );
   }
   return {
-    status: toml === null ? "converted" : keepToml ? "removed-json" : "replaced-toml",
+    status: stores.toml === null ? "converted" : keepToml ? "removed-json" : "replaced-toml",
     wroteToml: !keepToml,
     removedJson: true,
-    droppedRetired: keepToml ? [] : json.retired,
+    droppedRetired: keepToml ? [] : json!.retired,
     config: written,
   };
+}
+
+/** Parse a store that is about to be discarded; invalid contents yield null, not a refusal. */
+function tryParse(
+  raw: string | null,
+  schema: ConfigSchema,
+  root: string,
+  format: ConfigFormat,
+): LoadedConfig | null {
+  try {
+    return parseConfig(raw, schema, root, format);
+  } catch (caught) {
+    if (caught instanceof ConfigError && caught.code !== "filesystem") return null;
+    throw caught;
+  }
+}
+
+/**
+ * Immediately before the JSON file is removed, re-read the TOML file that will remain and
+ * require that it exists, parses and holds exactly the verified settings (byte-identical to
+ * `snapshot` when given). Otherwise the JSON file is kept and conversion is refused.
+ */
+async function recheckRetainedToml(
+  root: string,
+  fs: ConfigFileSystem,
+  schema: ConfigSchema,
+  verified: LoadedConfig,
+  snapshot: string | null,
+): Promise<void> {
+  const refuse = (detail: string) =>
+    new ConfigError(
+      "partial-conversion",
+      `${TOML_CONFIG_PATH} ${detail} during conversion, so ${LEGACY_CONFIG_PATH} was kept.`,
+      `Review both files, then keep one file's settings with one of:\n${preferCommands()}`,
+    );
+  let raw: string | null;
+  try {
+    raw = await fs.readText(join(root, TOML_CONFIG_PATH));
+  } catch (caught) {
+    const error = filesystemRefusal(caught);
+    if (!error) throw caught;
+    throw refuse(`could not be read (${error.message})`);
+  }
+  if (raw === null) throw refuse("was removed");
+  if (snapshot !== null && raw === snapshot) return;
+  let latest: LoadedConfig;
+  try {
+    latest = parseConfig(raw, schema, root, "toml");
+  } catch (caught) {
+    if (!(caught instanceof ConfigError)) throw caught;
+    throw refuse("became unreadable");
+  }
+  if (!sameValues(latest.explicit, verified.explicit)) throw refuse("changed");
 }
 
 /** Read the new TOML file back and require exactly the converted values. */
