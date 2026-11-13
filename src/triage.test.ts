@@ -8056,6 +8056,7 @@ x = 1
         files.set(to, files.get(from)!);
         files.delete(from);
       },
+      appendText: async (path, text) => void files.set(path, (files.get(path) ?? "") + text),
       remove: async (path) => void files.delete(path),
       makeDirectory: async () => undefined,
     };
@@ -8071,7 +8072,10 @@ x = 1
         throw fail(1);
       }
       if (args[0] === "check-ignore") {
-        if (options.ignored || (files.get(exclude) ?? "").includes(`/${IDENTITY_FILE}`)) return "";
+        const rules = (files.get(exclude) ?? "").split("\n");
+        const name = args.at(-1)!;
+        const rule = name === IDENTITY_FILE ? `/${IDENTITY_FILE}` : `/${IDENTITY_FILE}.*.tmp`;
+        if (options.ignored || rules.includes(rule)) return "";
         throw fail(1);
       }
       throw new Error(`unexpected git ${args.join(" ")}`);
@@ -8162,7 +8166,7 @@ x = 1
     const first = t.json();
     expect(first).toMatchObject({ createdFile: true, createdEntry: true, excludeRuleAdded: true });
     expect(first.generatedName).toMatch(/^[a-z]+_[a-z]+$/);
-    expect(t.files.get(exclude)).toBe(`/${IDENTITY_FILE}\n`);
+    expect(t.files.get(exclude)).toBe(`/${IDENTITY_FILE}\n/${IDENTITY_FILE}.*.tmp\n`);
     expect(t.calls.indexOf("rev-parse --git-path info/exclude")).toBeGreaterThan(-1);
     expect(
       await t.call("set", "identity.triage_role", "implementer", "--entry", "claude", "--json"),
@@ -8300,7 +8304,7 @@ x = 1
       { fs: unignored.fs, git: unignored.git },
     );
     expect(write).toMatchObject({ changed: false, excluded: true });
-    expect(unignored.files.get(exclude)).toBe(`/${IDENTITY_FILE}\n`);
+    expect(unignored.files.get(exclude)).toBe(`/${IDENTITY_FILE}\n/${IDENTITY_FILE}.*.tmp\n`);
     expect(unignored.files.get(file)).toBe(equal);
   });
 
@@ -8332,6 +8336,104 @@ x = 1
       }
     },
   );
+
+  it("refuses to round sub-millisecond timestamps in unrelated values (#165 review)", async () => {
+    const precise = `when = 1979-05-27T07:32:00.123456Z\nat = 07:32:00.999999\nnote = "12:00:00.123456"\n[agents.codex]\nname = "stable_one"\n`;
+    const t = setup(precise, { ignored: true });
+    await expect(
+      setIdentity({ root, repository: null }, "codex", "identity.triage_role", "designer", {
+        fs: t.fs,
+        git: t.git,
+      }),
+    ).rejects.toMatchObject({ code: "incompatible" });
+    expect(t.files.get(file)).toBe(precise);
+    // Millisecond values, trailing zeros and look-alike strings are still rewritten.
+    const fine = `when = 1979-05-27T07:32:00.123000Z\nnote = "12:00:00.123456"\n`;
+    const ok = setup(fine, { ignored: true });
+    await setIdentity({ root, repository: null }, "codex", "identity.triage_role", "designer", {
+      fs: ok.fs,
+      git: ok.git,
+      random: () => 0.1,
+    });
+    expect(ok.files.get(file)).toContain('note = "12:00:00.123456"');
+  });
+
+  it("appends exclude rules without replacing concurrent additions (#165 review)", async () => {
+    const t = setup(sample);
+    t.files.set(exclude, "# local\n/scratch");
+    const realRead = t.fs.readText;
+    t.fs.readText = async (path) => {
+      const text = await realRead(path);
+      // Another tool appends after this one read the exclude file.
+      if (path === exclude) t.files.set(exclude, `${t.files.get(exclude)}\n/late-rule\n`);
+      return text;
+    };
+    t.fs.rename = async (from, to) => {
+      if (to === exclude) throw new Error("info/exclude must not be replaced");
+      t.files.set(to, t.files.get(from)!);
+      t.files.delete(from);
+    };
+    await setIdentity({ root, repository: null }, "codex", "identity.triage_role", "designer", {
+      fs: t.fs,
+      git: t.git,
+    });
+    expect(t.files.get(exclude)!.split("\n")).toEqual(
+      expect.arrayContaining(["/scratch", "/late-rule", `/${IDENTITY_FILE}`]),
+    );
+  });
+
+  it("removes a partially written temporary copy when the write fails (#165 review)", async () => {
+    const t = setup(sample, { ignored: true });
+    t.fs.writeText = async (path, text) => {
+      t.files.set(path, text.slice(0, 10));
+      throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+    };
+    await expect(
+      setIdentity({ root, repository: null }, "codex", "identity.triage_role", "designer", {
+        fs: t.fs,
+        git: t.git,
+      }),
+    ).rejects.toThrow("disk full");
+    expect([...t.files.keys()].filter((k) => k.endsWith(".tmp"))).toEqual([]);
+    expect(t.files.get(file)).toBe(sample);
+  });
+
+  it("keeps an interrupted temporary copy out of git status, even when the file was already ignored", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "triage-identity-tmp-"));
+    try {
+      const run = (...args: string[]) =>
+        new Promise<string>((resolve, reject) =>
+          execFile("git", args, { cwd: dir }, (error, stdout) =>
+            error ? reject(error) : resolve(stdout),
+          ),
+        );
+      await run("init", "-q");
+      // The identity file is already ignored by a committed-style rule; the copy is not.
+      await writeFile(join(dir, ".gitignore"), `/${IDENTITY_FILE}\n`);
+      const target = await resolveIdentityTarget(dir, undefined);
+      // Simulate a crash between writing the temporary copy and renaming it.
+      const crashing: ConfigFileSystem = {
+        ...nodeFileSystem,
+        rename: async () => {
+          throw new Error("killed");
+        },
+        remove: async () => undefined,
+      };
+      await expect(
+        setIdentity(target, "codex", "identity.triage_role", "designer", {
+          fs: crashing,
+          random: () => 0.1,
+          token: () => "crash",
+        }),
+      ).rejects.toThrow("killed");
+      expect(await readdir(dir)).toContain(`${IDENTITY_FILE}.crash.tmp`);
+      expect(await run("status", "--porcelain", "--untracked-files=all")).toBe("?? .gitignore\n");
+      await run("add", "-A");
+      expect(await run("diff", "--cached", "--name-only")).toBe(".gitignore\n");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 
   it("resolves the working-tree root from nested directories and linked worktrees", async () => {
     const dir = await mkdtemp(join(tmpdir(), "triage-identity-"));

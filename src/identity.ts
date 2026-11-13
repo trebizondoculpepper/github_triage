@@ -382,16 +382,33 @@ export async function identityGitState(
   };
 }
 
+/** Exclude rules this tool may add: the identity file and its same-directory temporary copies. */
+const IDENTITY_RULE = `/${IDENTITY_FILE}`;
+const TEMPORARY_RULE = `/${IDENTITY_FILE}.*.tmp`;
+
+/** Root-relative temporary copy name; always matched by `TEMPORARY_RULE`. */
+export const temporaryIdentityName = (token: string): string => `${IDENTITY_FILE}.${token}.tmp`;
+
+async function ignoredByGit(git: GitRunner, root: string, name: string): Promise<boolean | null> {
+  const status = await gitStatus(git, ["check-ignore", "--quiet", "--no-index", name], root);
+  return status === 0 ? true : status === 1 ? false : null;
+}
+
 /**
- * Ensure the identity file is Git-ignored before any write. Reuses existing ignore coverage;
- * otherwise appends a rule to the repository-local `info/exclude` resolved by Git. A tracked
- * file is refused (never untracked, committed or deleted). Returns whether a rule was added.
+ * Ensure the identity file AND its temporary copy are Git-ignored before any write. Reuses
+ * existing ignore coverage; otherwise appends rules to the repository-local `info/exclude`
+ * resolved by Git. The temporary copy holds the whole document (possibly other tools'
+ * credentials) and lives beside the identity file so the final rename stays atomic on one
+ * filesystem, so it must be ignored too: a copy left by an interrupted write is never
+ * offered to a bulk `git add`. The exclude file is only appended to (never read-and-replaced),
+ * so concurrent additions by other tools or linked worktrees are kept. A tracked file is
+ * refused (never untracked, committed or deleted). Returns whether a rule was added.
  */
 export async function ensureExcluded(
   root: string,
   git: GitRunner,
   fs: ConfigFileSystem,
-  token: () => string,
+  temporaryName: string,
 ): Promise<boolean> {
   const state = await identityGitState(root, git);
   if (state.tracked === true) {
@@ -401,39 +418,63 @@ export async function ensureExcluded(
       `Decide yourself whether to untrack it (for example: git rm --cached -- ${IDENTITY_FILE}) and commit that, then retry. This tool never untracks, commits or deletes it.`,
     );
   }
-  if (state.tracked === null || state.ignored === null) {
+  const temporaryIgnored = await ignoredByGit(git, root, temporaryName);
+  if (state.tracked === null || state.ignored === null || temporaryIgnored === null) {
     throw new ConfigError(
       "filesystem",
       `Could not determine whether ${IDENTITY_FILE} is tracked or ignored by Git; nothing was changed.`,
       "Check that git works in this checkout, then retry.",
     );
   }
-  if (state.ignored) return false;
+  const missing = [
+    ...(state.ignored ? [] : [IDENTITY_RULE]),
+    ...(temporaryIgnored ? [] : [TEMPORARY_RULE]),
+  ];
+  if (missing.length === 0) return false;
+  if (!fs.appendText) {
+    throw new ConfigError(
+      "filesystem",
+      `Cannot add a local Git exclude rule for ${IDENTITY_FILE} here; nothing was written.`,
+      `Add ${missing.join(" and ")} to .git/info/exclude yourself, then retry.`,
+    );
+  }
   let excludePath = (await git(["rev-parse", "--git-path", "info/exclude"], root)).trim();
   if (!isAbsolute(excludePath)) excludePath = join(root, excludePath);
   const existing = (await fs.readText(excludePath)) ?? "";
-  const rule = `/${IDENTITY_FILE}`;
-  if (!existing.split(/\r?\n/).includes(rule)) {
-    const text = `${existing}${existing === "" || existing.endsWith("\n") ? "" : "\n"}${rule}\n`;
+  const lines = existing.split(/\r?\n/);
+  const rules = missing.filter((rule) => !lines.includes(rule));
+  if (rules.length > 0) {
     await fs.makeDirectory(dirname(excludePath));
-    const temporary = `${excludePath}.${token()}.tmp`;
-    await fs.writeText(temporary, text);
-    try {
-      await fs.rename(temporary, excludePath);
-    } catch (error) {
-      await fs.remove(temporary).catch(() => undefined);
-      throw error;
-    }
+    const separator = existing === "" || existing.endsWith("\n") ? "" : "\n";
+    await fs.appendText(excludePath, `${separator}${rules.join("\n")}\n`);
   }
   const after = await identityGitState(root, git);
-  if (after.ignored !== true) {
+  if (after.ignored !== true || (await ignoredByGit(git, root, temporaryName)) !== true) {
     throw new ConfigError(
       "not-ignored",
-      `${IDENTITY_FILE} is still not ignored after adding a local exclude rule (a negated ignore pattern may re-include it); nothing was written.`,
-      `Remove the rule that re-includes ${IDENTITY_FILE} from your ignore files, then retry.`,
+      `${IDENTITY_FILE} or its temporary copy is still not ignored after adding a local exclude rule (a negated ignore pattern may re-include it); nothing was written.`,
+      `Remove the rule that re-includes ${IDENTITY_FILE} or ${TEMPORARY_RULE} from your ignore files, then retry.`,
     );
   }
   return true;
+}
+
+/**
+ * smol-toml's TomlDate keeps only milliseconds, so a date-time/time literal with non-zero
+ * sub-millisecond digits would be silently rounded by a rewrite. Refuse instead (#165 review).
+ * A matching literal inside a string survives serialisation verbatim and is not refused.
+ */
+function assertLosslessRewrite(raw: string | null, text: string): void {
+  if (raw === null) return;
+  for (const match of raw.matchAll(/\d{2}:\d{2}:\d{2}\.\d{3}(\d+)/g)) {
+    if (/[1-9]/.test(match[1]!) && !text.includes(match[0])) {
+      throw new ConfigError(
+        "incompatible",
+        `${IDENTITY_FILE} contains a date or time with sub-millisecond precision that cannot be rewritten without changing it; nothing was changed.`,
+        `Edit ${IDENTITY_FILE} by hand to set the identity value, or shorten that timestamp to milliseconds if the precision is not needed, then retry.`,
+      );
+    }
+  }
 }
 
 export interface IdentityWriteOptions {
@@ -504,7 +545,7 @@ export async function setIdentity(
   if (identityValue(before, key) === value) {
     // An unchanged value still refuses a tracked file and establishes missing exclusion; the
     // identity contents are left untouched.
-    const excludedOnly = await ensureExcluded(target.root, git, fs, token);
+    const excludedOnly = await ensureExcluded(target.root, git, fs, temporaryIdentityName(token()));
     return {
       changed: false,
       createdFile: false,
@@ -528,16 +569,26 @@ export async function setIdentity(
   }
   (agents[entry] as Table)[field] = value;
   const text = serializeIdentityDocument(document);
+  assertLosslessRewrite(raw, text);
 
-  // Exclusion is established before the file can be created or rewritten.
-  const excluded = await ensureExcluded(target.root, git, fs, token);
+  // Exclusion of the file and its temporary copy is established before either is written.
+  const temporaryName = temporaryIdentityName(token());
+  const excluded = await ensureExcluded(target.root, git, fs, temporaryName);
   // The file may hold other tools' credentials: keep it private. A new file is 0600; a
   // replaced file keeps its original mode, and the temporary copy is never more permissive
   // than either. Mode handling is a no-op where unsupported (Windows).
   const originalMode = raw === null ? null : ((await fs.fileMode?.(path)) ?? null);
   const finalMode = originalMode ?? PRIVATE_FILE_MODE;
-  const temporary = `${path}.${token()}.tmp`;
-  await fs.writeText(temporary, text, finalMode & PRIVATE_FILE_MODE);
+  const temporary = join(target.root, temporaryName);
+  try {
+    await fs.writeText(temporary, text, finalMode & PRIVATE_FILE_MODE);
+  } catch (error) {
+    // A failed or partial write must not leave a copy behind; an existing file is not ours.
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+      await fs.remove(temporary).catch(() => undefined);
+    }
+    throw error;
+  }
   try {
     if ((await fs.readText(path)) !== raw) throw conflict();
     await fs.rename(temporary, path);

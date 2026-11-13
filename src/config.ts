@@ -12,7 +12,16 @@
  */
 
 import { execFile } from "node:child_process";
-import { chmod, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  chmod,
+  mkdir,
+  readFile,
+  rename,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -116,6 +125,8 @@ export interface ConfigFileSystem {
   /** Create `path` exclusively; `mode` (POSIX permission bits) is used only for private files. */
   writeText(path: string, text: string, mode?: number): Promise<void>;
   rename(from: string, to: string): Promise<void>;
+  /** Append to `path` (created when missing) without replacing concurrent additions. */
+  appendText?(path: string, text: string): Promise<void>;
   /** POSIX permission bits of an existing file, or null when missing/unsupported. */
   fileMode?(path: string): Promise<number | null>;
   /** Set POSIX permission bits; a no-op where unsupported (Windows). */
@@ -136,6 +147,7 @@ export const nodeFileSystem: ConfigFileSystem = {
   writeText: (path, text, mode) =>
     writeFile(path, text, mode === undefined ? { flag: "wx" } : { flag: "wx", mode }),
   rename: (from, to) => rename(from, to),
+  appendText: (path, text) => appendFile(path, text, { flag: "a" }),
   async fileMode(path) {
     if (process.platform === "win32") return null;
     try {
