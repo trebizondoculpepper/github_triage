@@ -147,7 +147,17 @@ const fieldQuery = (number: number) => `query($owner: String!, $name: String!, $
   repository(owner: $owner, name: $name) { issue(number: ${number}) { id state
     issueFieldValues(first: 50) { nodes { __typename
       ... on IssueFieldSingleSelectValue { name field { ... on IssueFieldSingleSelect { id } } } } }
-    comments(last: 100) { nodes { body } } } } }`;
+    comments(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { body } } } } }`;
+
+/** Older comment pages, newest first, read only until the newest valid marker is found. */
+const commentsPageQuery = (
+  number: number,
+) => `query($owner: String!, $name: String!, $before: String!) {
+  repository(owner: $owner, name: $name) { issue(number: ${number}) {
+    comments(last: 100, before: $before) { pageInfo { hasPreviousPage startCursor } nodes { body } } } } }`;
+
+/** Bound on extra comment pages (100 comments each) searched for an older marker. */
+export const MAX_COMMENT_PAGES = 20;
 
 const SET_VALUE = `mutation($issue: ID!, $field: ID!, $option: ID!) {
   setIssueFieldValue(input: { issueId: $issue,
@@ -161,7 +171,74 @@ const denied = (answer: GraphqlAnswer): string | null => {
   return `${error.type ? `${error.type}: ` : ""}${error.message ?? "GitHub returned an error"}`;
 };
 
-function readIssue(answer: GraphqlAnswer, fieldId: string, number: number): IssueState {
+type IssueRead = IssueState & {
+  /** Cursor to older comments when no marker was found on this page, else null. */
+  readonly olderCursor: string | null;
+};
+
+const unknownProvenance = (number: number, why: string) =>
+  new Refusal(
+    "provenance-unavailable",
+    "failed:unknown",
+    2,
+    `The estimate history of #${number} could not be read completely (${why}); nothing was written.`,
+    "Retry the same command; missing comment history is never treated as no provenance.",
+  );
+
+/** Newest valid marker for the field among comment nodes (oldest-first order), or null. */
+function newestMarker(nodes: unknown, fieldId: string): EstimateProvenance | null {
+  let provenance: EstimateProvenance | null = null;
+  for (const node of Array.isArray(nodes) ? nodes : []) {
+    const parsed = parseProvenance(text(prop(node, "body")));
+    if (parsed?.fieldId === fieldId) provenance = parsed; // last (newest) wins
+  }
+  return provenance;
+}
+
+/** Cursor for older comments, or null when history is exhausted; throws when unreadable. */
+function olderCursor(comments: unknown, number: number): string | null {
+  if (!Array.isArray(prop(comments, "nodes"))) throw unknownProvenance(number, "comments missing");
+  const more = prop(comments, "pageInfo", "hasPreviousPage");
+  if (more === false) return null;
+  const cursor = prop(comments, "pageInfo", "startCursor");
+  if (more !== true || typeof cursor !== "string" || !cursor)
+    throw unknownProvenance(number, "comment pagination missing");
+  return cursor;
+}
+
+/** Read the issue, paging comments backward until the newest marker or exhausted history. */
+async function readState(
+  api: FieldApi,
+  query: string,
+  vars: Record<string, string>,
+  pageQuery: string,
+  fieldId: string,
+  number: number,
+  prefetched?: GraphqlAnswer,
+): Promise<IssueState> {
+  const answer = prefetched ?? (await api.query(query, vars));
+  let state: IssueRead = readIssue(answer, fieldId, number);
+  let cursor = state.olderCursor;
+  let pages = 0;
+  while (!state.provenance && cursor !== null) {
+    if (pages >= MAX_COMMENT_PAGES)
+      throw unknownProvenance(number, `more than ${MAX_COMMENT_PAGES + 1} pages of comments`);
+    pages += 1;
+    const page = await api
+      .query(pageQuery, { owner: vars.owner!, name: vars.name!, before: cursor })
+      .catch((error: unknown) => ({ data: null, errors: [{ message: (error as Error).message }] }));
+    if (page.errors.length)
+      throw unknownProvenance(number, denied(page) ?? "GitHub returned errors");
+    const comments = prop(page.data, "repository", "issue", "comments");
+    const provenance = newestMarker(prop(comments, "nodes"), fieldId);
+    const next = olderCursor(comments, number);
+    state = { ...state, provenance };
+    cursor = provenance ? null : next;
+  }
+  return state;
+}
+
+function readIssue(answer: GraphqlAnswer, fieldId: string, number: number): IssueRead {
   const issue = prop(answer.data, "repository", "issue");
   if (!isRecord(issue) || typeof issue.id !== "string")
     throw new Refusal(
@@ -192,13 +269,15 @@ function readIssue(answer: GraphqlAnswer, fieldId: string, number: number): Issu
         throw unknown(`unrecognised value ${JSON.stringify(name ?? null)}`);
       current = name as ComplexitySize;
     }
-  const comments = prop(issue, "comments", "nodes");
-  let provenance: EstimateProvenance | null = null;
-  for (const node of Array.isArray(comments) ? comments : []) {
-    const parsed = parseProvenance(text(prop(node, "body")));
-    if (parsed?.fieldId === fieldId) provenance = parsed; // last (newest) wins
-  }
-  return { issueId: issue.id, state: text(issue.state, "UNKNOWN"), current, provenance };
+  const comments = prop(issue, "comments");
+  const provenance = newestMarker(prop(comments, "nodes"), fieldId);
+  return {
+    issueId: issue.id,
+    state: text(issue.state, "UNKNOWN"),
+    current,
+    provenance,
+    olderCursor: provenance ? null : olderCursor(comments, number),
+  };
 }
 
 const text = (value: unknown, fallback = ""): string =>
@@ -306,8 +385,18 @@ export async function runEstimate(
     result.fieldId = fieldId;
 
     const [owner, name] = target.repository.split("/") as [string, string];
-    const read = () => api.query(fieldQuery(number), { owner, name, field: fieldId });
-    const first = await read();
+    const vars = { owner, name, field: fieldId };
+    const read = (prefetched?: GraphqlAnswer) =>
+      readState(
+        api,
+        fieldQuery(number),
+        vars,
+        commentsPageQuery(number),
+        fieldId,
+        number,
+        prefetched,
+      );
+    const first = await api.query(fieldQuery(number), vars);
     const fieldNode = prop(first.data, "field");
     if (!isRecord(fieldNode)) {
       const forbidden = first.errors.some((e) => e.type === "FORBIDDEN");
@@ -342,7 +431,7 @@ export async function runEstimate(
         "Check with: github-triage setup complexity",
       );
 
-    const before = readIssue(first, fieldId, number);
+    const before = await read(first);
     result.previous = before.current;
     result.issueState = before.state;
     const revisionText = await git(["rev-parse", "HEAD"], target.root).catch(() => "");
@@ -401,18 +490,25 @@ export async function runEstimate(
       return await finish("unchanged", 0);
     }
 
+    // Re-read immediately before ANY write (value or provenance-only): a concurrent estimate
+    // or provenance record must not be overwritten or contradicted.
+    const latest = await read();
+    if (
+      latest.current !== before.current ||
+      JSON.stringify(latest.provenance) !== JSON.stringify(before.provenance)
+    )
+      throw new Refusal(
+        "concurrent-change",
+        "refused:stale",
+        1,
+        latest.current !== before.current
+          ? `#${number} changed from ${before.current ?? "unset"} to ${latest.current ?? "unset"} while recording; nothing was written.`
+          : `#${number} received new estimate provenance while recording; nothing was written.`,
+        "Re-run the command after reading the new estimate and its rationale.",
+      );
+
     let valueWritten = false;
     if (before.current !== size) {
-      // Re-read immediately before writing: a concurrent estimate must not be overwritten.
-      const latest = readIssue(await read(), fieldId, number);
-      if (latest.current !== before.current)
-        throw new Refusal(
-          "concurrent-change",
-          "refused:stale",
-          1,
-          `#${number} changed from ${before.current ?? "unset"} to ${latest.current ?? "unset"} while recording; nothing was overwritten.`,
-          "Read the new estimate and its rationale, then decide again.",
-        );
       const set = await api.mutate(SET_VALUE, {
         issue: before.issueId,
         field: fieldId,

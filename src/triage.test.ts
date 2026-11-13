@@ -39,7 +39,7 @@ import {
 import { briefing, dependencyDone, textReport } from "./briefing.js";
 import { complexityGuidance } from "./complexity.js";
 import { classifyField } from "./complexitysetup.js";
-import { parseProvenance, provenanceComment } from "./estimate.js";
+import { MAX_COMMENT_PAGES, parseProvenance, provenanceComment } from "./estimate.js";
 import type { EstimateProvenance } from "./estimate.js";
 import { complexityConfigText, diagnoseComplexityConfig } from "./complexitydoctor.js";
 import {
@@ -4089,7 +4089,9 @@ describe("estimate N records a size with provenance (#121)", () => {
       fieldNode?: unknown;
       queryErrors?: Answer["errors"];
       /** Change the remote value after the Nth query (simulates a concurrent writer). */
-      concurrent?: { afterQuery: number; size: string };
+      concurrent?: { afterQuery: number; size?: string; comment?: string };
+      /** Fail the Nth older-comments page query with GraphQL errors. */
+      failPage?: number;
       failSet?: Answer;
       failComment?: boolean;
       /** Degrade the Nth query: GraphQL errors and/or issueFieldValues missing. */
@@ -4117,6 +4119,15 @@ describe("estimate N records a size with provenance (#121)", () => {
     const remote = { current: options.current ?? null, comments: [...(options.comments ?? [])] };
     const mutations: { query: string; vars: Record<string, string> }[] = [];
     let queries = 0;
+    let pageQueries = 0;
+    // Comment pages are served newest-last, 100 at a time; a cursor is the start index.
+    const page = (end: number) => {
+      const start = Math.max(0, end - 100);
+      return {
+        pageInfo: { hasPreviousPage: start > 0, startCursor: String(start) },
+        nodes: remote.comments.slice(start, end).map((body) => ({ body })),
+      };
+    };
     const answer = (): Answer => ({
       data: {
         field: options.fieldNode === undefined ? field : options.fieldNode,
@@ -4135,7 +4146,7 @@ describe("estimate N records a size with provenance (#121)", () => {
                   ]
                 : [],
             },
-            comments: { nodes: remote.comments.map((body) => ({ body })) },
+            comments: page(remote.comments.length),
           },
         },
       },
@@ -4156,7 +4167,16 @@ describe("estimate N records a size with provenance (#121)", () => {
           git,
           cwd: root,
           api: {
-            query: async () => {
+            query: async (query, vars) => {
+              if (query.includes("$before")) {
+                pageQueries += 1;
+                if (options.failPage === pageQueries)
+                  return { data: null, errors: [{ type: "INTERNAL", message: "timeout" }] };
+                return {
+                  data: { repository: { issue: { comments: page(Number(vars.before)) } } },
+                  errors: [],
+                };
+              }
               queries += 1;
               const a = answer();
               const d = options.degrade;
@@ -4166,8 +4186,11 @@ describe("estimate N records a size with provenance (#121)", () => {
                   delete (a.data as { repository: { issue: Record<string, unknown> } }).repository
                     .issue.issueFieldValues;
               }
-              if (options.concurrent && queries === options.concurrent.afterQuery)
-                remote.current = options.concurrent.size;
+              const c = options.concurrent;
+              if (c && queries === c.afterQuery) {
+                if (c.size) remote.current = c.size;
+                if (c.comment) remote.comments.push(c.comment);
+              }
               return a;
             },
             mutate: async (query, vars) => {
@@ -4187,7 +4210,14 @@ describe("estimate N records a size with provenance (#121)", () => {
           },
         },
       });
-    return { remote, mutations, out, call, json: () => JSON.parse(out.at(-1)!) };
+    return {
+      remote,
+      mutations,
+      out,
+      call,
+      pageQueries: () => pageQueries,
+      json: () => JSON.parse(out.at(-1)!),
+    };
   }
   const base = ["--size", "M", "--rationale", "few modules; bounded tests", "--json"];
 
@@ -4266,6 +4296,54 @@ describe("estimate N records a size with provenance (#121)", () => {
     expect(t.json()).toMatchObject({ status: "refused:stale", code: "concurrent-change" });
     expect(t.remote.current).toBe("XL");
     expect(t.mutations).toEqual([]);
+  });
+  it("rereads before a provenance-only write and refuses a concurrent value change", async () => {
+    // Value already M (needs provenance); another writer sets L after the first read.
+    const t = harness({ current: "M", concurrent: { afterQuery: 1, size: "L" } });
+    expect(await t.call(...base)).toBe(1);
+    expect(t.json()).toMatchObject({ status: "refused:stale", code: "concurrent-change" });
+    expect(t.json().recovery).toContain("Re-run");
+    expect(t.mutations).toEqual([]);
+    expect(t.remote.current).toBe("L");
+  });
+  it("refuses a provenance-only write when newer provenance appeared meanwhile", async () => {
+    const other = harness();
+    await other.call(...base, "--agent", "other");
+    const t = harness({
+      current: "M",
+      concurrent: { afterQuery: 1, comment: other.remote.comments[0]! },
+    });
+    expect(await t.call(...base)).toBe(1);
+    expect(t.json()).toMatchObject({ status: "refused:stale", code: "concurrent-change" });
+    expect(t.mutations).toEqual([]);
+  });
+  it("pages back through older comments to find the newest provenance marker", async () => {
+    const seed = harness();
+    await seed.call(...base);
+    const marker = seed.remote.comments[0]!;
+    const filler = Array.from({ length: 250 }, (_, i) => `chatter ${i}`);
+    const t = harness({ current: "M", comments: [marker, ...filler] });
+    expect(await t.call(...base)).toBe(0);
+    expect(t.json().status).toBe("unchanged");
+    expect(t.mutations).toEqual([]);
+    // Bounded: stops once found (2 older pages per read; unchanged needs no reread).
+    expect(t.pageQueries()).toBe(2);
+  });
+  it("treats failed or unbounded comment paging as unknown provenance and writes nothing", async () => {
+    const filler = Array.from({ length: 150 }, (_, i) => `chatter ${i}`);
+    const failed = harness({ current: "M", comments: filler, failPage: 1 });
+    expect(await failed.call(...base)).toBe(2);
+    expect(failed.json()).toMatchObject({
+      status: "failed:unknown",
+      code: "provenance-unavailable",
+    });
+    expect(failed.mutations).toEqual([]);
+    const huge = Array.from({ length: 100 * (MAX_COMMENT_PAGES + 2) }, (_, i) => `c ${i}`);
+    const endless = harness({ current: "M", comments: huge });
+    expect(await endless.call(...base)).toBe(2);
+    expect(endless.json().code).toBe("provenance-unavailable");
+    expect(endless.pageQueries()).toBe(MAX_COMMENT_PAGES);
+    expect(endless.mutations).toEqual([]);
   });
   it("reports a partial write honestly and repairs only provenance on retry", async () => {
     const t = harness({ failComment: true });
