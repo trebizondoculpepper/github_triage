@@ -78,7 +78,7 @@ const action = (
   uncertainty,
 });
 
-/** @type {Map<string, (context: { snapshot: import("./types.js").Snapshot, issues: import("./types.js").Issue[], prs: import("./types.js").PullRequest[] }) => import("./types.js").Action[]>} */
+/** @type {Map<string, (context: { snapshot: import("./types.js").Snapshot, issues: import("./types.js").Issue[], prs: import("./types.js").PullRequest[], viewer?: string }) => import("./types.js").Action[]>} */
 export const analysisRules = new Map();
 analysisRules.set("ownership-and-labels", ({ issues }) =>
   issues.flatMap((issue) => {
@@ -198,6 +198,26 @@ analysisRules.set("native-dependencies", ({ snapshot, issues }) =>
       );
     return findings;
   }),
+);
+// attention:NAME addressed to the explicit viewer (#3, doc/design/briefings.md): highest
+// priority, non-exclusive, never a claim, and kept even for parked or other-owned work.
+analysisRules.set("addressed-attention", ({ issues, prs, viewer }) =>
+  viewer
+    ? [...issues, ...prs]
+        .filter((item) => labels(item).includes(`attention:${viewer}`))
+        .map((item) => {
+          const origin = labels(item)
+            .filter((l) => l.startsWith("origin:"))
+            .map((l) => l.slice("origin:".length));
+          return action(
+            "addressed-attention",
+            item,
+            200,
+            `Your attention is requested (attention:${viewer})${origin.length ? `, raised by ${origin.join(", ")}` : ""}. This does not claim the work or change who may act.`,
+            "Read the full history, post a substantive response on the ticket, and only then remove your own attention label; leave other agents' labels alone.",
+          );
+        })
+    : [],
 );
 analysisRules.set("attention", ({ issues }) =>
   issues.flatMap((issue) => {
@@ -356,14 +376,14 @@ analysisRules.set("pull-requests", ({ snapshot, prs }) =>
 
 /**
  * @param {import("./types.js").Snapshot} snapshot
- * @param {{limit: number, offline?: boolean, issue?: number}} options
+ * @param {{limit: number, offline?: boolean, issue?: number, agent?: string}} options
  * @param {Date} [now]
  */
 export function briefing(snapshot, options, now = new Date()) {
   const issues = snapshot.issues.filter(active);
   const prs = snapshot.pullRequests.filter(active);
   const actions = [...analysisRules.values()]
-    .flatMap((handler) => handler({ snapshot, issues, prs }))
+    .flatMap((handler) => handler({ snapshot, issues, prs, viewer: options.agent }))
     .sort(
       (a, b) =>
         b.priority - a.priority ||

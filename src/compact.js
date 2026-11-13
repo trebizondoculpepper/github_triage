@@ -60,8 +60,8 @@ export function compactBriefing(snapshot, options, expanded) {
   const objects = [...snapshot.issues, ...snapshot.pullRequests];
   const byUrl = new Map(objects.map((item) => [item.url, item]));
   const isMine = (item) => !!options.agent && owners(item).includes(`agent:${options.agent}`);
-  // attention:NAME requests this agent's response (doc/design/briefings.md). It is
-  // non-exclusive, never a claim, and stays visible regardless of role, ownership or parking.
+  // The addressed-attention rule itself is registered in briefing.js; here it only orders and
+  // keeps addressed items visible regardless of role, ownership or parking.
   const labelNames = (item) => item.labels.nodes.map(({ name }) => name);
   const isAddressed = (item) =>
     !!options.agent && !!item && labelNames(item).includes(`attention:${options.agent}`);
@@ -84,25 +84,6 @@ export function compactBriefing(snapshot, options, expanded) {
       title: item.title,
       reason: "Current work owned by the configured agent.",
       next: "Read current intake and continue this claim before claiming another ticket.",
-      evidence: [item.url],
-      uncertainty: "factual",
-    });
-    grouped.set(item.url, findings);
-  }
-  for (const item of objects.filter(
-    (i) => isAddressed(i) && (i.state === undefined || i.state === "OPEN"),
-  )) {
-    const findings = grouped.get(item.url) ?? [];
-    const origin = labelNames(item)
-      .filter((l) => l.startsWith("origin:"))
-      .map((l) => l.slice("origin:".length));
-    findings.unshift({
-      rule: "addressed-attention",
-      priority: 200,
-      target: item.url,
-      title: item.title,
-      reason: `Your attention is requested (attention:${options.agent})${origin.length ? `, raised by ${origin.join(", ")}` : ""}. This does not claim the work or change who may act.`,
-      next: "Read the full history, post a substantive response on the ticket, and only then remove your own attention label; leave other agents' labels alone.",
       evidence: [item.url],
       uncertainty: "factual",
     });
