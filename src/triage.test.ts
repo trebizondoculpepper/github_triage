@@ -2430,6 +2430,70 @@ describe("post-write ownership check with incomplete labels", () => {
   });
 });
 
+describe("transferred issue inspection (#39, doc/design/diagnostics.md)", () => {
+  const rest = (status: number | null, body: any) => async () => ({ status, body });
+  it("distinguishes moved, pull request, missing, forbidden and unknown", async () => {
+    const { locateIssue } = await import("./github.js");
+    const moved = await locateIssue(
+      "o/old",
+      701,
+      rest(200, {
+        repository_url: "https://api.github.com/repos/o/new",
+        number: 2,
+        html_url: "https://github.com/o/new/issues/2",
+      }),
+    );
+    expect(moved).toMatchObject({
+      state: "moved",
+      url: "https://github.com/o/old/issues/701",
+      destination: { repository: "o/new", number: 2, url: "https://github.com/o/new/issues/2" },
+    });
+    const same = { repository_url: "https://api.github.com/repos/o/old", number: 5 };
+    expect((await locateIssue("o/old", 5, rest(200, { ...same, pull_request: {} }))).state).toBe(
+      "pull-request",
+    );
+    expect((await locateIssue("o/old", 5, rest(404, { status: "404" }))).state).toBe("missing");
+    expect((await locateIssue("o/old", 5, rest(403, { status: "403" }))).state).toBe("forbidden");
+    expect((await locateIssue("o/old", 5, rest(null, null))).state).toBe("unknown");
+    // Missing or forbidden never claims a transfer.
+    expect("destination" in (await locateIssue("o/old", 5, rest(404, {})))).toBe(false);
+  });
+  it("reports instead of failing, and follows a transfer only with --include-transferred", async () => {
+    const { IssueUnavailable } = await import("./github.js");
+    const diagnosis = {
+      repository: "o/old",
+      number: 701,
+      url: "https://github.com/o/old/issues/701",
+      state: "moved",
+      destination: { repository: "o/new", number: 2, url: "https://github.com/o/new/issues/2" },
+      detail: "Transferred.",
+      next: "x",
+    };
+    const seen: string[] = [];
+    const runtime = {
+      currentRepository: async () => "o/old",
+      collect: async (repository: string, options: { issue?: number }) => {
+        seen.push(`${repository}#${options.issue}`);
+        if (repository === "o/old") throw new IssueUnavailable(diagnosis);
+        return snapshot([issue(2)], []);
+      },
+    } as any;
+    let out = "";
+    const write = async (x: string) => void (out = x);
+    expect(await main(["--repo", "o/old", "--issue", "701", "--json"], write, runtime)).toBe(2);
+    expect(JSON.parse(out)).toMatchObject({ kind: "issue-unavailable", state: "moved" });
+    expect(seen).toEqual(["o/old#701"]);
+    const code = await main(
+      ["--repo", "o/old", "--issue", "701", "--json", "--include-transferred"],
+      write,
+      runtime,
+    );
+    expect(code).toBe(0);
+    expect(seen).toEqual(["o/old#701", "o/old#701", "o/new#2"]);
+    expect(JSON.parse(out).transferredFrom).toMatchObject({ url: diagnosis.url });
+  });
+});
+
 describe("addressed attention for --agent (#3, doc/design/briefings.md)", () => {
   it("orders attention to the viewer first, then owned work, then pickup; never a claim", async () => {
     const { compactBriefing, compactText } = await import("./compact.js");
@@ -2477,5 +2541,40 @@ describe("addressed attention in the expanded briefing (#3)", () => {
     });
     const anonymous = briefing(snapshot([addressed], []), { limit: 100 }, new Date(time));
     expect(anonymous.actions.items.some((a) => a.rule === "addressed-attention")).toBe(false);
+  });
+});
+
+describe("transferred issue inspection when GraphQL fails (#39)", () => {
+  it("diagnoses a failed read through REST, keeping the error when REST is not authoritative", async () => {
+    const { collect } = await import("./github.js");
+    const failing = async () => {
+      throw new Error("GitHub query failed.");
+    };
+    const forbidden = async () => ({
+      repository: "o/x",
+      number: 3,
+      url: "u",
+      state: "forbidden",
+      detail: "denied",
+      next: "gh auth status",
+    });
+    await expect(
+      collect("o/x", { issue: 3, locate: forbidden } as any, failing as any),
+    ).rejects.toMatchObject({
+      diagnosis: { state: "forbidden" },
+    });
+    const unknown = async () => ({
+      repository: "o/x",
+      number: 3,
+      url: "u",
+      state: "unknown",
+      detail: "",
+      next: "",
+    });
+    await expect(
+      collect("o/x", { issue: 3, locate: unknown } as any, failing as any),
+    ).rejects.toThrow("GitHub query failed.");
+    // Without --issue the original failure is unchanged.
+    await expect(collect("o/x", {}, failing as any)).rejects.toThrow("GitHub query failed.");
   });
 });
