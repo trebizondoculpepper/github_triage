@@ -99,7 +99,8 @@ import {
   setIdentity,
 } from "./identity.js";
 import { detectClientEntry, detectHarness, HARNESS_DETECTORS, resolveEntry } from "./harness.js";
-import { localDoctor, localDoctorExitCode, localDoctorText } from "./localdoctor.js";
+import { localDoctor, localDoctorExitCode, localDoctorText, nodeProbe } from "./localdoctor.js";
+import { configArgumentsFor } from "./configcli.js";
 import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
 
 const repo = "example/project";
@@ -7693,8 +7694,15 @@ describe("local configuration doctor (#64)", () => {
   async function run(
     answers: Answers = {},
     file: string | null | Error = 'name = "x"\ntoken = "SECRET-TOKEN-VALUE"\n',
-    options: { repo?: string; agent?: string; role?: string } = {},
+    options: {
+      repo?: string;
+      agent?: string;
+      role?: string;
+      entry?: string;
+      harness?: string;
+    } = {},
     nodeVersion = "26.1.0",
+    env: Record<string, string> = {},
   ) {
     const all = { ...base, ...answers };
     const calls: string[] = [];
@@ -7720,7 +7728,7 @@ describe("local configuration doctor (#64)", () => {
       remove: async () => expect.fail("doctor removed a file"),
       makeDirectory: async () => expect.fail("doctor created a directory"),
     };
-    const report = await localDoctor(options, { cwd: "/x", probe, fs, nodeVersion });
+    const report = await localDoctor(options, { cwd: "/x", probe, fs, nodeVersion, env });
     const status = Object.fromEntries(report.checks.map((c) => [c.id, c.status]));
     return { report, status, calls, text: localDoctorText(report), json: JSON.stringify(report) };
   }
@@ -7739,11 +7747,12 @@ describe("local configuration doctor (#64)", () => {
       "identity.file": "ok",
       "identity.git-ignored": "ok",
       "identity.git-tracked": "ok",
-      "identity.entry": "unsupported",
+      "identity.parse": "ok",
+      "identity.entry": "unknown",
       "identity.agent": "ok",
       "triage.role": "ok",
     });
-    expect(localDoctorExitCode(report)).toBe(0);
+    expect(localDoctorExitCode(report)).toBe(2);
     for (const out of [text, json]) {
       expect(out).not.toContain(SECRET);
       expect(out).not.toContain("/private/home");
@@ -7805,7 +7814,11 @@ describe("local configuration doctor (#64)", () => {
       "identity.file": "unknown",
       "identity.git-ignored": "unknown",
       "identity.git-tracked": "unknown",
-      "triage.role": "unsupported",
+      "identity.parse": "unknown",
+      "identity.entry": "unknown",
+      "identity.name": "unknown",
+      "identity.triage-role": "unknown",
+      "triage.role": "unknown",
     });
     expect(report.repository).toBeNull();
     expect(localDoctorExitCode(report)).toBe(1);
@@ -7840,7 +7853,215 @@ describe("local configuration doctor (#64)", () => {
     expect(status["triage.role"]).toBe("invalid");
     expect(status["identity.agent"]).toBe("unknown");
     const role = report.checks.find((c) => c.id === "triage.role")!;
-    expect(role.next).toContain("github-triage doctor --role implementer");
+    expect(role.next).toContain("github-triage doctor --role implementer --repo owner/name");
+  });
+
+  const persisted = [
+    'top = "SECRET-TOKEN-VALUE"',
+    "[agents.claude]",
+    'name = "kavya_sabbagh"',
+    'triage_role = "implementer"',
+    'role = "agent"',
+    "unknown_key = 3",
+    "[agents.codex]",
+    'name = "other_agent_name"',
+    'triage_role = "designer"',
+    'token = "SECRET-TOKEN-VALUE"',
+    "",
+  ].join("\n");
+  const check = (report: { checks: { id: string; next: string[] }[] }, id: string) =>
+    report.checks.find((c) => c.id === id)!;
+  /** Every suggested triage command parses with the CLI's own argument parser. */
+  const expectParsable = (commands: string[]) => {
+    for (const command of commands) {
+      expect(command).not.toContain("#");
+      const words = command.split(" ");
+      if (words[0] !== "github-triage") continue;
+      expect(command).toContain("--repo ");
+      if (words[1] === "config") {
+        expect(command).toContain("--entry ");
+        expect(() => configArgumentsFor(words.slice(2))).not.toThrow();
+      }
+    }
+  };
+
+  it("reads the persisted name and triage_role of the detected entry only", async () => {
+    const { report, status, text, json } = await run({}, persisted, {}, "26.1.0", {
+      CLAUDECODE: "1",
+    });
+    expect(status).toMatchObject({
+      "identity.file": "ok",
+      "identity.parse": "ok",
+      "identity.entry": "ok",
+      "identity.name": "ok",
+      "identity.triage-role": "ok",
+      "identity.agent": "ok",
+      "triage.role": "ok",
+    });
+    expect(report).toMatchObject({ entry: "claude", agent: "kavya_sabbagh", role: "implementer" });
+    expect(check(report, "identity.entry")).toMatchObject({
+      source: "environment (signals: CLAUDECODE)",
+    });
+    expect(localDoctorExitCode(report)).toBe(0);
+    expect(status).not.toHaveProperty("identity.compatibility");
+    for (const out of [text, json]) {
+      expect(out).not.toContain(SECRET);
+      expect(out).not.toContain("other_agent_name");
+      expect(out).not.toContain("unknown_key");
+    }
+    // Explicit selection still wins over persisted values.
+    const explicit = await run({}, persisted, { agent: "a", role: "designer" }, "26.1.0", {
+      CLAUDECODE: "1",
+    });
+    expect(explicit.report).toMatchObject({ agent: "a", role: "designer" });
+    expect(explicit.status["triage.role"]).toBe("ok");
+  });
+
+  it("reports a malformed file by line and column, never its text, and stops there", async () => {
+    const { status, report, text, json } = await run({}, `[agents.claude]\nname = "${SECRET}\n`, {
+      entry: "claude",
+    });
+    expect(status).toMatchObject({
+      "identity.parse": "invalid",
+      "identity.entry": "unknown",
+      "identity.name": "unknown",
+      "identity.triage-role": "unknown",
+    });
+    expect(check(report, "identity.parse").next[0]).toContain(
+      "github-triage doctor --repo owner/name",
+    );
+    for (const out of [text, json]) expect(out).not.toContain(SECRET);
+    expect(localDoctorExitCode(report)).toBe(1);
+  });
+
+  it("guides an absent file or entry to the config initialiser with --entry and --repo", async () => {
+    const absent = await run({}, null, { entry: "codex" });
+    expect(absent.status).toMatchObject({
+      "identity.file": "missing",
+      "identity.parse": "unknown",
+      "identity.entry": "missing",
+      "identity.name": "missing",
+      "identity.triage-role": "missing",
+      "identity.agent": "unknown",
+      "triage.role": "unknown",
+    });
+    expect(check(absent.report, "identity.entry").next).toEqual([
+      "github-triage config set identity.triage_role implementer --entry codex --repo owner/name",
+      "github-triage config set identity.triage_role designer --entry codex --repo owner/name",
+    ]);
+    const missingEntry = await run({}, persisted, { entry: "ori.review" });
+    expect(missingEntry.status["identity.entry"]).toBe("missing");
+    for (const { report } of [absent, missingEntry])
+      expectParsable(report.checks.flatMap((c) => c.next));
+  });
+
+  it("never selects an entry from absent, conflicting or ambiguous evidence", async () => {
+    const none = await run({}, persisted);
+    expect(none.status["identity.entry"]).toBe("unknown");
+    expect(none.report.entry).toBeNull();
+    const conflict = await run({}, persisted, {}, "26.1.0", { CLAUDECODE: "1", CODEX_CI: "1" });
+    expect(conflict.status["identity.entry"]).toBe("unknown");
+    expect(check(conflict.report, "identity.entry")).toMatchObject({
+      source: "conflict (signals: CLAUDECODE, CODEX_CI)",
+    });
+    const several = await run(
+      {},
+      '[agents.codex]\nname = "a"\n[agents."codex.review"]\nname = "b"\n',
+      { harness: "codex" },
+    );
+    expect(check(several.report, "identity.entry").next).toEqual([
+      "github-triage doctor --entry codex --repo owner/name",
+      "github-triage doctor --entry codex.review --repo owner/name",
+    ]);
+    expect(several.text).not.toContain('"a"');
+    const ori = await run({}, persisted, {}, "26.1.0", { ORI_SESSION_ID: "s" });
+    expect(ori.status["identity.entry"]).toBe("unknown");
+    expect(ori.text).not.toContain("=s");
+    const badEntry = await run({}, persisted, { entry: "bad key!" });
+    expect(badEntry.status["identity.entry"]).toBe("invalid");
+    for (const r of [none, conflict, several, ori, badEntry]) {
+      expect(r.status["identity.name"]).toBe("unknown");
+      expect(r.status["identity.agent"]).toBe("unknown");
+      expectParsable(r.report.checks.flatMap((c) => c.next));
+    }
+  });
+
+  it("separates missing and invalid name and triage_role; a generic role is no substitute", async () => {
+    const generic = await run({}, '[agents.claude]\nrole = "implementer"\n', { entry: "claude" });
+    expect(generic.status).toMatchObject({
+      "identity.entry": "ok",
+      "identity.name": "missing",
+      "identity.triage-role": "missing",
+      "triage.role": "unknown",
+    });
+    expect(check(generic.report, "identity.name").next).toEqual([
+      "github-triage config set identity.name <AGENT_NAME> --entry claude --repo owner/name",
+    ]);
+    const invalid = await run(
+      {},
+      `[agents.claude]\nname = "${SECRET} x"\ntriage_role = "boss-${SECRET}"\n`,
+      { entry: "claude" },
+    );
+    expect(invalid.status).toMatchObject({
+      "identity.name": "invalid",
+      "identity.triage-role": "invalid",
+    });
+    expect(invalid.text).not.toContain(SECRET);
+    expect(invalid.json).not.toContain(SECRET);
+    const notTable = await run({}, '[agents]\nclaude = "x"\n', { entry: "claude" });
+    expect(notTable.status["identity.entry"]).toBe("invalid");
+    for (const r of [generic, invalid, notTable]) {
+      expect(localDoctorExitCode(r.report)).toBe(1);
+      expectParsable(r.report.checks.flatMap((c) => c.next));
+    }
+  });
+
+  it("finds the root file from a nested directory of a linked worktree, not a parent's", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "triage-doctor-wt-"));
+    try {
+      const git = (cwd: string, ...args: string[]) =>
+        new Promise<string>((resolve, reject) =>
+          execFile("git", args, { cwd }, (error, stdout) =>
+            error ? reject(error) : resolve(stdout),
+          ),
+        );
+      const primary = join(dir, "main");
+      await mkdir(primary);
+      await git(primary, "init", "-q");
+      await git(primary, "remote", "add", "origin", "https://github.com/owner/name.git");
+      await git(
+        primary,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "i",
+      );
+      const worktree = join(dir, "wt");
+      await git(primary, "worktree", "add", "-q", worktree);
+      await writeFile(join(dir, "agent-inbox.toml"), '[agents.claude]\nname = "decoy"\n');
+      await writeFile(join(primary, "agent-inbox.toml"), '[agents.claude]\nname = "decoy"\n');
+      await writeFile(
+        join(worktree, "agent-inbox.toml"),
+        '[agents.claude]\nname = "worktree_agent"\ntriage_role = "designer"\n',
+      );
+      const nested = join(worktree, "a", "b");
+      await mkdir(nested, { recursive: true });
+      const probe = async (command: string, args: readonly string[], cwd: string) =>
+        command === "git" ? nodeProbe(command, args, cwd) : { code: 0, stdout: "" };
+      const report = await localDoctor(
+        {},
+        { cwd: nested, probe, fs: nodeFileSystem, nodeVersion: "26.0.0", env: { CLAUDECODE: "1" } },
+      );
+      expect(report).toMatchObject({ entry: "claude", agent: "worktree_agent", role: "designer" });
+      expect(JSON.stringify(report)).not.toContain(dir);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("is wired into the CLI with versioned JSON", async () => {
