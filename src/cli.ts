@@ -138,7 +138,8 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
                         tracked, identity and triage role; exact next commands per check
   config get KEY | set KEY VALUE | list | help [KEY]  Repository settings in
                         .github/triage.json of this checkout; identity.name and
-                        identity.triage_role with --entry KEY in local agent-inbox.toml
+                        identity.triage_role in local agent-inbox.toml, entry chosen by
+                        --entry KEY, --harness NAME or the detected harness
   setup complexity [--select ID | --create]  Discover native issue fields and map one
                         for complexity; creation is explicit (setup --help)
   --repo owner/name     Repository (default: current gh checkout)

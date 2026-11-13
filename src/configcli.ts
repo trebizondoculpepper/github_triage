@@ -33,6 +33,8 @@ import {
   validateEntryKey,
   validateIdentityValue,
 } from "./identity.js";
+import { resolveEntry, SUPPORTED_HARNESSES } from "./harness.js";
+import type { EntryResolution, Environment } from "./harness.js";
 import type { IdentityKey, IdentityRecord } from "./identity.js";
 import type {
   ConfigErrorCode,
@@ -50,19 +52,28 @@ export interface ConfigRuntime {
   readonly cwd?: string;
   /** Random source for generated agent names (identity initializer). */
   readonly random?: () => number;
+  /** Environment for harness detection (#38); tests always inject one. */
+  readonly env?: Environment;
 }
 
-export const configUsage = `Usage: github-triage config get KEY [--entry KEY] [--json] [--repo owner/name]
-       github-triage config set KEY VALUE [--entry KEY] [--json] [--repo owner/name]
-       github-triage config list [--entry KEY] [--json] [--repo owner/name]
+export const configUsage = `Usage: github-triage config get KEY [--entry KEY | --harness NAME] [--json] [--repo owner/name]
+       github-triage config set KEY VALUE [--entry KEY | --harness NAME] [--json] [--repo owner/name]
+       github-triage config list [--entry KEY | --harness NAME] [--json] [--repo owner/name]
        github-triage config help [KEY] [--json]
-identity.* keys need --entry KEY selecting [agents.KEY] in the root agent-inbox.toml.`;
+identity.* keys use the [agents.KEY] entry of the root agent-inbox.toml selected by --entry KEY,
+else by --harness ${SUPPORTED_HARNESSES.join("|")}, else by the detected harness.`;
 
 type Parsed =
   | { command: "help"; key?: string; json: boolean }
-  | { command: "get"; key: string; json: boolean; repo?: string; entry?: string }
-  | { command: "set"; key: string; value: string; json: boolean; repo?: string; entry?: string }
-  | { command: "list"; json: boolean; repo?: string; entry?: string };
+  | ({ command: "get"; key: string; json: boolean; repo?: string } & Selection)
+  | ({ command: "set"; key: string; value: string; json: boolean; repo?: string } & Selection)
+  | ({ command: "list"; json: boolean; repo?: string } & Selection);
+
+/** Explicit entry selection; both absent means harness detection decides. */
+interface Selection {
+  entry?: string;
+  harness?: string;
+}
 
 type ErrorCode = ConfigErrorCode | "usage" | "unsupported-scope";
 
@@ -89,6 +100,7 @@ export function configArgumentsFor(args: string[]): Parsed {
       options: {
         repo: { type: "string" },
         entry: { type: "string" },
+        harness: { type: "string" },
         json: { type: "boolean" },
         help: { type: "boolean" },
         scope: { type: "string" },
@@ -120,26 +132,29 @@ export function configArgumentsFor(args: string[]): Parsed {
     if (
       operands.length > (command === "help" ? 1 : 0) ||
       values.repo !== undefined ||
-      values.entry !== undefined
+      values.entry !== undefined ||
+      values.harness !== undefined
     )
       throw new ConfigUsageError(
         "usage",
-        "config help takes at most one KEY and no --repo/--entry.",
+        "config help takes at most one KEY and no --repo/--entry/--harness.",
       );
     return { command: "help", key, json };
   }
-  const { repo, entry } = values;
+  const { repo, entry, harness } = values;
+  if (entry !== undefined && harness !== undefined)
+    throw new ConfigUsageError("usage", "Pass either --entry or --harness, not both.");
   if (
     (command === "get" || command === "set") &&
-    entry !== undefined &&
+    (entry !== undefined || harness !== undefined) &&
     !isIdentityKey(operands[0] ?? "")
   )
-    throw new ConfigUsageError("usage", "--entry applies only to identity.* keys.");
+    throw new ConfigUsageError("usage", "--entry and --harness apply only to identity.* keys.");
   if (command === "get" && operands.length === 1)
-    return { command, key: operands[0]!, json, repo, entry };
+    return { command, key: operands[0]!, json, repo, entry, harness };
   if (command === "set" && operands.length === 2)
-    return { command, key: operands[0]!, value: operands[1]!, json, repo, entry };
-  if (command === "list" && operands.length === 0) return { command, json, repo, entry };
+    return { command, key: operands[0]!, value: operands[1]!, json, repo, entry, harness };
+  if (command === "list" && operands.length === 0) return { command, json, repo, entry, harness };
   throw new ConfigUsageError(
     "usage",
     ["get", "set", "list"].includes(command)
@@ -288,7 +303,7 @@ export async function runConfig(
     }
     if (parsed.command === "list") {
       const config = await loadConfig(target.root, fs);
-      const identity = await identityListing(parsed, target.root, fs);
+      const identity = await identityListing(parsed, target.root, fs, runtime);
       const result = {
         schemaVersion: 1,
         kind: "config-list",
@@ -348,12 +363,51 @@ export async function runConfig(
 const flags = (parsed: { repo?: string }, entry: string): string =>
   ` --entry ${entry}${parsed.repo ? ` --repo ${parsed.repo}` : ""}`;
 
-const unresolved = (command: string, parsed: { repo?: string }): ConfigError =>
+type Unresolved = Extract<EntryResolution, { status: "unresolved" }>;
+
+/** Exact explicit-selection commands for an unresolved entry (no shell comments). */
+const selectionCommands = (
+  command: string,
+  parsed: { repo?: string },
+  resolution: Unresolved,
+): string[] =>
+  (resolution.candidates.length > 0 ? resolution.candidates : ["KEY"]).map(
+    (key) => `${command}${flags(parsed, key)}`,
+  );
+
+const unresolvedText = (resolution: Unresolved): string =>
+  `${resolution.message}${resolution.signals.length ? ` Signals present: ${resolution.signals.join(", ")}.` : ""}`;
+
+const unresolved = (command: string, parsed: { repo?: string }, resolution: Unresolved) =>
   new ConfigError(
     "identity-unresolved",
-    "No agent identity entry is selected (automatic harness detection is not available yet).",
-    `Select the [agents.KEY] entry explicitly, for example: ${command}${flags(parsed, "KEY")}`,
+    unresolvedText(resolution),
+    `Select the [agents.KEY] entry explicitly:\n${selectionCommands(command, parsed, resolution).join("\n")}`,
   );
+
+/** The shared resolver over this runtime: explicit selection, then detection. */
+const resolveFor = (parsed: Selection, root: string, runtime: ConfigRuntime) =>
+  resolveEntry({
+    entry: parsed.entry,
+    harness: parsed.harness,
+    env: runtime.env ?? process.env,
+    root,
+    fs: runtime.fs ?? nodeFileSystem,
+  });
+
+/** Non-secret account of what selected the entry: source, harness and signal names. */
+const selectionJson = (resolution: Extract<EntryResolution, { status: "resolved" }>) => ({
+  selection: resolution.source,
+  harness: resolution.harness,
+  signals: resolution.signals,
+});
+
+const selectionText = (selected: ReturnType<typeof selectionJson>): string =>
+  selected.selection === "--entry"
+    ? "selected by --entry"
+    : selected.selection === "--harness"
+      ? `selected by --harness ${selected.harness}`
+      : `detected ${selected.harness} from ${selected.signals.join(", ")}`;
 
 const identitySetting = (record: IdentityRecord, key: string) => {
   const value = identityValue(record, key);
@@ -369,25 +423,26 @@ async function runIdentity(
     parsed.command === "get"
       ? `github-triage config get ${parsed.key}`
       : `github-triage config set ${parsed.key} ${parsed.value}`;
-  if (parsed.entry === undefined) {
-    // Validate the key first so an unknown identity key gets its own refusal.
-    if (parsed.command === "set") validateIdentityValue(parsed.key, parsed.value);
-    else identityKeyEntry(parsed.key);
-    throw unresolved(command, parsed);
-  }
-  const entry = validateEntryKey(parsed.entry);
+  // Validate the key (and value) first so an unknown key gets its own refusal.
+  if (parsed.command === "set") validateIdentityValue(parsed.key, parsed.value);
+  else identityKeyEntry(parsed.key);
+  if (parsed.entry !== undefined) validateEntryKey(parsed.entry);
   const fs = runtime.fs ?? nodeFileSystem;
+  // Project selection precedes entry lookup: only this checkout's root file is consulted.
   const target = await resolveIdentityTarget(
     runtime.cwd ?? process.cwd(),
     parsed.repo,
     runtime.git ?? nodeGit,
   );
+  const resolution = await resolveFor(parsed, target.root, runtime);
+  if (resolution.status === "unresolved") throw unresolved(command, parsed, resolution);
+  const entry = resolution.entry;
   const where = {
     scope: "agent",
     repository: target.repository,
     path: IDENTITY_FILE,
     entry,
-    selection: "--entry",
+    ...selectionJson(resolution),
   };
   if (parsed.command === "get") {
     identityKeyEntry(parsed.key);
@@ -408,7 +463,7 @@ async function runIdentity(
       record.fileExists && !record.entryExists ? `no [agents.${entry}] entry` : "",
       ...record.problems,
     ].filter(Boolean);
-    return `${parsed.key} = ${setting.value ?? "(unset)"} (${setting.source}; entry ${entry} in ${IDENTITY_FILE})${notes.length ? `\n  ${notes.join("\n  ")}\n  Set: ${record.entryExists ? `github-triage config set ${parsed.key} ${parsed.key === "identity.name" ? "NAME" : "implementer|designer"}` : "github-triage config set identity.triage_role implementer|designer"}${flags(parsed, entry)}` : ""}\n`;
+    return `${parsed.key} = ${setting.value ?? "(unset)"} (${setting.source}; entry ${entry} in ${IDENTITY_FILE}, ${selectionText(where)})${notes.length ? `\n  ${notes.join("\n  ")}\n  Set: ${record.entryExists ? `github-triage config set ${parsed.key} ${parsed.key === "identity.name" ? "NAME" : "implementer|designer"}` : "github-triage config set identity.triage_role implementer|designer"}${flags(parsed, entry)}` : ""}\n`;
   }
   const write = await setIdentity(target, entry, parsed.key, parsed.value, {
     fs,
@@ -432,30 +487,46 @@ async function runIdentity(
     write.generatedName ? `generated name ${write.generatedName} for new entry ${entry}` : "",
     write.excluded ? `added /${IDENTITY_FILE} to this repository's local Git exclude file` : "",
   ].filter(Boolean);
-  return `${parsed.key} = ${setting.value} (entry ${entry}) — ${write.changed ? `written to ${IDENTITY_FILE} (local, not committed)` : "unchanged"}${extra.map((line) => `\n  ${line}`).join("")}\n`;
+  return `${parsed.key} = ${setting.value} (entry ${entry}, ${selectionText(where)}) — ${write.changed ? `written to ${IDENTITY_FILE} (local, not committed)` : "unchanged"}${extra.map((line) => `\n  ${line}`).join("")}\n`;
 }
 
 /** Identity section of `config list`: only registered values of the selected entry. */
 async function identityListing(
-  parsed: { repo?: string; entry?: string },
+  parsed: { repo?: string } & Selection,
   root: string,
   fs: ConfigFileSystem,
+  runtime: ConfigRuntime,
 ) {
-  if (parsed.entry === undefined) {
+  if (parsed.entry !== undefined) validateEntryKey(parsed.entry);
+  let resolution: EntryResolution;
+  try {
+    resolution = await resolveFor(parsed, root, runtime);
+  } catch (caught) {
+    const error = filesystemRefusal(caught) ?? caught;
+    if (!(error instanceof ConfigError) || parsed.harness !== undefined) throw error;
     return {
       resolved: false as const,
       path: IDENTITY_FILE,
-      recovery: `github-triage config list${flags(parsed, "KEY")}`,
+      error: { code: error.code, message: error.message, recovery: error.recovery },
     };
   }
-  const entry = validateEntryKey(parsed.entry);
+  if (resolution.status === "unresolved") {
+    return {
+      resolved: false as const,
+      path: IDENTITY_FILE,
+      reason: resolution.reason,
+      message: unresolvedText(resolution),
+      recovery: selectionCommands("github-triage config list", parsed, resolution).join("\n"),
+    };
+  }
+  const entry = resolution.entry;
   try {
     const record = await readIdentity(root, entry, fs);
     return {
       resolved: true as const,
       path: IDENTITY_FILE,
       entry,
-      selection: "--entry",
+      ...selectionJson(resolution),
       fileExists: record.fileExists,
       entryExists: record.entryExists,
       settings: IDENTITY_KEYS.map((key) => identitySetting(record, key.key)),
@@ -478,8 +549,15 @@ async function identityListing(
 function identityListText(identity: Awaited<ReturnType<typeof identityListing>>): string {
   if (!identity.resolved) {
     return "error" in identity && identity.error
-      ? `Agent identity (${IDENTITY_FILE}, entry ${identity.entry}): ${identity.error.message}\n  ${identity.error.recovery}\n`
-      : `Agent identity: no entry selected; add --entry KEY (${"recovery" in identity ? identity.recovery : ""})\n`;
+      ? `Agent identity (${IDENTITY_FILE}${"entry" in identity ? `, entry ${identity.entry}` : ""}): ${identity.error.message}\n  ${identity.error.recovery}\n`
+      : `Agent identity: no entry selected. ${"message" in identity ? identity.message : ""}\n  Select one explicitly:\n${("recovery" in
+        identity
+          ? identity.recovery
+          : ""
+        )
+          .split("\n")
+          .map((line) => `  ${line}`)
+          .join("\n")}\n`;
   }
-  return `Agent identity (entry ${identity.entry} in ${IDENTITY_FILE}${identity.fileExists ? "" : ", not present"}):\n${identity.settings.map((s) => `  ${s.key} = ${s.value ?? "(unset)"} (${s.source})`).join("\n")}\n${identity.problems.map((p) => `  ${p}\n`).join("")}`;
+  return `Agent identity (entry ${identity.entry} in ${IDENTITY_FILE}${identity.fileExists ? "" : ", not present"}; ${selectionText(identity)}):\n${identity.settings.map((s) => `  ${s.key} = ${s.value ?? "(unset)"} (${s.source})`).join("\n")}\n${identity.problems.map((p) => `  ${p}\n`).join("")}`;
 }
