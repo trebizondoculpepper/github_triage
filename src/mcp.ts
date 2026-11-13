@@ -17,6 +17,7 @@ import { readBriefing, readDependencies } from "./service.js";
 import {
   eventsReport,
   eventsText,
+  maxPollIntervalMinutes,
   pollingDefaults,
   sharedCollect,
   systemClock,
@@ -54,7 +55,7 @@ Tools: triage_briefing, triage_issue, triage_dependencies, triage_events. Never 
   --poll                Opt in: poll the resolved repository while this server runs
                         and record deduplicated events for triage_events (off by default)
   --poll-interval-minutes N
-                        Minutes between completed polls (default 30, minimum 1; needs --poll)
+                        Minutes between completed polls (default 30, 1 to 1440; needs --poll)
   --help                Show usage
 Stdout carries only the MCP protocol; diagnostics go to stderr.
 `;
@@ -78,8 +79,13 @@ export function mcpArguments(args: string[]): McpOptions & { help?: boolean } {
   const interval = values["poll-interval-minutes"];
   if (interval !== undefined && !values.poll)
     throw new Error("--poll-interval-minutes requires --poll.");
-  if (interval !== undefined && (!/^\d+$/.test(interval) || Number(interval) < 1))
-    throw new Error("--poll-interval-minutes must be a whole number of minutes, at least 1.");
+  if (
+    interval !== undefined &&
+    (!/^\d+$/.test(interval) || Number(interval) < 1 || Number(interval) > maxPollIntervalMinutes)
+  )
+    throw new Error(
+      `--poll-interval-minutes must be a whole number of minutes from 1 to ${maxPollIntervalMinutes} (24 hours).`,
+    );
   if (values.repo !== undefined && !repoPattern.test(values.repo))
     throw new Error("--repo must be owner/name.");
   if (values.agent !== undefined && !agentPattern.test(values.agent))

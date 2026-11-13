@@ -23,6 +23,11 @@ export const eventKinds = [
 export type EventKind = (typeof eventKinds)[number];
 
 /** Contract defaults: 30-minute interval, 1,000 events and 24 hours of process-local history. */
+/** Longest accepted poll interval (24 hours), in minutes. */
+export const maxPollIntervalMinutes = 1440;
+/** setTimeout's largest safe delay; longer delays are chunked so Node never clamps them to 1 ms. */
+export const maxTimerDelayMs = 2 ** 31 - 1;
+
 export const pollingDefaults = {
   intervalMinutes: 30,
   maxEvents: 1000,
@@ -138,11 +143,16 @@ export function observe(snapshot: Snapshot, observedAt: string): Observation {
       .filter((action) => action.rule === "pr-inspect-merge")
       .map((action) => action.target),
   );
+  // Cross-subject evidence: an issue's eligibility rests on every open PR's closing
+  // references (openClosingPrs). If any PR's references are truncated, no issue can be proven
+  // to lack an open closing PR, so every issue's evidence is incomplete for this poll.
+  const closingTruncated = prs.some((pr) => pr.closingIssuesReferences.pageInfo.hasNextPage);
   const subjects = new Map<string, SubjectObservation>();
   const add = (
     item: Issue,
     kind: SubjectObservation["kind"],
     eligibility: SubjectObservation["eligibility"],
+    complete = !incomplete.has(item.url),
   ) => {
     const subject: SubjectObservation = {
       number: item.number,
@@ -150,7 +160,7 @@ export function observe(snapshot: Snapshot, observedAt: string): Observation {
       url: item.url,
       facts: new Map(),
       eligibility,
-      complete: !incomplete.has(item.url),
+      complete,
     };
     subjects.set(item.url, subject);
     return subject;
@@ -174,7 +184,12 @@ export function observe(snapshot: Snapshot, observedAt: string): Observation {
 
   for (const issue of issues) {
     const eligibility = pickupEligibility(issue, { prs }).status;
-    const subject = add(issue, "issue", eligibility);
+    const subject = add(
+      issue,
+      "issue",
+      eligibility,
+      !incomplete.has(issue.url) && !closingTruncated,
+    );
     attention(subject, issue);
     if (eligibility === "eligible")
       put(subject, {
@@ -192,12 +207,19 @@ export function observe(snapshot: Snapshot, observedAt: string): Observation {
   }
 
   for (const pr of prs) {
-    const subject = add(pr, "pull-request", null);
-    attention(subject, pr);
-    const head = pr.headRefOid;
     const linked = issues.filter((issue) =>
       pr.closingIssuesReferences.nodes.some((ref) => ref.url === issue.url),
     );
+    // A PR's routed destinations come from its linked issues' owner labels, so truncated
+    // evidence on a linked issue leaves the PR's facts incomplete too.
+    const subject = add(
+      pr,
+      "pull-request",
+      null,
+      !incomplete.has(pr.url) && linked.every((issue) => !incomplete.has(issue.url)),
+    );
+    attention(subject, pr);
+    const head = pr.headRefOid;
     const routed = [
       ...new Set([pr, ...linked].flatMap((item) => prefixed(item, workflow.ownerPrefix))),
     ].sort();
@@ -433,14 +455,33 @@ export interface Clock {
 }
 export const systemClock: Clock = {
   now: () => new Date(),
-  setTimeout: (callback, ms) => {
-    const handle = setTimeout(callback, ms);
-    // The timer alone never keeps the process alive after the client disconnects.
-    handle.unref();
-    return handle;
-  },
-  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+  setTimeout: (callback, ms) => chunkedTimeout(callback, ms),
+  clearTimeout: (handle) => (handle as { cancel(): void }).cancel(),
 };
+
+/**
+ * Schedule after any delay: Node clamps delays above 2^31-1 ms to 1 ms, so longer waits run as
+ * successive bounded timers. Each timer is unref'd so it never keeps the process alive alone.
+ */
+export function chunkedTimeout(
+  callback: () => void,
+  ms: number,
+  timers: {
+    set(run: () => void, ms: number): ReturnType<typeof setTimeout>;
+    clear(handle: ReturnType<typeof setTimeout>): void;
+  } = { set: (run, delay) => setTimeout(run, delay), clear: (handle) => clearTimeout(handle) },
+): { cancel(): void } {
+  let remaining = Math.max(0, ms);
+  let handle: ReturnType<typeof setTimeout>;
+  const arm = () => {
+    const step = Math.min(remaining, maxTimerDelayMs);
+    remaining -= step;
+    handle = timers.set(() => (remaining > 0 ? arm() : callback()), step);
+    handle.unref?.();
+  };
+  arm();
+  return { cancel: () => timers.clear(handle) };
+}
 
 export type Collect = typeof collectFn;
 
@@ -516,8 +557,10 @@ export class Watcher {
   ) {
     this.limits = { ...pollingDefaults, ...options.limits };
     const minutes = options.intervalMinutes ?? pollingDefaults.intervalMinutes;
-    if (!Number.isInteger(minutes) || minutes < 1)
-      throw new Error("Poll interval must be a whole number of minutes, at least 1.");
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > maxPollIntervalMinutes)
+      throw new Error(
+        `Poll interval must be a whole number of minutes from 1 to ${maxPollIntervalMinutes}.`,
+      );
     this.intervalMs = minutes * 60 * 1000;
     this.random = runtime.random ?? Math.random;
     this.origins = runtime.origins ?? noOrigins;

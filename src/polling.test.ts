@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vite-plus/test";
 import { Client } from "@modelcontextprotocol/client";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
-import { EventLog, eventsReport, sharedCollect, Watcher } from "./polling.js";
+import {
+  chunkedTimeout,
+  EventLog,
+  eventsReport,
+  maxTimerDelayMs,
+  sharedCollect,
+  Watcher,
+} from "./polling.js";
 import type { Clock, Collect, DomainEvent } from "./polling.js";
 import { createServer, envelope, mcpArguments } from "./mcp.js";
 import type { McpRuntime } from "./mcp.js";
@@ -193,6 +200,38 @@ describe("optional polling and domain events (#32)", () => {
     expect(() => watch(scripted([]).collect, fakeClock().clock, 0)).toThrow();
   });
 
+  it("rejects intervals above 24 hours so the poll timer cannot overflow", () => {
+    expect(mcpArguments(["--poll", "--poll-interval-minutes", "1440"]).pollIntervalMinutes).toBe(
+      1440,
+    );
+    for (const big of ["1441", "43200"])
+      expect(() => mcpArguments(["--poll", "--poll-interval-minutes", big])).toThrow(/1440/);
+    expect(() => watch(scripted([]).collect, fakeClock().clock, 43200)).toThrow(/1440/);
+  });
+
+  it("chunks timer delays above 2^31-1 ms instead of letting Node clamp them to 1 ms", () => {
+    const armed: { run: () => void; ms: number }[] = [];
+    let fired = 0;
+    const timers = {
+      set: (run: () => void, ms: number) => {
+        armed.push({ run, ms });
+        return armed.length as unknown as ReturnType<typeof setTimeout>;
+      },
+      clear: () => {},
+    };
+    const total = 30 * 24 * 60 * minute; // 30 days
+    chunkedTimeout(() => fired++, total, timers);
+    let elapsed = 0;
+    while (fired === 0) {
+      const next = armed.at(-1)!;
+      expect(next.ms).toBeLessThanOrEqual(maxTimerDelayMs);
+      elapsed += next.ms;
+      next.run();
+    }
+    expect(elapsed).toBe(total);
+    expect(armed.length).toBeGreaterThan(1);
+  });
+
   it("establishes a baseline without historical events and suppresses unchanged evidence", async () => {
     const time = fakeClock();
     const busy = snap([issue(1, ["attention:ana"])], [pr({ verify: "FAILURE", threads: ["1"] })]);
@@ -312,6 +351,38 @@ describe("optional polling and domain events (#32)", () => {
     await time.advance(minute);
     // A genuine change after a complete baseline still emits.
     expect(kinds(w)).toEqual(["work-became-eligible"]);
+    w.stop();
+  });
+
+  it("treats every issue as incomplete while any open PR's closing references are truncated", async () => {
+    const time = fakeClock();
+    const closing = (more: boolean) => ({
+      ...pr(),
+      closingIssuesReferences: page([{ number: 1, url: issue(1).url }], more),
+    });
+    const cut = (more: boolean) =>
+      more
+        ? {
+            warnings: [
+              `${pr().url}: closing references exceed 100; review/merge evidence incomplete.`,
+            ],
+          }
+        : {};
+    const truncated = { ...closing(true), closingIssuesReferences: page([], true) };
+    const { collect } = scripted([
+      snap([issue(1)], [closing(false)]),
+      // The closing reference to #1 falls on an unseen page: #1 must not read as eligible.
+      snap([issue(1)], [truncated], cut(true)),
+      snap([issue(1)], [closing(false)]),
+    ]);
+    const w = watch(collect, time.clock, 1);
+    w.start();
+    await time.advance(0);
+    await time.advance(minute);
+    expect(kinds(w)).toEqual([]);
+    expect(w.status()).toMatchObject({ lastOutcome: "incomplete" });
+    await time.advance(minute);
+    expect(kinds(w)).toEqual([]);
     w.stop();
   });
 
