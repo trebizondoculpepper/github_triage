@@ -3814,6 +3814,23 @@ describe("repository configuration service (#116, doc/design/repository-configur
       ).toEqual(["owner/name", "a/b"]);
     });
 
+    it("only accepts remotes whose host is exactly github.com", () => {
+      expect(
+        githubRepositories(
+          [
+            "a\thttps://notgithub.com/evil/one.git (fetch)",
+            "b\t/mirrors/github.com/evil/two.git (fetch)",
+            "c\thttps://example.com/github.com/evil/three.git (fetch)",
+            "d\tgit@github.com.evil.net:evil/four.git (fetch)",
+            "e\t../github.com/evil/five (fetch)",
+            "f\tssh://git@GitHub.com/Ok/One.git (fetch)",
+            "g\tgit@GITHUB.COM:ok/two (fetch)",
+            "h\thttps://user@github.com/ok/three/ (fetch)",
+          ].join("\n"),
+        ),
+      ).toEqual(["ok/one", "ok/two", "ok/three"]);
+    });
+
     it("accepts a checkout whose remote matches --repo", async () => {
       await expect(
         resolveRepositoryTarget(

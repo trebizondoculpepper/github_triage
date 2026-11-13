@@ -330,12 +330,43 @@ const run = promisify(execFile);
 export const nodeGit: GitRunner = async (args, cwd) =>
   (await run("git", [...args], { cwd, windowsHide: true })).stdout;
 
-/** Extract `owner/name` from GitHub remote URLs (https, ssh and scp-like forms). */
+/** Parse one remote URL; returns `owner/name` only when the host is exactly github.com. */
+export function githubRepositoryFromUrl(url: string): string | null {
+  let host: string;
+  let path: string;
+  const scp = /^(?:[^@/\s]+@)?([^:/\s]+):(?!\/)(.+)$/.exec(url);
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return null;
+    }
+    if (!["https:", "http:", "ssh:", "git:", "git+ssh:", "ssh+git:"].includes(parsed.protocol)) {
+      return null;
+    }
+    host = parsed.hostname;
+    path = parsed.pathname;
+  } else if (scp && !/^[a-z]$/i.test(scp[1]!)) {
+    // SCP-style `git@github.com:owner/name.git`; a single letter is a Windows drive.
+    host = scp[1]!;
+    path = scp[2]!;
+  } else {
+    return null;
+  }
+  if (host.toLowerCase() !== "github.com") return null;
+  const match = /^\/?([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/.exec(path);
+  return match ? `${match[1]}/${match[2]}`.toLowerCase() : null;
+}
+
+/** Extract `owner/name` from `git remote -v` output (https, ssh and scp-like forms). */
 export function githubRepositories(remotes: string): string[] {
   const found = new Set<string>();
-  const pattern = /github\.com[/:]([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:\s|\/?$)/gim;
-  for (const match of remotes.matchAll(pattern)) {
-    found.add(`${match[1]}/${match[2]}`.toLowerCase());
+  for (const line of remotes.split(/\r?\n/)) {
+    const fields = line.trim().split(/\s+/);
+    const url = fields.length >= 2 ? fields[1]! : fields[0]!;
+    const repository = url ? githubRepositoryFromUrl(url) : null;
+    if (repository) found.add(repository);
   }
   return [...found];
 }
