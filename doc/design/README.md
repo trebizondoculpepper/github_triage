@@ -19,7 +19,7 @@ The tool reduces GitHub searching and encodes agreed lifecycle prerequisites and
 
 Ready after contract merge: ranking/role views (#1/#40/#43/#45), PR diagnosis (#59), review-cycle analysis (#60), explicit-evidence team/ownership views (#41/#61), basic update check (#51), and read-only Ticket Doctor (#66). Follow-ups: #65 after #51; #67 after #66. New mutation operations #2/#62 need their focused transition/API implementation plan against the workflow contract. Local setup #70 and automatic MCP identity are **not ready**: the inspected Agent Inbox writer drops triage_role (see identity contract and #69). Doctor can diagnose that limitation without silently repairing it.
 
-Deferred by the owner: automatic migration apply/recovery #48, answer-recording convenience operation #63, and shared backend/SQLite/dashboard #42. They are not blockers for ordinary CLI/MCP. MCP #25 still needs its SDK-specific interface design and identity compatibility resolution; platform wake-up adapters follow their research. Do not mark these ready just because product direction exists.
+Deferred by the owner: automatic migration apply/recovery #48, answer-recording convenience operation #63, and shared backend/SQLite/dashboard #42. They are not blockers for ordinary CLI/MCP. MCP #25 follows its focused [read-only interface contract](mcp.md); explicit project/identity and verified read-only lookup do not require enabling shared identity writes; platform wake-up adapters follow their research. Do not mark these ready just because product direction exists.
 
 ## Common validation
 
