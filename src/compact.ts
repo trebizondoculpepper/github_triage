@@ -414,8 +414,19 @@ export function compactText(
     );
   const notice =
     "\nMore context omitted by text budget; use --json, --full, --issue N or --max-chars.\n";
+  // The workflow-guide footer (config diagnostics plus the pointer or omission notice) is
+  // required output, so its space is reserved before evidence rows are allocated (#71).
+  const guide = report.process;
+  const footer = guide
+    ? [
+        ...guide.diagnostics.map((diagnostic) => `CONFIG: ${diagnostic}`),
+        guide.guide
+          ? `\nWorkflow guide omitted by text budget. ${guide.pointer}`
+          : `\n${guide.pointer}`,
+      ].reduce((total, line) => total + line.length + 1, 0)
+    : 0;
   for (const row of rows) {
-    if (lines.join("\n").length + row.length + notice.length + 2 > maxChars) {
+    if (lines.join("\n").length + row.length + notice.length + footer + 2 > maxChars) {
       lines.push(notice);
       break;
     }
@@ -423,7 +434,6 @@ export function compactText(
   }
   // The workflow guide (#71) is optional context: it follows the evidence and counts against the
   // same budget. When it does not fit, only its pointer is shown and the omission is stated.
-  const guide = report.process;
   if (guide) {
     for (const diagnostic of guide.diagnostics) lines.push(`CONFIG: ${diagnostic}`);
     const fits = (text: string) => lines.join("\n").length + text.length + 2 <= maxChars;

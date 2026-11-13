@@ -440,7 +440,10 @@ export const defaultRuntime = (options: McpOptions): McpRuntime => ({
   collect,
   dependencyReport,
   currentRepository,
+  // Every runtime piece that reads local state resolves against the configured project, not
+  // the server's working directory: estimation settings and the workflow-guide opt-out (#71).
   estimation: options.project ? { cwd: options.project } : undefined,
+  guide: options.project ? { cwd: options.project } : undefined,
 });
 
 function isEntryPoint(entry: string | undefined): boolean {

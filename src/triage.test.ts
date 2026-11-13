@@ -5754,6 +5754,42 @@ describe("read-only MCP adapter (#25)", async () => {
     return typeof first === "object" && first !== null && "text" in first ? String(first.text) : "";
   };
 
+  it("reads the guide opt-out from --project, not the server's working directory", async () => {
+    const { defaultRuntime } = await import("./mcp.js");
+    const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { execFileSync } = await import("node:child_process");
+    const project = await mkdtemp(join(tmpdir(), "triage-guide-"));
+    try {
+      execFileSync("git", ["init", "-q"], { cwd: project });
+      execFileSync("git", ["remote", "add", "origin", `https://github.com/${repo}.git`], {
+        cwd: project,
+      });
+      await mkdir(join(project, ".github"), { recursive: true });
+      await writeFile(join(project, CONFIG_PATH), '{"schemaVersion":1,"processGuide":false}');
+      expect(process.cwd()).not.toBe(project);
+      const runtime: Runtime = {
+        ...defaultRuntime({ project }),
+        collect: async (repository: string) => ({ ...snapshot(), repository }),
+        now: clock,
+      };
+      const client = await connect(runtime, { project, repo });
+      const brief = structured(await client.callTool({ name: "triage_briefing", arguments: {} }));
+      await client.close();
+      const mcpProcess = (brief.result as { process: unknown }).process;
+      expect(mcpProcess).toMatchObject({ enabled: false, source: "config", guide: null });
+      let out = "";
+      await main(
+        ["--repo", repo, "--json", "--no-update-check"],
+        async (t) => void (out = t),
+        runtime,
+      );
+      expect(mcpProcess).toEqual(JSON.parse(out).process);
+    } finally {
+      await rm(project, { recursive: true, force: true });
+    }
+  });
+
   it("lists exactly three read-only tools with strict inputs", async () => {
     const client = await connect(fake());
     const { tools } = await client.listTools();
@@ -7642,6 +7678,21 @@ describe("workflow guide in help and briefings (#71, doc/design/workflow-guide.m
     expect(out).toContain(
       "Workflow guide omitted by text budget. Full guide: github-triage process",
     );
+  });
+
+  it("never exceeds --max-chars with the guide on or off (reserved footer)", async () => {
+    const off = '{"schemaVersion":1,"processGuide":false}';
+    for (const raw of [null, off]) {
+      // The header and required footer are irreducible; every budget above them must hold.
+      const floor = (await run(["--max-chars", "1"], raw)).out.length;
+      for (let max = floor; max <= floor + 3000; max += 97) {
+        const { out } = await run(["--max-chars", String(max)], raw);
+        expect(out.length, `max-chars ${max}, guide ${raw ? "off" : "on"}`).toBeLessThanOrEqual(
+          max,
+        );
+        expect(out).toContain(raw ? "Workflow guide off" : "github-triage process");
+      }
+    }
   });
 
   it("serves help and the full guide locally, without GitHub or configuration", async () => {
