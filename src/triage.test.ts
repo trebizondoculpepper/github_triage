@@ -2073,6 +2073,34 @@ describe("claim and needs-human review fixes", () => {
       expect(commented(plan)).toBe(true);
       expect(accepted(plan).notes!.join(" ")).toMatch(/could not be verified do not suppress/);
     });
+    /** Comment pages newest first: page 0 is readTicket's window, later ones are older. */
+    const paged = async (pages: { author: string; at: string }[][], endless = false) => {
+      const body = await questionBody();
+      const window = (i: number) => ({
+        nodes: (pages[i] ?? []).map((c) => ({ ...by(c.author), body, createdAt: c.at })),
+        pageInfo: { hasPreviousPage: endless || i + 1 < pages.length, startCursor: String(i + 1) },
+      });
+      const data = base(["status:ready"]);
+      (data.repository.issueOrPullRequest.comments as unknown) = window(0);
+      return async (source: string, variables: Record<string, unknown> = {}) =>
+        source.includes("comments(last:100,before:$before)")
+          ? { repository: { issue: { comments: window(Number(variables.before)) } } }
+          : data;
+    };
+    it("a newer forged marker does not hide an older genuine one on an earlier page", async () => {
+      const query = await paged([
+        [{ author: "mallory", at: "2026-11-12T11:00:00Z" }],
+        [{ author: "kavya", at: "2026-11-12T10:00:00Z" }],
+      ]);
+      const permission = permissions({ mallory: "read", kavya: "write" });
+      const plan = await planNeedsHuman(repo, ask, query, permission);
+      expect(commented(plan)).toBe(false);
+    });
+    it("refuses as incomplete evidence when the bound is reached with only forged markers", async () => {
+      const query = await paged([[{ author: "mallory", at: "2026-11-12T11:00:00Z" }]], true);
+      const plan = await planNeedsHuman(repo, ask, query, permissions({ mallory: "read" }));
+      expect(refused(plan).error).toBe("EVIDENCE_INCOMPLETE");
+    });
   });
   it("re-check reports a lost claim and a concurrent second claim by the same agent", async () => {
     const lost = async () => base(["status:ready"]);
