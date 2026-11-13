@@ -85,7 +85,7 @@ A pure function over an injected snapshot, returning one ranked list of candidat
 
 ### Facts per candidate
 
-- `unlocks`: `immediateUnlocks` of the issue (for a PR, the union over its open linked issues, deduplicated by dependant URL).
+- `unlocks`: `immediateUnlocks` of the issue. For a PR, this is **not** a simple union of each linked issue's `immediateUnlocks`, which requires `blockedBy === 1` (`src/ranking.ts:189-196`) and so misses a dependant whose remaining blockers are all completed together by the same PR. For example, PR #20 completes #5 and #6, which are jointly the only open blockers of #7, so merging #20 unlocks #7, but each issue alone reports zero. Evaluate PR unlocks against the whole set: a dependant counts when every one of its open native blockers is in the set of issues the PR completes, and the dependant is otherwise eligible. This applies only with complete native evidence for the dependant and the completion gate below; deduplicate by dependant URL. This needs a set-aware variant of `immediateUnlocks`, recommended for #196.
 - `unlockEvidence`: `complete`, or `partial` with reasons: `blocking` truncated (`pageInfo.hasNextPage`), dependants absent from the snapshot (cross-repository or not collected), dependants without native evidence. Unknown dependants are listed, never counted and never treated as zero.
 - For a PR, `completion`:
   - `last-required` only when explicit delivery evidence says this PR is the last open required deliverable of the issue.
