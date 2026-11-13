@@ -2098,3 +2098,41 @@ describe("version check (#51, doc/design/updates.md)", () => {
     }
   });
 });
+
+describe("post-write ownership check with incomplete labels", () => {
+  it("reports ownership as unverified instead of confirming success", async () => {
+    let reads = 0;
+    const q = async () => {
+      reads++;
+      return {
+        repository: {
+          issueOrPullRequest: {
+            __typename: "Issue",
+            number: 7,
+            title: "T7",
+            url: `https://github.com/${repo}/issues/7`,
+            state: "OPEN",
+            updatedAt: time,
+            labels: {
+              nodes: (reads > 1 ? ["agent:kavya"] : ["status:ready"]).map((name) => ({ name })),
+              pageInfo: { hasNextPage: reads > 1, endCursor: null },
+            },
+            issueDependenciesSummary: { blockedBy: 0 },
+            blockedBy: page([]),
+            closedByPullRequestsReferences: page([]),
+            comments: page([]),
+            timelineItems: page([]),
+          },
+          claims: page(reads > 1 ? [{ number: 7, title: "T7", url: issue(7).url }] : []),
+          ownerLabel: { name: "agent:kavya" },
+        },
+      };
+    };
+    const result = await applyPlan(repo, await planClaim(repo, { number: 7, agent: "kavya" }, q), {
+      run: async () => {},
+      query: q,
+    });
+    expect(result.exitCode).toBe(2);
+    expect(result.conflict).toMatch(/ownership is unverified/);
+  });
+});

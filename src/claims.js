@@ -459,6 +459,11 @@ export async function applyPlan(repository, plan, { run = ghRun, query = ghQuery
       const elsewhere = claims.filter((c) => c.number !== plan.facts.number);
       // GitHub label edits are not a lock: report conflicts rather than resolve them.
       const problems = [];
+      // An incomplete label page cannot confirm ownership: a competing claim may be unseen.
+      if (item?.labels?.pageInfo?.hasNextPage)
+        problems.push(
+          `ownership is unverified: #${plan.facts.number} has more than 100 labels, so a competing claim may be unseen`,
+        );
       if (!item || item.state !== "OPEN" || !owners(item).includes(mine))
         problems.push(
           `the claim is no longer recorded on #${plan.facts.number} (open, labelled ${mine})`,
