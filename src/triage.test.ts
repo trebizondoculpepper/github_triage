@@ -2642,6 +2642,101 @@ describe("daily cached version check (#65, doc/design/updates.md)", () => {
     });
   });
 
+  it("gives up quickly on a directory at the lock path, and the CLI command still completes", async () => {
+    const { cachedCheckForUpdate, cacheFileName, lockWaitMs } = await import("./updatecache.js");
+    const { utimes } = await import("node:fs/promises");
+    await withDir(async (cacheDir) => {
+      const lock = join(cacheDir, `${cacheFileName}.lock`);
+      await mkdir(lock);
+      const old = new Date(Date.now() - 60_000);
+      await utimes(lock, old, old); // stale, and unlink fails with EISDIR/EPERM
+      const reg = counting({ latest: "0.2.0" });
+      const opts = { cacheDir, installed: installed("0.1.0"), fetchImpl: reg.fetchImpl };
+      const bounded = <T>(p: Promise<T>) =>
+        Promise.race([
+          p,
+          new Promise<"hung">((r) => setTimeout(() => r("hung"), lockWaitMs + 1000)),
+        ]);
+      const started = Date.now();
+      expect(await bounded(cachedCheckForUpdate(opts))).toMatchObject({ status: "unknown" });
+      expect(Date.now() - started).toBeLessThan(lockWaitMs + 500);
+      const cache = join(cacheDir, "snapshot.json");
+      await atomicJson(cache, snapshot([issue()], []));
+      const runtime = {
+        collect: async () => {
+          throw new Error("offline only");
+        },
+        currentRepository: async () => repo,
+        stderr: () => {},
+        updateCheck: ((o: object) =>
+          cachedCheckForUpdate({ ...o, ...opts, offline: false })) as never,
+      };
+      expect(
+        await bounded(main(["--offline", "--cache", cache, "--json"], async () => {}, runtime)),
+      ).toBe(0);
+      expect(reg.calls).toEqual([]);
+    });
+  });
+
+  it("lets at most one of two contenders breaking the same stale lock proceed", async () => {
+    const { acquireLock, lockStaleMs } = await import("./updatecache.js");
+    let clock = 100_000;
+    const files = new Map<string, { data: string; mtimeMs: number }>();
+    const enoent = () => Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    const mem = {
+      readFile: async (p: string) => {
+        const f = files.get(p);
+        if (!f) throw enoent();
+        return f.data;
+      },
+      writeFile: async (p: string, data: string, o: { flag?: string }) => {
+        if (o.flag === "wx" && files.has(p))
+          throw Object.assign(new Error("EEXIST"), { code: "EEXIST" });
+        files.set(p, { data, mtimeMs: clock });
+      },
+      rename: async () => {},
+      unlink: async (p: string) => {
+        if (!files.delete(p)) throw enoent();
+      },
+      mkdir: async () => {},
+      stat: async (p: string) => {
+        const f = files.get(p);
+        if (!f) throw enoent();
+        return { mtimeMs: f.mtimeMs };
+      },
+    };
+    const lock = "/cache/update-check.json.lock";
+    files.set(lock, { data: '{"token":"crashed"}', mtimeMs: clock - lockStaleMs - 1 });
+    const now = () => clock;
+    const sleep = async (ms: number) => void (clock += ms);
+    // B judges the crashed lock stale; meanwhile A breaks it and takes the lock. B's stat still
+    // reports the stale lock it saw, the interleaving that let the old code delete A's lock.
+    let a: (() => Promise<void>) | null = null;
+    let fired = false;
+    const raced = {
+      ...mem,
+      stat: async (p: string) => {
+        const seen = await mem.stat(p);
+        if (!fired) {
+          fired = true;
+          a = await acquireLock(mem, lock, now, sleep);
+        }
+        return seen;
+      },
+    };
+    const b = await acquireLock(raced, lock, now, sleep);
+    expect(a).not.toBeNull();
+    expect(b).toBeNull();
+    const held = files.get(lock)!.data;
+    // Release removes only a lock holding our own token.
+    files.set(lock, { data: '{"token":"someone-else"}', mtimeMs: clock });
+    await a!();
+    expect(files.get(lock)?.data).toBe('{"token":"someone-else"}');
+    files.set(lock, { data: held, mtimeMs: clock });
+    await a!();
+    expect(files.has(lock)).toBe(false);
+  });
+
   it("makes no cache or network access when skipped, and uses a per-user cache directory", async () => {
     const { cachedCheckForUpdate, defaultCacheDir } = await import("./updatecache.js");
     await withDir(async (cacheDir) => {
