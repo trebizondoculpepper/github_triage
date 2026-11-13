@@ -53,7 +53,7 @@ import {
   type Query,
 } from "./github.js";
 import { clauseFor, hedged, listWideHedge, planMigration } from "./migration.js";
-import { applyPlan, planClaim, planNeedsHuman, planRelease } from "./claims.js";
+import { applyPlan, claimText, planClaim, planNeedsHuman, planRelease } from "./claims.js";
 import type { ClaimAccepted, ClaimPlan, ClaimRefusal } from "./claims.js";
 import { teamText, teamView } from "./team.js";
 import { ticketOwnership, ticketOwnershipText } from "./who.js";
@@ -1787,7 +1787,7 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
     );
     expect(result.exitCode).toBe(2);
     expect(result.steps!.map((s) => s.status)).toEqual(["done", "done"]);
-    expect(result.conflict).toMatch(/could not be re-checked/);
+    expect(result.unverified).toMatch(/could not be re-checked/);
   });
   it("records questions first, then marks decision-needed and releases only the caller's claim", async () => {
     const env = fake({
@@ -2949,7 +2949,7 @@ describe("post-write ownership check with incomplete labels", () => {
       query: q,
     });
     expect(result.exitCode).toBe(2);
-    expect(result.conflict).toMatch(/ownership is unverified/);
+    expect(result.unverified).toMatch(/more than 100 labels/);
   });
 });
 
@@ -6127,7 +6127,19 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
         pageInfo: { hasPreviousPage: start > 0, startCursor: String(start) },
       };
     };
+    // Comments paged like GitHub's: the newest 100, then older pages of 100 by cursor.
+    const commentWindow = (end: number) => {
+      const start = Math.max(0, end - 100);
+      return {
+        nodes: s.comments.slice(start, end),
+        pageInfo: { hasPreviousPage: start > 0, startCursor: String(start) },
+      };
+    };
     const query = async (source: string, variables: Record<string, unknown> = {}) => {
+      if (source.includes("comments(last:100,before:$before)"))
+        return {
+          repository: { issue: { comments: commentWindow(Number(variables.before)) } },
+        };
       if (source.includes("before:$before"))
         return {
           repository: { issue: { timelineItems: timeline(Number(variables.before), 100) } },
@@ -6153,7 +6165,7 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
                 ? [{ number: 70, url: `https://github.com/${repo}/pull/70`, state: "OPEN" }]
                 : [],
             ),
-            comments: page(s.comments),
+            comments: commentWindow(s.comments.length),
             timelineItems: timeline(s.events.length, 50),
           },
           claims: page([]),
@@ -6389,6 +6401,107 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
     expect(await release(pending, { outcome: "ready" })).toMatchObject({
       ok: false,
       error: "RELEASE_PENDING",
+    });
+  });
+  describe("records beyond the newest page of comments (Codex P2)", () => {
+    const noise = async (env: ReturnType<typeof live>, n: number) => {
+      for (let i = 0; i < n; i++)
+        await env.run(["issue", "comment", "7", "--repo", repo, "--body", `noise ${i}`]);
+    };
+    // A handoff whose comment posted but whose label write failed.
+    const interrupted = async () => {
+      const env = live({ labels: ["agent:kavya"] });
+      await applyPlan(repo, await release(env), {
+        run: async (args) => {
+          if (args[1] === "edit") throw new Error("failed");
+          await env.run(args);
+        },
+        query: env.query,
+      });
+      return env;
+    };
+    it("release finds an interrupted handoff buried under more than 100 comments", async () => {
+      const env = await interrupted();
+      await noise(env, 150);
+      // The recorded outcome still governs: a different outcome is not a new handoff.
+      expect(await release(env, { outcome: "ready" })).toMatchObject({
+        ok: false,
+        error: "RELEASE_PENDING",
+      });
+      const retry = await release(env);
+      expect(retry).toMatchObject({ ok: true, reason: expect.stringMatching(/already recorded/) });
+      expect(accepted(retry).changes.map((c) => c.step)).not.toContain("comment");
+    });
+    it("release refuses EVIDENCE_INCOMPLETE when the claim start is beyond the bounded read", async () => {
+      const env = await interrupted();
+      await noise(env, 700);
+      expect(await release(env, { outcome: "ready" })).toMatchObject({
+        ok: false,
+        error: "EVIDENCE_INCOMPLETE",
+      });
+    });
+    const handedOver = async (n: number) => {
+      const env = live({ labels: ["agent:kavya"], linkedOpenPr: true });
+      expect((await applyPlan(repo, await release(env, { outcome: "done" }), env)).exitCode).toBe(
+        0,
+      );
+      await noise(env, n);
+      return planClaim(repo, { number: 7, agent: "kavya", rework: true }, env.query);
+    };
+    it("rework finds the caller's done handoff buried under more than 100 comments", async () => {
+      expect(await handedOver(150)).toMatchObject({ ok: true, noop: false });
+    });
+    it("rework refuses EVIDENCE_INCOMPLETE when no handoff is within the bounded read", async () => {
+      expect(await handedOver(700)).toMatchObject({ ok: false, error: "EVIDENCE_INCOMPLETE" });
+    });
+  });
+  describe("post-write check with missing or truncated evidence (Codex P2)", () => {
+    const reread = (env: ReturnType<typeof live>, edit: (r: any) => void) => {
+      let writes = 0;
+      return {
+        run: async (args: string[]) => {
+          writes++;
+          await env.run(args);
+        },
+        query: async (source: string, variables: Record<string, unknown> = {}) => {
+          const r: any = await env.query(source, variables);
+          if (writes && r?.repository?.issueOrPullRequest) edit(r);
+          return r;
+        },
+      };
+    };
+    it("release reports unverified (exit 2) when the re-read issue is missing", async () => {
+      const env = live({ labels: ["agent:kavya"] });
+      const result = await applyPlan(
+        repo,
+        await release(env),
+        reread(env, (r) => (r.repository.issueOrPullRequest = null)),
+      );
+      expect(result.exitCode).toBe(2);
+      expect(result.conflict).toBeNull();
+      expect(result.unverified).toMatch(/could not be re-read/);
+      expect(result.unverified).toMatch(/who 7/);
+      expect(claimText(result)).toMatch(/UNVERIFIED/);
+    });
+    it("release reports unverified when the re-read label page is truncated", async () => {
+      const env = live({ labels: ["agent:kavya"] });
+      const result = await applyPlan(
+        repo,
+        await release(env),
+        reread(env, (r) => (r.repository.issueOrPullRequest.labels.pageInfo.hasNextPage = true)),
+      );
+      expect(result.exitCode).toBe(2);
+      expect(result.unverified).toMatch(/more than 100 labels/);
+    });
+    it("claim reports unverified when the re-read issue is missing", async () => {
+      const env = live({ labels: ["status:ready"], labelledAt: undefined });
+      const result = await applyPlan(
+        repo,
+        await planClaim(repo, { number: 7, agent: "kavya" }, env.query),
+        reread(env, (r) => (r.repository.issueOrPullRequest = null)),
+      );
+      expect(result.exitCode).toBe(2);
+      expect(result.unverified).toMatch(/could not be re-read/);
     });
   });
   describe("claim identity beyond the first page of label history (Codex P2)", () => {

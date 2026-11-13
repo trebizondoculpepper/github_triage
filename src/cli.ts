@@ -277,7 +277,7 @@ applies only that recorded plan and refuses if ownership or readiness changed si
 Each step is reported done/failed/skipped; a retry of the same command completes only the
 missing steps and never duplicates the handoff comment. Changed live state is re-evaluated.
 You choose the outcome; the tool never chooses one for you.
-Exit: 0 done; 2 partly done or conflict (see Retry); 1 refused or nothing done.
+Exit: 0 done and verified; 2 partly done, conflict, or unverified (see Retry); 1 refused or nothing done.
 `;
 /**
  * Arguments for `claim`, `release` and `needs-human` (doc/design/workflow.md).

@@ -87,8 +87,19 @@ export interface ClaimAccepted {
 }
 export type ClaimPlan = ClaimRefusal | ClaimAccepted;
 export type ClaimResult =
-  | (ClaimRefusal & { exitCode: number; steps?: undefined; conflict?: undefined })
-  | (ClaimAccepted & { steps: PlanStep[]; conflict: string | null; exitCode: number });
+  | (ClaimRefusal & {
+      exitCode: number;
+      steps?: undefined;
+      conflict?: undefined;
+      unverified?: undefined;
+    })
+  | (ClaimAccepted & {
+      steps: PlanStep[];
+      conflict: string | null;
+      /** Writes done but the post-write re-read was missing or truncated: not verified. */
+      unverified: string | null;
+      exitCode: number;
+    });
 
 /** The injected GraphQL read boundary (production: `ghQuery`). */
 export type GraphQuery = (
@@ -138,19 +149,27 @@ interface TicketIssue {
   labels: Labels;
   issueDependenciesSummary: { blockedBy: number } | null;
   blockedBy: { nodes: { number: number; url: string; state: string }[] };
-  closedByPullRequestsReferences: { nodes: { number: number; url: string; state: string }[] };
-  comments: { nodes: { body: string; createdAt?: string }[] };
+  closedByPullRequestsReferences: {
+    nodes: { number: number; url: string; state: string }[];
+    pageInfo?: { hasNextPage?: boolean };
+  };
+  comments: { nodes: Comment[]; pageInfo?: CommentPageInfo };
   timelineItems?: {
     nodes: LabelEvent[];
     pageInfo?: { hasPreviousPage?: boolean; startCursor?: string | null };
   };
 }
+type Comment = { body: string; createdAt?: string };
+type CommentPageInfo = { hasPreviousPage?: boolean; startCursor?: string | null };
 type LabelEvent = { __typename?: string; createdAt?: string; label?: { name: string } };
 type TicketItem = TicketIssue | { __typename: "PullRequest"; number: number; url: string };
 interface TicketResponse {
   repository: {
     issueOrPullRequest: TicketItem | null;
-    claims: { nodes: { number: number; title: string; url: string }[] } | null;
+    claims: {
+      nodes: { number: number; title: string; url: string }[];
+      pageInfo?: { hasNextPage?: boolean };
+    } | null;
     ownerLabel: { name: string } | null;
     questionLabel: { name: string } | null;
     decisionLabel: { name: string } | null;
@@ -305,6 +324,43 @@ async function claimStart(
   return { since, complete: !info?.hasPreviousPage, events };
 }
 
+/** Older comment pages read at most, so a long discussion costs a bounded number of requests. */
+const commentHistoryPages = 5;
+/**
+ * The issue's comments, paged backwards from `readTicket`'s newest window until `enough` holds
+ * for the comments read so far (or history starts), within a bounded number of requests.
+ * `complete` is false when the bound was hit first: the needed comments may be unseen, so their
+ * absence is unknown evidence, never "nothing there".
+ */
+async function commentHistory(
+  repository: string,
+  number: number,
+  item: TicketIssue,
+  enough: (comments: Comment[]) => boolean,
+  query: GraphQuery,
+): Promise<{ comments: Comment[]; complete: boolean }> {
+  let comments = item.comments.nodes;
+  let info = item.comments.pageInfo;
+  const [owner, name] = repository.split("/");
+  for (let pageNo = 0; info?.hasPreviousPage && !enough(comments); pageNo++) {
+    if (!info.startCursor || pageNo >= commentHistoryPages) return { comments, complete: false };
+    const data = (await query(
+      `query($owner:String!,$name:String!,$number:Int!,$before:String!){repository(owner:$owner,name:$name){issue(number:$number){comments(last:100,before:$before){nodes{body createdAt} pageInfo{hasPreviousPage startCursor}}}}}`,
+      { owner, name, number, before: info.startCursor },
+    )) as { repository: { issue: { comments: TicketIssue["comments"] } | null } | null };
+    const older = data.repository?.issue?.comments;
+    if (!older) return { comments, complete: false };
+    comments = [...older.nodes, ...comments];
+    info = older.pageInfo;
+  }
+  return { comments, complete: true };
+}
+/** Enough history once the oldest comment read predates `since` (the claim start). */
+const reaches =
+  (since: string) =>
+  (comments: Comment[]): boolean =>
+    comments.some((c) => !!c.createdAt && c.createdAt < since);
+
 /** Live read of one ticket plus the agent's open claims. */
 async function readTicket(
   repository: string,
@@ -316,7 +372,7 @@ async function readTicket(
 ) {
   const [owner, name] = repository.split("/");
   const data = await query(
-    `query($owner:String!,$name:String!,$number:Int!,$label:String!,$question:String!,$decision:String!,$needsDesign:String!,$attention:String!${target ? ",$target:String!" : ""}){repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on PullRequest{number url} ... on Issue{number title url state updatedAt labels(first:100){nodes{name} pageInfo{hasNextPage}} issueDependenciesSummary{blockedBy} blockedBy(first:20){nodes{number url state}} closedByPullRequestsReferences(first:10,includeClosedPrs:false){nodes{number url state}} comments(last:100){nodes{body createdAt}} timelineItems(itemTypes:[LABELED_EVENT,UNLABELED_EVENT],last:50){nodes{__typename ... on LabeledEvent{createdAt label{name}} ... on UnlabeledEvent{createdAt label{name}}} pageInfo{hasPreviousPage startCursor}}}} claims:issues(first:20,states:OPEN,labels:[$label]){nodes{number title url}} ownerLabel:label(name:$label){name} questionLabel:label(name:$question){name} decisionLabel:label(name:$decision){name} needsDesignLabel:label(name:$needsDesign){name} attentionLabel:label(name:$attention){name}${target ? " targetLabel:label(name:$target){name}" : ""}}}`,
+    `query($owner:String!,$name:String!,$number:Int!,$label:String!,$question:String!,$decision:String!,$needsDesign:String!,$attention:String!${target ? ",$target:String!" : ""}){repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on PullRequest{number url} ... on Issue{number title url state updatedAt labels(first:100){nodes{name} pageInfo{hasNextPage}} issueDependenciesSummary{blockedBy} blockedBy(first:20){nodes{number url state}} closedByPullRequestsReferences(first:10,includeClosedPrs:false){nodes{number url state} pageInfo{hasNextPage}} comments(last:100){nodes{body createdAt} pageInfo{hasPreviousPage startCursor}} timelineItems(itemTypes:[LABELED_EVENT,UNLABELED_EVENT],last:50){nodes{__typename ... on LabeledEvent{createdAt label{name}} ... on UnlabeledEvent{createdAt label{name}}} pageInfo{hasPreviousPage startCursor}}}} claims:issues(first:20,states:OPEN,labels:[$label]){nodes{number title url} pageInfo{hasNextPage}} ownerLabel:label(name:$label){name} questionLabel:label(name:$question){name} decisionLabel:label(name:$decision){name} needsDesignLabel:label(name:$needsDesign){name} attentionLabel:label(name:$attention){name}${target ? " targetLabel:label(name:$target){name}" : ""}}}`,
     {
       owner,
       name,
@@ -336,6 +392,7 @@ async function readTicket(
   return {
     item: repo.issueOrPullRequest ?? null,
     claims: repo.claims?.nodes ?? [],
+    claimsComplete: !!repo.claims && !repo.claims.pageInfo?.hasNextPage,
     // Exact-name lookups, so a repository with many labels cannot hide an existing one.
     repoLabels: new Set(
       [
@@ -462,12 +519,26 @@ export async function planClaim(
     // repaired by retrying just that step.
     // This acquisition began when the label was last added; only a claim comment posted since
     // then counts, so an earlier claim's comment (before a release) does not.
-    const since = (item.timelineItems?.nodes ?? [])
-      .filter((e) => e.__typename !== "UnlabeledEvent" && e.label?.name === mine)
-      .map((e) => e.createdAt)
-      .sort()
-      .at(-1);
-    const commented = item.comments.nodes.some(
+    const history = await claimStart(repository, number, mine, item, query);
+    const since = history.since;
+    const found =
+      since || history.complete
+        ? await commentHistory(
+            repository,
+            number,
+            item,
+            since ? reaches(since) : () => false,
+            query,
+          )
+        : null;
+    if (!found?.complete)
+      return refuse(
+        "EVIDENCE_INCOMPLETE",
+        facts,
+        `${mine} is on #${number}, but ${found ? "the comments since this claim began" : "when it was added"} cannot be read within the bounded history, so whether its claim comment was posted is unknown; nothing is changed.`,
+        [`${triage} --issue ${number}`, command(`who ${number}`)],
+      );
+    const commented = found.comments.some(
       (c) => c.body.includes(op) && (!since || !c.createdAt || c.createdAt >= since),
     );
     return {
@@ -483,7 +554,27 @@ export async function planClaim(
     };
   }
   const openPrs = item.closedByPullRequestsReferences.nodes.filter((p) => p.state === "OPEN");
-  const lastRelease = latestRelease(item.comments.nodes);
+  // More linked PRs than one page: an open one may be unseen, so "no open PR" is unknown.
+  if (!openPrs.length && item.closedByPullRequestsReferences.pageInfo?.hasNextPage)
+    return refuse(
+      "EVIDENCE_INCOMPLETE",
+      facts,
+      "More than 10 linked pull requests; whether one is open cannot be verified.",
+      [`${triage} --issue ${number}`],
+    );
+  // The latest handoff is the newest release record: page back until one is seen (bounded).
+  // Only an explicit --rework needs that record; otherwise the window serves as a hint.
+  const releaseHistory = rework
+    ? await commentHistory(repository, number, item, (c) => latestRelease(c) !== null, query)
+    : { comments: item.comments.nodes, complete: true };
+  if (!releaseHistory.complete)
+    return refuse(
+      "EVIDENCE_INCOMPLETE",
+      facts,
+      `No handoff record found within the bounded comment history of #${number}, so the latest release (and whether it is ${agent}'s own done handoff) cannot be verified.`,
+      [`${triage} --issue ${number}`, command(`who ${number}`)],
+    );
+  const lastRelease = latestRelease(releaseHistory.comments);
   // Conservative authorisation: awaiting review, an open PR, and the caller's own done handoff
   // is the latest recorded release on this issue.
   const reworkable =
@@ -669,7 +760,21 @@ export async function planNeedsHuman(
     );
   const mine = claimPolicy.owner(agent);
   const op = marker("needs-human", [repository, number, agent, designer, why, questions]);
-  const already = item.comments.nodes.some((c) => c.body.includes(op));
+  const seen = await commentHistory(
+    repository,
+    number,
+    item,
+    (c) => c.some((x) => x.body.includes(op)),
+    query,
+  );
+  if (!seen.complete)
+    return refuse(
+      "EVIDENCE_INCOMPLETE",
+      facts,
+      "The comment history is longer than the bounded read, so whether these questions were already posted is unknown; nothing is posted.",
+      [`${triage} --issue ${number}`],
+    );
+  const already = seen.comments.some((c) => c.body.includes(op));
   const readiness = workflow.readiness.filter((l) => label(item, l));
   const swap = claimPolicy.pickable.filter((l) => label(item, l));
   // Exactly one readiness label: replace ready/incomplete with needs-design; add it when there
@@ -795,6 +900,8 @@ export async function planRelease(
       [`gh pr view ${number} --repo ${repository}`],
     );
   const linkedOpen = item.closedByPullRequestsReferences.nodes.filter((p) => p.state === "OPEN");
+  const linkedUnknown =
+    !linkedOpen.length && !!item.closedByPullRequestsReferences.pageInfo?.hasNextPage;
   // A verified open closing PR establishes review whatever state a supplied --pr has.
   const openPr = prState === "OPEN" || linkedOpen.length > 0;
   const target = outcome === "done" ? (openPr ? claimPolicy.awaitingReview : null) : preliminary;
@@ -818,6 +925,14 @@ export async function planRelease(
       "More than 100 labels; the caller's claim and readiness cannot be verified, so nothing is changed.",
       [`${triage} --issue ${number}`, command(`who ${number}`)],
     );
+  // Done's target depends on whether a PR is open; an unseen linked PR makes that unknown.
+  if (outcome === "done" && prState !== "OPEN" && linkedUnknown)
+    return refuse(
+      "EVIDENCE_INCOMPLETE",
+      facts,
+      "More than 10 linked pull requests; whether one is open (and so the handoff target) cannot be verified.",
+      [`${triage} --issue ${number}`],
+    );
   const mine = claimPolicy.owner(agent);
   const args = [
     `release ${number} --agent ${agent} --as ${outcome}`,
@@ -840,12 +955,23 @@ export async function planRelease(
       `When ${mine} was added to #${number} cannot be established from its label history, so this claim cannot be told apart from earlier ones; nothing is changed. Inspect the ticket's label history and coordinate on the ticket, or remove and re-add ${mine} to start a verifiable claim.`,
       [`${triage} --issue ${number}`, command(`who ${number}`)],
     );
+  // Every handoff recorded for this claim was posted after it began: read back to that point.
+  const recorded = since
+    ? await commentHistory(repository, number, item, reaches(since), query)
+    : { comments: item.comments.nodes, complete: true };
+  if (!recorded.complete)
+    return refuse(
+      "EVIDENCE_INCOMPLETE",
+      facts,
+      `The comments since ${mine} was added at ${since} exceed the bounded read, so a handoff already recorded for this claim may be unseen; nothing is changed.`,
+      [`${triage} --issue ${number}`, command(`who ${number}`)],
+    );
   const events = history.events.filter((e) => e.label && e.createdAt);
   const removed = (e: (typeof events)[number]): boolean => e.__typename === "UnlabeledEvent";
   const op = marker("release", [repository, number, agent, since]);
   // A record with no claim time can never be tied to a particular claim, so it never matches.
   const record = since
-    ? releaseRecords(item.comments.nodes, op)
+    ? releaseRecords(recorded.comments, op)
         .filter((r) => r.agent === agent && r.claimedAt !== null && r.claimedAt === since)
         .at(-1)
     : undefined;
@@ -1027,30 +1153,37 @@ export async function applyPlan(
   }
   const done = steps.filter((s) => s.status === "done").length;
   let conflict: string | null = null;
+  let unverified: string | null = null;
+  const verify = `Verify with: github-triage who ${plan.facts.number} --repo ${repository} (or github-triage --repo ${repository} --issue ${plan.facts.number})${plan.retry ? `; the same command is safe to re-run: ${plan.retry}` : ""}.`;
   if (!failed && plan.recheck && done) {
     try {
       const mine = claimPolicy.owner(plan.recheck.agent);
       const ticket = await readTicket(repository, plan.facts.number, plan.recheck.agent, query);
-      const { claims } = ticket;
+      const { claims, claimsComplete } = ticket;
       // A claim is only ever planned for an issue; anything else cannot hold the claim.
       const item = ticket.item?.__typename === "Issue" ? ticket.item : null;
       const others = item ? owners(item).filter((o) => o !== mine) : [];
       const elsewhere = claims.filter((c) => c.number !== plan.facts.number);
       // GitHub label edits are not a lock: report conflicts rather than resolve them.
       const problems: string[] = [];
-      if (plan.recheck.release) {
+      // Missing or truncated evidence is never success: report it as unverified.
+      const gaps: string[] = [];
+      if (!item) gaps.push(`#${plan.facts.number} could not be re-read as an issue`);
+      else if (item.labels?.pageInfo?.hasNextPage)
+        gaps.push(
+          `#${plan.facts.number} has more than 100 labels, so ${plan.recheck.release ? "a remaining claim label" : "a competing claim"} may be unseen`,
+        );
+      if (!plan.recheck.release && !claimsComplete)
+        gaps.push(`${plan.recheck.agent}'s open claims could not be read completely`);
+      if (gaps.length) unverified = `Writes completed, but ${gaps.join("; ")}. ${verify}`;
+      else if (plan.recheck.release) {
         const target = plan.recheck.release.target;
-        if (item && owners(item).includes(mine))
+        if (owners(item!).includes(mine))
           problems.push(`${mine} is still recorded on #${plan.facts.number}`);
-        if (item && target && !label(item, target))
+        if (target && !label(item!, target))
           problems.push(`${target} is no longer on #${plan.facts.number}`);
       } else {
-        // An incomplete label page cannot confirm ownership: a competing claim may be unseen.
-        if (item?.labels?.pageInfo?.hasNextPage)
-          problems.push(
-            `ownership is unverified: #${plan.facts.number} has more than 100 labels, so a competing claim may be unseen`,
-          );
-        if (!item || item.state !== "OPEN" || !owners(item).includes(mine))
+        if (item!.state !== "OPEN" || !owners(item!).includes(mine))
           problems.push(
             `the claim is no longer recorded on #${plan.facts.number} (open, labelled ${mine})`,
           );
@@ -1065,11 +1198,11 @@ export async function applyPlan(
         conflict = `${problems.join("; ")}. Coordinate on the tickets; nothing was removed.`;
     } catch (error) {
       // Keep the completed writes; ownership is merely unverified.
-      conflict = `Writes completed, but ownership could not be re-checked (${errorMessage(error)}). Re-run the same command to verify${plan.retry ? `: ${plan.retry}` : ""}.`;
+      unverified = `Writes completed, but ownership could not be re-checked (${errorMessage(error)}). ${verify}`;
     }
   }
-  const exitCode = failed ? (done ? 2 : 1) : conflict ? 2 : 0;
-  return { ...plan, steps, conflict, exitCode };
+  const exitCode = failed ? (done ? 2 : 1) : conflict || unverified ? 2 : 0;
+  return { ...plan, steps, conflict, unverified, exitCode };
 }
 
 /** POSIX shell quoting for displayed commands: nothing inside single quotes is expanded. */
@@ -1104,6 +1237,7 @@ export function claimText(result: ClaimPlan | ClaimResult, dryRun = false): stri
     );
   for (const n of result.notes ?? []) lines.push(`Note: ${n}`);
   if ("conflict" in result && result.conflict) lines.push(`CONFLICT: ${result.conflict}`);
+  if ("unverified" in result && result.unverified) lines.push(`UNVERIFIED: ${result.unverified}`);
   if (result.retry && "exitCode" in result && result.exitCode !== 0)
     lines.push(`Retry (safe; completes only the missing steps): ${result.retry}`);
   return lines.join("\n") + "\n";
