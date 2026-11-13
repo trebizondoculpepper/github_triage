@@ -877,6 +877,7 @@ export async function planNeedsHuman(
   repository: string,
   request: NeedsHumanRequest,
   query: GraphQuery = ghQuery,
+  permission: PermissionLookup = permissionLookup(repository),
 ): Promise<ClaimPlan> {
   const { number, agent, designer, why, questions } = request;
   const { item, repoLabels } = await readTicket(repository, number, agent, query, designer);
@@ -925,7 +926,14 @@ export async function planNeedsHuman(
       "The comment history is longer than the bounded read, so whether these questions were already posted is unknown; nothing is posted.",
       [`${triage} --issue ${number}`],
     );
-  const already = seen.comments.some((c) => c.body.includes(op));
+  // Only a marker with write authority suppresses a repeat question (#214): a forged copy is
+  // ignored with a warning, and an unverifiable one never suppresses, so the question is posted.
+  const posted = await newestTrusted(
+    seen.comments.filter((c) => c.body.includes(op)),
+    (c) => c,
+    permission,
+  );
+  const already = posted.trusted !== null;
   const readiness = workflow.readiness.filter((l) => label(item, l));
   const swap = claimPolicy.pickable.filter((l) => label(item, l));
   // Exactly one readiness label: replace ready/incomplete with needs-design; add it when there
@@ -942,7 +950,11 @@ export async function planNeedsHuman(
     ...(addNeedsDesign ? [claimPolicy.needsDesign] : []),
   ].filter((l) => !label(item, l));
   const remove = [...swap, ...(label(item, mine) ? [mine] : [])];
-  const notes: string[] = [];
+  const notes: string[] = ignoredNote(posted.ignored);
+  if (!already && posted.unverified.length)
+    notes.push(
+      `Marker(s) whose authority could not be verified do not suppress the question: ${posted.unverified.join("; ")}.`,
+    );
   if (held.length)
     notes.push(`Readiness ${held.join(", ")} kept; not replaced with ${claimPolicy.needsDesign}.`);
   const changes: PlanStep[] = [];

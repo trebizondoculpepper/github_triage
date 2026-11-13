@@ -2026,6 +2026,54 @@ describe("claim and needs-human review fixes", () => {
       error: "EVIDENCE_INCOMPLETE",
     });
   });
+  describe("needs-human dedupe marker authority (#214)", () => {
+    /** The exact question comment needs-human would post, so its marker matches this request. */
+    const questionBody = async () => {
+      const plan = await planNeedsHuman(
+        repo,
+        ask,
+        async () => base(["status:ready"]),
+        permissions(),
+      );
+      return accepted(plan)
+        .changes.find((c) => c.step === "comment")!
+        .command.at(-1)!;
+    };
+    const withMarker = async (author: string) => {
+      const data = base(["status:ready"]);
+      (data.repository.issueOrPullRequest.comments as unknown) = page([
+        { ...by(author), body: await questionBody(), createdAt: "2026-11-12T10:00:00Z" },
+      ]);
+      return async () => data;
+    };
+    const commented = (plan: Awaited<ReturnType<typeof planNeedsHuman>>) =>
+      accepted(plan).changes.some((c) => c.step === "comment");
+    it("a forged marker does not suppress the question and is named in a warning", async () => {
+      const permission = permissions({ mallory: "read" });
+      const plan = await planNeedsHuman(repo, ask, await withMarker("mallory"), permission);
+      expect(commented(plan)).toBe(true);
+      expect(accepted(plan).notes!.join(" ")).toMatch(
+        /Ignored marker\(s\) without write authority:.*mallory has read permission/,
+      );
+      expect(permission.calls).toEqual(["mallory"]);
+    });
+    it("a genuine marker from a write author still deduplicates", async () => {
+      const permission = permissions({ kavya: "write" });
+      const plan = await planNeedsHuman(repo, ask, await withMarker("kavya"), permission);
+      expect(commented(plan)).toBe(false);
+      expect(permission.calls).toEqual(["kavya"]);
+    });
+    it("a failed permission lookup does not suppress the question", async () => {
+      const plan = await planNeedsHuman(
+        repo,
+        ask,
+        await withMarker("kavya"),
+        permissions({ kavya: "unknown" }),
+      );
+      expect(commented(plan)).toBe(true);
+      expect(accepted(plan).notes!.join(" ")).toMatch(/could not be verified do not suppress/);
+    });
+  });
   it("re-check reports a lost claim and a concurrent second claim by the same agent", async () => {
     const lost = async () => base(["status:ready"]);
     const r1 = await applyPlan(repo, await planClaim(repo, { number: 7, agent: "kavya" }, lost), {
