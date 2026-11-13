@@ -32,6 +32,17 @@ import { defaultStaleHours, teamText, teamView } from "./team.js";
 import { ticketOwnership, ticketOwnershipText } from "./who.js";
 import { migrationPlanText, planMigration } from "./migration.js";
 import { presentBriefing, unavailableText } from "./service.js";
+import {
+  briefingProcess,
+  fullGuideJson,
+  fullGuideText,
+  GUIDE_CONFIG_KEY,
+  guideRules,
+  mutatingCommands,
+  PROCESS_COMMAND,
+  resolveGuideSetting,
+} from "./process.js";
+import type { GuideRuntime } from "./process.js";
 import { pickupOrders } from "./ranking.js";
 import type { PickupOrder } from "./ranking.js";
 import { complexityGuidanceJson, complexityGuidanceText } from "./complexity.js";
@@ -91,6 +102,8 @@ export interface Runtime {
   localDoctor?: LocalDoctorRuntime;
   /** Filesystem, git and GitHub field API for the briefing's estimation queue (#122). */
   estimation?: EstimationRuntime;
+  /** Filesystem, git and working directory for the workflow-guide setting (#71). */
+  guide?: GuideRuntime;
 }
 
 type Output = (text: string) => Promise<void>;
@@ -155,10 +168,18 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   --limit N             Next steps (default 5 compact, 10 expanded)
   --no-update-check     Skip the npm version check (also ${optOutEnv}=1)
   version               Show the installed version and the update check result
+  --guide | --no-guide  Show or hide the compact workflow guide in this briefing
+                        (default on; repository opt-out: config set ${GUIDE_CONFIG_KEY} false)
+  process [--json]      Full workflow guide from the registered policy; local, no GitHub
   --help                Show usage
+Workflow (generated from the registered policy):
+${guideRules()
+  .filter((rule) => ["attention-first", "pickup-eligibility"].includes(rule.id))
+  .map((rule) => `  ${rule.summary}`)
+  .join("\n")}
+  Details: ${PROCESS_COMMAND}
 Exit: 0 complete; 2 incomplete evidence; 1 invalid arguments/API/cache failure.
-The briefing never changes GitHub; only deps add/remove, claim, release, needs-human
-and estimate N do;
+The briefing never changes GitHub; only ${mutatingCommands().join(", ")} do;
 config set changes only the local .github/triage.json; setup complexity may
 also create an owner-wide issue field, only after --create/confirmation. Hints require inspection.
 `;
@@ -385,9 +406,13 @@ export function argumentsFor(args: string[]) {
       "stale-hours": { type: "string" },
       estimate: { type: "boolean" },
       role: { type: "string" },
+      guide: { type: "boolean" },
+      "no-guide": { type: "boolean" },
       help: { type: "boolean" },
     },
   });
+  if (values.guide && values["no-guide"])
+    throw new Error("Use either --guide or --no-guide, not both.");
   if (values.role !== undefined && !roleRegistry.has(values.role))
     throw new Error(`--role must be one of ${roleNames().join(", ")}.`);
   if (values.role !== undefined && values.full)
@@ -425,6 +450,7 @@ export function argumentsFor(args: string[]) {
     since: values.since ? new Date(values.since).toISOString() : undefined,
     order,
     staleHours,
+    guide: values.guide ? true : values["no-guide"] ? false : undefined,
   };
 }
 const isPickupOrder = (text: string): text is PickupOrder =>
@@ -509,7 +535,10 @@ export async function main(
     return 0;
   }
   // Help is instant; it should not wait on the network, so it is not an eligible invocation.
-  const eligible = !rest.includes("--help") && !(rest[0] === "config" && rest[1] === "help");
+  const eligible =
+    !rest.includes("--help") &&
+    !(rest[0] === "config" && rest[1] === "help") &&
+    rest[0] !== "process";
   const pending = eligible
     ? Promise.resolve()
         .then(() => check({ offline: rest.includes("--offline"), optOut }))
@@ -527,6 +556,11 @@ export async function main(
 
 /** The command itself; `main` adds the version check around it. */
 async function run(args: string[], output: Output, runtime: Runtime): Promise<number> {
+  if (args[0] === "process") {
+    const { values } = parseArgs({ args: args.slice(1), options: { json: { type: "boolean" } } });
+    await output(values.json ? JSON.stringify(fullGuideJson(), null, 2) + "\n" : fullGuideText());
+    return 0;
+  }
   if (args[0] === "config") return runConfig(args.slice(1), output, runtime.config);
   if (args[0] === "setup")
     return runSetup(args.slice(1), output, {
@@ -828,9 +862,12 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
   }
   if (options.issue && !snapshot.issues.some((issue) => issue.number === options.issue))
     throw new Error(`Issue #${options.issue} not in this cache. Refresh live with --issue.`);
+  const guideProcess = options.full
+    ? undefined
+    : briefingProcess(await resolveGuideSetting(snapshot.repository, options.guide, runtime.guide));
   const { report, text } = await presentBriefing(
     snapshot,
-    options,
+    { ...options, process: guideProcess },
     runtime.estimation,
     runtime.now?.(),
   );

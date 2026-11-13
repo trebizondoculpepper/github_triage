@@ -33,6 +33,8 @@ When disabled, emit a one-line pointer with policy version instead of the guide 
 
 ## Minimal project configuration
 
+Implementation note (#71): the repository configuration service from #114/#116 landed after this contract, so the setting is the registered `processGuide` boolean key in `.github/triage.json`, set with `github-triage config set processGuide false`, rather than a separate `.github-triage.json`. Semantics below are unchanged; unknown keys in that shared file are refused by the service, so the briefing falls back to the default with a diagnostic rather than a warning.
+
 Use a committed `.github-triage.json` at the invoking Git project's worktree root:
 
 ```json

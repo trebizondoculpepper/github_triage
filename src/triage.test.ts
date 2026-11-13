@@ -38,6 +38,15 @@ import {
   type GitRunner,
 } from "./config.js";
 import { briefing, dependencyDone, textReport } from "./briefing.js";
+import {
+  commandRegistry,
+  compactGuide,
+  guideRules,
+  MAX_GUIDE_CODE_POINTS,
+  mutatingCommands,
+  policyVersion,
+} from "./process.js";
+import { pickupPolicy } from "./ranking.js";
 import { complexityGuidance } from "./complexity.js";
 import { classifyField } from "./complexitysetup.js";
 import { MAX_COMMENT_PAGES, parseProvenance, provenanceComment } from "./estimate.js";
@@ -4158,6 +4167,7 @@ describe("repository configuration service (#116, doc/design/repository-configur
     expect(config.settings).toEqual([
       { key: "complexity.enabled", value: true, source: "default" },
       { key: "complexity.fieldId", value: null, source: "default" },
+      { key: "processGuide", value: true, source: "default" },
     ]);
     expect(memory.writes).toEqual([]);
   });
@@ -4526,6 +4536,7 @@ describe("config get/set/list/help commands (#117)", () => {
     expect(t.json().settings).toEqual([
       expect.objectContaining({ key: "complexity.enabled", value: false, source: "explicit" }),
       expect.objectContaining({ key: "complexity.fieldId", value: "PVTF_1", source: "explicit" }),
+      expect.objectContaining({ key: "processGuide", value: true, source: "default" }),
     ]);
     expect(await t.call("list")).toBe(0);
     expect(t.out.at(-1)).toContain("complexity.fieldId = PVTF_1 (explicit)");
@@ -7526,5 +7537,147 @@ describe("local configuration doctor (#64)", () => {
     );
     expect(JSON.parse(out)).toMatchObject({ schemaVersion: 1, scope: "local-configuration" });
     expect(code).toBe(1);
+  });
+});
+
+describe("workflow guide in help and briefings (#71, doc/design/workflow-guide.md)", () => {
+  const root = "/checkout";
+  const gitFor =
+    (remote = `https://github.com/${repo}.git`): GitRunner =>
+    async (args) =>
+      args[0] === "rev-parse" ? `${root}\n` : `origin\t${remote} (fetch)\n`;
+  const fsWith = (raw: string | null): ConfigFileSystem => ({
+    readText: async (file) => (file === join(root, CONFIG_PATH) ? raw : null),
+    writeText: async () => {
+      throw new Error("guide must never write configuration");
+    },
+    rename: async () => {
+      throw new Error("guide must never write configuration");
+    },
+    remove: async () => undefined,
+    makeDirectory: async () => undefined,
+  });
+  const run = async (args: string[], raw: string | null, remote?: string) => {
+    let out = "";
+    const code = await main(["--no-update-check", ...args], async (t) => void (out = t), {
+      collect: async () => snapshot(),
+      currentRepository: async () => repo,
+      estimation: { fs: fsWith(null), git: gitFor(remote), cwd: root },
+      guide: { fs: fsWith(raw), git: gitFor(remote), cwd: root },
+    });
+    return { code, out };
+  };
+
+  it("includes a bounded guide by default, generated from registered policy", async () => {
+    const { code, out } = await run(["--json"], null);
+    expect(code).toBe(0);
+    const process_ = JSON.parse(out).process;
+    expect(process_).toMatchObject({ schemaVersion: 1, enabled: true, source: "default" });
+    expect(process_.policyVersion).toBe(policyVersion());
+    expect(Array.from(process_.guide as string).length).toBeLessThanOrEqual(MAX_GUIDE_CODE_POINTS);
+    expect(process_.guideCodePoints).toBe(Array.from(process_.guide as string).length);
+    for (const label of pickupPolicy.available) expect(process_.guide).toContain(label);
+    for (const name of mutatingCommands()) expect(process_.guide).toContain(name);
+    const text = (await run([], null)).out;
+    expect(text).toContain("WORKFLOW\n- Order:");
+    expect(text).toContain("github-triage process");
+  });
+
+  it("only advertises implemented commands", () => {
+    const templates = commandRegistry.map((c) => c.template.split(" ")[1]);
+    for (const line of compactGuide().split("\n"))
+      for (const match of line.matchAll(/github-triage (\S+)/g))
+        expect(templates).toContain(match[1]);
+  });
+
+  it("honours the processGuide opt-out without changing the briefing evidence", async () => {
+    const on = JSON.parse((await run(["--json"], null)).out);
+    const off = JSON.parse((await run(["--json"], '{"schemaVersion":1,"processGuide":false}')).out);
+    expect(off.process).toMatchObject({ enabled: false, source: "config", guide: null });
+    expect(off.process.pointer).toContain(off.process.policyVersion);
+    const { process: _a, ...restOn } = on;
+    const { process: _b, ...restOff } = off;
+    expect(restOff).toEqual(restOn);
+    const text = (await run([], '{"schemaVersion":1,"processGuide":false}')).out;
+    expect(text).not.toContain("WORKFLOW\n");
+    expect(text).toContain("Workflow guide off");
+  });
+
+  it("lets CLI flags override configuration, even when it is invalid, and refuses both", async () => {
+    const forced = JSON.parse(
+      (await run(["--json", "--guide"], '{"schemaVersion":1,"processGuide":false}')).out,
+    );
+    expect(forced.process).toMatchObject({ enabled: true, source: "cli" });
+    const hidden = JSON.parse((await run(["--json", "--no-guide"], "{oops")).out);
+    expect(hidden.process).toMatchObject({ enabled: false, source: "cli", diagnostics: [] });
+    expect(() => argumentsFor(["--guide", "--no-guide"])).toThrow(/either --guide or --no-guide/);
+  });
+
+  it("falls back to the default with a diagnostic for malformed, future, unknown or mismatched config", async () => {
+    for (const raw of [
+      "{oops",
+      '{"schemaVersion":99}',
+      '{"schemaVersion":1,"surprise":true}',
+      '{"schemaVersion":1,"processGuide":"no"}',
+    ]) {
+      const { code, out } = await run(["--json"], raw);
+      expect(code).toBe(0);
+      const parsed = JSON.parse(out);
+      expect(parsed.process).toMatchObject({ enabled: true, source: "default" });
+      expect(parsed.process.diagnostics[0]).toMatch(/not applied/);
+      expect(parsed.completeness.complete).toBe(true);
+    }
+    const other = JSON.parse(
+      (await run(["--json"], '{"schemaVersion":1,"processGuide":false}', "git@github.com:a/b.git"))
+        .out,
+    );
+    expect(other.process).toMatchObject({ enabled: true, source: "default" });
+    expect(other.process.diagnostics[0]).toMatch(/No matching local project setting/);
+    expect((await run([], "{oops")).out).toContain("CONFIG: Repository configuration not applied");
+  });
+
+  it("counts against the text budget and reports omission instead of truncating", async () => {
+    const { out } = await run(["--max-chars", "600"], null);
+    expect(out).not.toContain("WORKFLOW\n");
+    expect(out).toContain(
+      "Workflow guide omitted by text budget. Full guide: github-triage process",
+    );
+  });
+
+  it("serves help and the full guide locally, without GitHub or configuration", async () => {
+    let helpText = "";
+    let guide = "";
+    let json = "";
+    const offline = {
+      collect: async () => {
+        throw new Error("no network");
+      },
+      currentRepository: async () => {
+        throw new Error("no network");
+      },
+    };
+    expect(await main(["--help"], async (t) => void (helpText = t), offline)).toBe(0);
+    expect(await main(["process"], async (t) => void (guide = t), offline)).toBe(0);
+    expect(await main(["process", "--json"], async (t) => void (json = t), offline)).toBe(0);
+    expect(helpText).toContain("Workflow (generated from the registered policy):");
+    expect(helpText).toContain(`only ${mutatingCommands().join(", ")} do`);
+    expect(guide).toContain(`policy ${policyVersion()}`);
+    expect(JSON.parse(json)).toMatchObject({ schemaVersion: 1, policyVersion: policyVersion() });
+  });
+
+  it("changes the policy version with semantics, not with rendering", () => {
+    const rules = guideRules();
+    expect(policyVersion(rules)).toBe(policyVersion(guideRules()));
+    const changed = rules.map((rule) =>
+      rule.id === "one-claim" ? { ...rule, parameters: { staleHours: 72 } } : rule,
+    );
+    expect(policyVersion(changed)).not.toBe(policyVersion(rules));
+    const reordered = rules.map((rule) => ({
+      detail: rule.detail,
+      summary: rule.summary,
+      parameters: rule.parameters,
+      id: rule.id,
+    }));
+    expect(policyVersion(reordered)).toBe(policyVersion(rules));
   });
 });

@@ -15,6 +15,8 @@ import type { BriefingOptions } from "./briefing.js";
 import { collectEstimationInput } from "./estimation.js";
 import type { EstimationRuntime } from "./estimation.js";
 import type { Snapshot } from "./types.js";
+import { briefingProcess, resolveGuideSetting } from "./process.js";
+import type { BriefingProcess, GuideRuntime } from "./process.js";
 
 /** Presentation options for a collected snapshot, as the CLI's briefing flags express them. */
 export interface PresentOptions extends Omit<BriefingOptions, "estimation"> {
@@ -24,6 +26,8 @@ export interface PresentOptions extends Omit<BriefingOptions, "estimation"> {
   maxChars: number;
   /** Registered role view (#1) shaping the compact briefing. */
   role?: string;
+  /** Workflow guide (#71) for the compact briefing; omitted means no `process` object. */
+  process?: BriefingProcess;
 }
 
 /** The versioned briefing report and its text rendering. */
@@ -70,7 +74,9 @@ export async function presentBriefing(
         },
     now,
   );
-  const compact = options.full ? null : compactBriefing(snapshot, options, expanded);
+  const built = options.full ? null : compactBriefing(snapshot, options, expanded);
+  // Additive: the process object is only present when the front end resolved a guide setting.
+  const compact = built && options.process ? { ...built, process: options.process } : built;
   const report = compact ?? expanded;
   return {
     report,
@@ -88,6 +94,8 @@ export interface ReadRuntime {
   now?: () => Date;
   /** Rewrites locally generated diagnostics (not GitHub evidence) for remote consumers. */
   redactDiagnostic?: (text: string) => string;
+  /** Filesystem, git and working directory for the workflow-guide setting (#71). */
+  guide?: GuideRuntime;
 }
 
 /** Live read request for a briefing or one issue's intake. */
@@ -132,6 +140,11 @@ export async function readBriefing(
       text: unavailableText(error.diagnosis),
     };
   }
+  const setting = await resolveGuideSetting(request.repository, undefined, runtime.guide);
+  const redact = runtime.redactDiagnostic;
+  const process = briefingProcess(
+    redact ? { ...setting, diagnostics: setting.diagnostics.map(redact) } : setting,
+  );
   const presented = await presentBriefing(
     snapshot,
     {
@@ -139,6 +152,7 @@ export async function readBriefing(
       maxChars: request.maxChars,
       agent: request.agent,
       issue: request.issue,
+      process,
     },
     runtime.estimation,
     runtime.now?.(),

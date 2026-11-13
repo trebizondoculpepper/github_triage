@@ -1,6 +1,7 @@
 /** Compact presentation of the registered findings; contract #698. */
 import { isParked, owners, excerpt } from "./briefing.js";
 import { unblocks } from "./dependencies.js";
+import type { BriefingProcess } from "./process.js";
 import type { Briefing, BriefingOptions, Bounded, CheckOutcome } from "./briefing.js";
 import { estimateLine } from "./estimation.js";
 import type { EstimateEntry } from "./estimation.js";
@@ -329,7 +330,10 @@ export function compactBriefing(
   };
 }
 export type CompactBriefing = ReturnType<typeof compactBriefing>;
-export function compactText(report: CompactBriefing, maxChars = 10000): string {
+export function compactText(
+  report: CompactBriefing & { process?: BriefingProcess },
+  maxChars = 10000,
+): string {
   const subjects = new Map(report.subjects.map((s) => [s.url, s]));
   const lines = [
     `GitHub action briefing: ${report.repository}`,
@@ -416,6 +420,16 @@ export function compactText(report: CompactBriefing, maxChars = 10000): string {
       break;
     }
     lines.push(row);
+  }
+  // The workflow guide (#71) is optional context: it follows the evidence and counts against the
+  // same budget. When it does not fit, only its pointer is shown and the omission is stated.
+  const guide = report.process;
+  if (guide) {
+    for (const diagnostic of guide.diagnostics) lines.push(`CONFIG: ${diagnostic}`);
+    const fits = (text: string) => lines.join("\n").length + text.length + 2 <= maxChars;
+    if (guide.guide && fits(`\n${guide.guide}`)) lines.push(`\n${guide.guide}`);
+    else if (guide.guide) lines.push(`\nWorkflow guide omitted by text budget. ${guide.pointer}`);
+    else lines.push(`\n${guide.pointer}`);
   }
   if (report.detail) lines.push(`\nFULL ISSUE DETAIL\n${JSON.stringify(report.detail, null, 2)}`);
   return lines.join("\n") + "\n";
