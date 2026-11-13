@@ -34,3 +34,7 @@ The owner chose a full [TypeScript migration](typescript.md) in #91. This supers
 ## Optional event production
 
 [Polling and domain events](polling-events.md) (#32) follow baseline MCP. The opt-in 30-minute, process-local watcher does not require host wake-up adapters or the deferred shared daemon/SQLite design.
+
+## Runtime baseline
+
+The owner accepts a recent Node requirement: [Node 26+](runtime.md), tracked in #108. Older-Node compatibility no longer constrains the urgent TypeScript migration. Package engines, current user requirements and CI are updated by implementation; npm/npx does not supply or upgrade Node automatically.

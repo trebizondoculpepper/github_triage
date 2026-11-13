@@ -6,7 +6,7 @@ Owner decision and implementation contract for #91. All maintained first-party a
 
 Explicit types make collector facts, workflow results, injected services and protocol boundaries easier to change safely. JavaScript's direct Node execution avoided a source compilation step, but this project already has TypeScript, Vite+ checks and a release bundle. Prefer stronger maintained source contracts over preserving that convenience.
 
-Published artifacts remain executable JavaScript: Node 20 consumers must not need a compiler, development dependencies or native TypeScript support. TypeScript is erased at runtime; external GitHub/MCP/configuration data still needs validation. Static types do not prove runtime evidence complete or grant workflow permission.
+Use the [recent Node runtime policy](runtime.md): Node 26+ is the selected baseline and older-Node compatibility is not required. Published artifacts may remain executable JavaScript for simple packaging; consumers must not need a development compiler or project development dependencies. TypeScript is erased at runtime; external GitHub/MCP/configuration data still needs validation. Static types do not prove runtime evidence complete or grant workflow permission.
 
 ## Expected architectural benefits
 
@@ -34,23 +34,23 @@ TypeScript ESM can correctly use `.js` import specifiers that resolve to `.ts` s
 
 ## Type checking and execution
 
-Enable `strict: true` and disable `allowJs` for maintained source. Include scripts and executable examples in type checking, using separate configurations where their environment/dependencies differ. All checks are part of the documented contributor validation; a file outside a tsconfig must not quietly escape verification. Preserve ES module output and the existing Node 20 runtime target.
+Enable `strict: true` and disable `allowJs` for maintained source. Include scripts and executable examples in type checking, using separate configurations where their environment/dependencies differ. All checks are part of the documented contributor validation; a file outside a tsconfig must not quietly escape verification. Preserve ES module output and target the selected recent runtime; the former Node 20 floor no longer constrains the migration.
 
 Use concrete fact/result/service types and explicit injected interfaces. Accept `unknown` at untrusted boundaries, validate/narrow it and preserve unknown-evidence semantics. Avoid blanket `any`, `@ts-nocheck`, broad suppressions, or repeated unchecked assertions to get a green build. A narrowly justified escape must be documented and reviewed. Do not combine this migration with architectural redesign merely to make types easier.
 
-Choose a supported development TypeScript execution or precompilation path compatible with existing Vite+ tooling. Document the exact source-checkout commands and update CI to use them. Direct `node src/cli.ts` is not a Node 20 compatibility strategy. Development-only runners must not become consumer runtime requirements. Build/package commands still emit the executable paths expected by npm's bin mapping.
+Choose a supported development TypeScript execution or precompilation path compatible with existing Vite+ tooling and the selected recent runtime. Document the exact source-checkout commands and update CI to use them. Native TypeScript execution does not provide type checking or automatically fix import resolution; use a runner if it remains simpler. Development-only runners must not become accidental consumer dependencies. Build/package commands still emit the executable paths expected by npm's bin mapping.
 
 Update contributor/release/package/smoke script entry points and subprocess references together. Release tooling must locate its compiled helper or use the approved contributor execution path consistently. Fixtures and package tests must exercise installed artifacts, not accidentally continue running stale source JavaScript.
 
 ## Behavior preservation and coordination
 
-Keep command names/arguments, outputs and schema versions, exit codes, ordering, evidence handling, cache/checkpoint behavior, mutation safeguards and supported Node/OS matrix unchanged. Preserve dependency-free consumers where the emitted bundle permits; adding TypeScript does not require a new runtime framework. Newly planned MCP implementation uses TypeScript as well, independently of whether its transport has shipped.
+Keep command names/arguments, outputs and schema versions, exit codes, ordering, evidence handling, cache/checkpoint behavior, mutation safeguards unchanged on supported platforms. Align the Node floor/matrix with the newer runtime policy rather than preserving old-version compatibility. Preserve dependency-free consumers where the emitted bundle permits; adding TypeScript does not require a new runtime framework. Newly planned MCP implementation uses TypeScript as well, independently of whether its transport has shipped.
 
 Check live ownership/open source PRs before the rename. Land current work or coordinate a clear baseline; never overwrite another agent's dirty checkout. Use an isolated branch and preserve Git history with recognizable renames. The implementation can be one cohesive migration PR if reviewable; split only at buildable, type-checked boundaries. No extra feature work or release-policy implementation is hidden in the migration.
 
 ## Acceptance and handoff
 
-Run formatting/lint/type checks, the existing test suite, build, smoke tests and exact packed-archive global-install validation. Verify source-development execution and emitted consumer execution separately. Cover supported Node/OS jobs, especially Node 20 running the built CLI, Windows executable/path handling, npm symlinks and helper subprocess paths. Release tests use fake/injected boundaries, never an actual publication or branch promotion.
+Run formatting/lint/type checks, the existing test suite, build, smoke tests and exact packed-archive global-install validation. Verify source-development execution and emitted consumer execution separately. Cover supported Node/OS jobs, especially the selected Node 26 baseline running the built CLI, Windows executable/path handling, npm symlinks and helper subprocess paths. Release tests use fake/injected boundaries, never an actual publication or branch promotion.
 
 Verify no maintained handwritten JavaScript module remains in the scoped directories and that every converted file is checked. Record intentionally ancillary-language files and their purpose; enforce the first-party TypeScript boundary without banning those deliberate integrations. Preserve useful archive allowlist assertions while allowing only intentional compiled artifacts. Update package scripts, CI, active architecture/help examples, README and AGENTS instructions to the new commands once implementation ships. Historical research may retain its provenance with a pointer to this superseding decision.
 
