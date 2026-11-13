@@ -1002,6 +1002,184 @@ describe("repository catch-up aggregation (#169)", () => {
     expect(blockers.find((r) => r.subject.number === 93)?.kind).toBe("unknown-checks");
     expect(catchUpText(report)).toContain("Native blocker closed as not planned");
   });
+
+  describe("read-only MCP briefing mode (#171)", async () => {
+    const { Client } = await import("@modelcontextprotocol/client");
+    const { InMemoryTransport } = await import("@modelcontextprotocol/server");
+    const { createServer, envelope, mcpCheckpointPolicy } = await import("./mcp.js");
+    type McpRuntime = import("./mcp.js").McpRuntime;
+    const merged = pr(60, [], "SUCCESS", {
+      state: "MERGED",
+      mergedAt: inside(2),
+      createdAt: inside(30),
+      updatedAt: inside(1),
+    });
+    const open = issue(61, ["attention:ana"], { createdAt: inside(3), updatedAt: inside(1) });
+    /** The real collector over a fake gh: no network, no files, injected clock. */
+    const liveCollect =
+      (seen: string[] = []): McpRuntime["collect"] =>
+      async (r, o) => {
+        seen.push(o?.changeWindow ? `${o.changeWindow.source}:${o.changeWindow.from}` : "plain");
+        return collect(r, o, fakeGh([merged], [open]), clock);
+      };
+    const connect = async (runtime: McpRuntime) => {
+      const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+      await createServer({ repo }, runtime).connect(serverSide);
+      const client = new Client({ name: "test", version: "1.0.0" });
+      await client.connect(clientSide);
+      return client;
+    };
+    const runtimeWith = (collector: McpRuntime["collect"]): McpRuntime => ({
+      collect: collector,
+      dependencyReport: async () => {
+        throw new Error("unused");
+      },
+      currentRepository: async () => repo,
+      now: clock,
+    });
+    const textOf = (result: { content?: unknown }): string =>
+      Array.isArray(result.content) ? String((result.content[0] as { text?: unknown }).text) : "";
+
+    it("returns the CLI report through the real registration, never offering a checkpoint", async () => {
+      const seen: string[] = [];
+      const client = await connect(runtimeWith(liveCollect(seen)));
+      const result = await client.callTool({
+        name: "triage_briefing",
+        arguments: { mode: "briefing", last: "48h", agent: "ana", maxChars: 1000 },
+      });
+      await client.close();
+      const body = envelope.parse(result.structuredContent);
+      expect(body).toMatchObject({ kind: "repository-briefing", status: "complete", error: null });
+      expect(seen).toEqual([`last:${inside(48)}`]);
+      const report = body.result as CatchUpReport & { offline: unknown };
+      expect(report.kind).toBe("repository-briefing");
+      expect(report.checkpoint).toEqual(mcpCheckpointPolicy);
+      expect(report.offline).toBeNull();
+      // Parity: the CLI's JSON over the same evidence differs only by its checkpoint offer.
+      let out = "";
+      const cli: Runtime = {
+        collect: liveCollect(),
+        currentRepository: async () => repo,
+        now: clock,
+        updateCheck: async () => ({ status: "skipped", reason: "test" }) as never,
+        briefingFiles: {
+          checkpointSince: async () => {
+            throw new Error("no checkpoint read");
+          },
+          cachedSnapshot: async () => {
+            throw new Error("no cache read");
+          },
+          atomicJson: async () => {
+            throw new Error("no write");
+          },
+        },
+      };
+      expect(
+        await main(
+          [
+            "briefing",
+            "--no-update-check",
+            "--repo",
+            repo,
+            "--last",
+            "48h",
+            "--agent",
+            "ana",
+            "--json",
+          ],
+          async (t) => void (out = t),
+          cli,
+        ),
+      ).toBe(0);
+      const cliReport = JSON.parse(out) as CatchUpReport;
+      expect(cliReport.checkpoint.candidate).toBe(t0);
+      expect({ ...report, checkpoint: null }).toEqual({ ...cliReport, checkpoint: null });
+      // The budget keeps window, scope and completeness lines and states the read-only policy.
+      const text = textOf(result);
+      expect(text).toMatch(/^Window /m);
+      expect(text).toContain("Scope");
+      expect(text.toLowerCase()).toContain("complete");
+      expect(text).not.toContain("advanced: true");
+    });
+
+    it("defaults to the last 24 hours and keeps the action mode unchanged", async () => {
+      const seen: string[] = [];
+      const client = await connect(runtimeWith(liveCollect(seen)));
+      const briefing = await client.callTool({
+        name: "triage_briefing",
+        arguments: { mode: "briefing" },
+      });
+      const actions = await client.callTool({ name: "triage_briefing", arguments: {} });
+      await client.close();
+      expect(envelope.parse(briefing.structuredContent).kind).toBe("repository-briefing");
+      expect(envelope.parse(actions.structuredContent).kind).toBe("briefing");
+      expect(seen).toEqual([`default-last:${inside(24)}`, "plain"]);
+    });
+
+    it("rejects invalid inputs with structured errors before collection", async () => {
+      const seen: string[] = [];
+      const client = await connect(runtimeWith(liveCollect(seen)));
+      for (const args of [
+        { last: "24h" },
+        { mode: "briefing", last: "0h" },
+        { mode: "briefing", last: "24h", since: inside(5) },
+        { mode: "briefing", checkpoint: "/tmp/x.json" },
+        { mode: "briefing", offline: true },
+        { mode: "briefing", cache: "/tmp/x.json" },
+        { mode: "digest" },
+      ]) {
+        const result = await client.callTool({ name: "triage_briefing", arguments: args });
+        expect(result.isError, JSON.stringify(args)).toBe(true);
+      }
+      const future = await client.callTool({
+        name: "triage_briefing",
+        arguments: { mode: "briefing", since: "2026-11-14T00:00:00Z" },
+      });
+      await client.close();
+      expect(envelope.parse(future.structuredContent).error?.code).toBe("invalid-window");
+      expect(seen).toEqual([]);
+    });
+
+    it("reports incomplete evidence as incomplete, not as no change", async () => {
+      const truncated: McpRuntime["collect"] = async (r, o) => {
+        const s = await liveCollect()(r, o);
+        return { ...s, changeEvidence: { ...s.changeEvidence!, complete: false } };
+      };
+      const client = await connect(runtimeWith(truncated));
+      const result = await client.callTool({
+        name: "triage_briefing",
+        arguments: { mode: "briefing" },
+      });
+      await client.close();
+      const body = envelope.parse(result.structuredContent);
+      expect(body.status).toBe("incomplete");
+      expect((body.result as CatchUpReport).checkpoint.candidate).toBeNull();
+      expect(textOf(result)).toContain("INCOMPLETE");
+    });
+
+    it("returns a cancelled error, not a partial report, when the request is aborted", async () => {
+      const controller = new AbortController();
+      const cancelling: McpRuntime["collect"] = async (_r, o) => {
+        controller.abort();
+        o?.signal?.throwIfAborted();
+        throw new Error("collection should have observed the abort");
+      };
+      const client = await connect(runtimeWith(cancelling));
+      const result = await client
+        .callTool(
+          { name: "triage_briefing", arguments: { mode: "briefing" } },
+          { signal: controller.signal },
+        )
+        .catch((error: unknown) => error);
+      await client.close();
+      // Either the client gives up locally or the server answers with a cancelled envelope.
+      if (result instanceof Error) expect(result.message.toLowerCase()).toMatch(/abort|cancel/);
+      else
+        expect(
+          envelope.parse((result as { structuredContent: unknown }).structuredContent).error?.code,
+        ).toBe("cancelled");
+    });
+  });
 });
 
 describe("briefing command: CLI, checkpoint and offline cache (#170)", () => {
