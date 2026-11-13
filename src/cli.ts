@@ -100,7 +100,8 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
                         in the mapped native field with provenance (estimate --help)
   pr N                  Why is pull request N not progressing? Every blocker at once
   pr N --history        Why does PR N keep failing review? Rounds, findings, recurring files
-  claim N --agent NAME [--branch B] [--platform P] [--dry-run]  Claim an eligible ticket
+  claim N --agent NAME [--branch B] [--platform P] [--rework] [--dry-run]  Claim an eligible ticket;
+                        --rework reclaims your own awaiting-review issue to fix review feedback
   release N --agent NAME --as ready|incomplete|parked|done [--note TEXT] [--pr URL|--change URL]
                         [--dry-run]  Hand over your claim in one operation: record the outcome,
                         release agent:NAME and set readiness (ready; incomplete=parked, still
@@ -285,6 +286,7 @@ export function workflowArgumentsFor(command: "claim" | "needs-human" | "release
       agent: { type: "string" },
       branch: { type: "string" },
       platform: { type: "string" },
+      rework: { type: "boolean" },
       designer: { type: "string" },
       why: { type: "string" },
       question: { type: "string", multiple: true },
@@ -296,7 +298,7 @@ export function workflowArgumentsFor(command: "claim" | "needs-human" | "release
   });
   const usage =
     command === "claim"
-      ? "Usage: github-triage claim N --agent NAME [--branch BRANCH] [--platform P] [--dry-run] [--json]"
+      ? "Usage: github-triage claim N --agent NAME [--branch BRANCH] [--platform P] [--rework] [--dry-run] [--json]"
       : command === "release"
         ? releaseUsage
         : "Usage: github-triage needs-human N --agent NAME --designer NAME --why TEXT --question TEXT [--question TEXT...] [--dry-run] [--json]";
@@ -315,7 +317,14 @@ export function workflowArgumentsFor(command: "claim" | "needs-human" | "release
   };
   const releaseOnly = values.as ?? values.note ?? values.pr ?? values.change;
   if (command === "release") {
-    if (values.designer || values.why || values.question || values.branch || values.platform)
+    if (
+      values.designer ||
+      values.why ||
+      values.question ||
+      values.branch ||
+      values.platform ||
+      values.rework
+    )
       throw new Error(usage);
     const outcome = claimPolicy.outcomes.find((o) => o === values.as);
     if (!outcome)
@@ -334,12 +343,17 @@ export function workflowArgumentsFor(command: "claim" | "needs-human" | "release
   if (releaseOnly !== undefined) throw new Error(usage);
   if (command === "claim") {
     if (values.designer || values.why || values.question) throw new Error(usage);
-    return { ...common, branch: values.branch, platform: values.platform };
+    return {
+      ...common,
+      branch: values.branch,
+      platform: values.platform,
+      rework: !!values.rework,
+    };
   }
   const questions = (values.question ?? []).map((q) => q.trim()).filter(Boolean);
   if (!values.designer || !name.test(values.designer) || !values.why?.trim() || !questions.length)
     throw new Error(usage);
-  if (values.branch || values.platform) throw new Error(usage);
+  if (values.branch || values.platform || values.rework) throw new Error(usage);
   return { ...common, designer: values.designer, why: values.why.trim(), questions };
 }
 export function argumentsFor(args: string[]) {

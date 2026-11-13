@@ -103,6 +103,12 @@ export interface ClaimRequest {
   agent: string;
   branch?: string | null;
   platform?: string | null;
+  /**
+   * Explicit review-rework reclaim (doc/design/workflow.md "Focused handoff"): accepted only on
+   * an awaiting-review issue with an open PR whose latest recorded handoff is the caller's own
+   * `done` release. Never makes awaiting-review work generally pickable.
+   */
+  rework?: boolean;
 }
 export type ReleaseOutcome = (typeof claimPolicy.outcomes)[number];
 export interface ReleaseRequest {
@@ -190,6 +196,24 @@ function releaseRecords(
     }
   }
   return records.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+/** The most recent parsable release record on the issue, whoever made it. */
+function latestRelease(comments: { body: string; createdAt?: string }[]): ReleaseRecord | null {
+  const records: ReleaseRecord[] = [];
+  for (const c of comments) {
+    for (const m of c.body.matchAll(/<!-- github-triage:release:[0-9a-f]+ /g)) {
+      const start = m.index + m[0].length;
+      const end = c.body.indexOf(" -->", start);
+      try {
+        const r = JSON.parse(c.body.slice(start, end)) as ReleaseRecord;
+        if (r.v === 1 && typeof r.agent === "string")
+          records.push({ ...r, createdAt: c.createdAt ?? "" });
+      } catch {
+        // Not a parsable record: never treated as authorisation.
+      }
+    }
+  }
+  return records.sort((a, b) => a.createdAt.localeCompare(b.createdAt)).at(-1) ?? null;
 }
 function labelSteps(
   repository: string,
@@ -305,7 +329,7 @@ export async function planClaim(
   request: ClaimRequest,
   query: GraphQuery = ghQuery,
 ): Promise<ClaimPlan> {
-  const { number, agent, branch = null, platform = null } = request;
+  const { number, agent, branch = null, platform = null, rework = false } = request;
   const { item, claims, repoLabels } = await readTicket(repository, number, agent, query);
   const triage = `github-triage --repo ${repository}`;
   // Subcommands are dispatched on the first argument, so they must precede options.
@@ -353,12 +377,18 @@ export async function planClaim(
       { ...facts, activeClaims: ownOther.map((c) => ({ number: c.number, url: c.url })) },
       `${agent} already has an active claim; one active claim per agent.`,
       [
-        ...ownOther.map((c) =>
+        // Alternatives are separate executable entries: never a shell comment inside a command,
+        // which would swallow the trailing --repo.
+        ...ownOther.flatMap((c) => [
           command(
-            `release ${c.number} --agent ${agent} --as incomplete --note '<what was done and what remains>'   # or --as ready if untouched, --as done --pr URL when finished`,
+            `release ${c.number} --agent ${agent} --as incomplete --note '<what was done and what remains>'`,
           ),
+          command(`release ${c.number} --agent ${agent} --as ready`),
+          command(`release ${c.number} --agent ${agent} --as done --pr '<pull request URL>'`),
+        ]),
+        command(
+          `claim ${number} --agent ${agent}${branch ? ` --branch ${branch}` : ""}${rework ? " --rework" : ""}`,
         ),
-        command(`claim ${number} --agent ${agent}${branch ? ` --branch ${branch}` : ""}`),
       ],
     );
   const op = marker("claim", [repository, number, agent]);
@@ -399,6 +429,29 @@ export async function planClaim(
       ...(commented ? {} : { recheck: { agent } }),
     };
   }
+  const openPrs = item.closedByPullRequestsReferences.nodes.filter((p) => p.state === "OPEN");
+  const lastRelease = latestRelease(item.comments.nodes);
+  // Conservative authorisation: awaiting review, an open PR, and the caller's own done handoff
+  // is the latest recorded release on this issue.
+  const reworkable =
+    label(item, claimPolicy.awaitingReview) &&
+    openPrs.length > 0 &&
+    lastRelease?.agent === agent &&
+    lastRelease.outcome === "done";
+  const reworkCommand = command(
+    `claim ${number} --agent ${agent}${branch ? ` --branch ${branch}` : ""} --rework`,
+  );
+  if (rework && !reworkable)
+    return refuse(
+      "REWORK_NOT_AUTHORISED",
+      {
+        ...facts,
+        pullRequests: openPrs.map((p) => p.url),
+        ...(lastRelease ? { lastReleasedBy: lastRelease.agent } : {}),
+      },
+      `Review rework needs ${claimPolicy.awaitingReview}, an open pull request, and ${agent}'s own done handoff as the latest release on #${number}.`,
+      [`${triage} --issue ${number}`, `${triage} --agent ${agent}`],
+    );
   if (
     label(item, claimPolicy.question) ||
     label(item, claimPolicy.needsDesign) ||
@@ -418,12 +471,12 @@ export async function planClaim(
       `The ticket is ${held.join(" and ")}; resolve that before claiming, even if a ready label remains.`,
       [`${triage} --issue ${number}`, `${triage} --agent ${agent}`],
     );
-  if (!claimPolicy.pickable.some((l) => label(item, l)))
+  if (!rework && !claimPolicy.pickable.some((l) => label(item, l)))
     return refuse(
       "NOT_READY",
       facts,
-      `The ticket needs ${claimPolicy.pickable.join(" or ")} to be picked up.`,
-      [`${triage} --agent ${agent}`],
+      `The ticket needs ${claimPolicy.pickable.join(" or ")} to be picked up.${reworkable ? " To fix review feedback on your own pull request, reclaim it explicitly with --rework." : ""}`,
+      [...(reworkable ? [reworkCommand] : []), `${triage} --agent ${agent}`],
     );
   if (!item.issueDependenciesSummary)
     return refuse(
@@ -442,13 +495,15 @@ export async function planClaim(
       "Open native blockers must close first.",
       [command(`deps ${number}`), `${triage} --agent ${agent}`],
     );
-  const openPrs = item.closedByPullRequestsReferences.nodes.filter((p) => p.state === "OPEN");
-  if (openPrs.length)
+  if (openPrs.length && !rework)
     return refuse(
       "HAS_OPEN_PR",
       { ...facts, pullRequests: openPrs.map((p) => p.url) },
       "An open pull request already addresses this ticket; follow up on it instead.",
-      openPrs.map((p) => `gh pr view ${p.number} --repo ${repository}`),
+      [
+        ...(reworkable ? [reworkCommand] : []),
+        ...openPrs.map((p) => `gh pr view ${p.number} --repo ${repository}`),
+      ],
     );
   const restrictions = facts.labels
     .filter((l) => l.startsWith(claimPolicy.platformPrefix))
@@ -468,7 +523,9 @@ export async function planClaim(
       `The ticket is restricted to ${restrictions.join(", ")}.`,
       [`${triage} --agent ${agent}`],
     );
-  const remove = claimPolicy.pickable.filter((l) => label(item, l));
+  const remove = [...claimPolicy.pickable, ...(rework ? [claimPolicy.awaitingReview] : [])].filter(
+    (l) => label(item, l),
+  );
   // A fresh acquisition (label absent) always explains itself; retries of this acquisition are
   // handled above, where the label is already present.
   const changes: PlanStep[] = [];
@@ -510,7 +567,7 @@ export async function planClaim(
       "--repo",
       repository,
       "--body",
-      `Claimed by \`${agent}\`${branch ? ` on branch \`${branch}\`` : ""} with \`github-triage claim\`. Removed: ${remove.map((l) => `\`${l}\``).join(", ")}.\n\n${op}`,
+      `Claimed by \`${agent}\`${branch ? ` on branch \`${branch}\`` : ""} with \`github-triage claim\`${rework ? " for review rework" : ""}. Removed: ${remove.map((l) => `\`${l}\``).join(", ")}.\n\n${op}`,
     ],
   });
   return { ok: true, noop: false, facts, changes, recheck: { agent } };

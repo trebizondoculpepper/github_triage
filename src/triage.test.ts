@@ -61,6 +61,29 @@ import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
 
 const repo = "example/project";
 const time = "2026-11-12T10:00:00.000Z";
+/** Split a command as a POSIX shell would: single quotes, whitespace, and `#` comments. */
+const shellWords = (command: string): string[] => {
+  const words: string[] = [];
+  let word: string | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (ch === "'") {
+      const end = command.indexOf("'", i + 1);
+      if (end < 0) throw new Error(`Unterminated quote: ${command}`);
+      word = (word ?? "") + command.slice(i + 1, end);
+      i = end;
+    } else if (ch === "\\") {
+      word = (word ?? "") + (command[i + 1] ?? "");
+      i++;
+    } else if (/\s/.test(ch)) {
+      if (word !== null) words.push(word);
+      word = null;
+    } else if (ch === "#" && word === null) break;
+    else word = (word ?? "") + ch;
+  }
+  if (word !== null) words.push(word);
+  return words;
+};
 const page = <T>(nodes: T[], more = false, cursor: string | null = null): Page<T> => ({
   nodes,
   pageInfo: { hasNextPage: more, endCursor: cursor },
@@ -1540,6 +1563,11 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
     return { query, run, writes };
   };
   const at = (hoursAgo: number) => new Date(Date.parse(time) - hoursAgo * 3_600_000).toISOString();
+  /** A recorded release handoff comment, as `release` writes it. */
+  const doneBy = (agent: string, createdAt = "2026-11-12T10:00:00Z", outcome = "done") => ({
+    body: `Handoff.\n\n<!-- github-triage:release:0123456789abcdef ${JSON.stringify({ v: 1, agent, outcome, target: "status:awaiting-review", remove: [], retained: [], claimedAt: null })} -->`,
+    createdAt,
+  });
   const claim = (t: Ticket, extra = {}) =>
     planClaim(repo, { number: 7, agent: "kavya", ...extra }, fake(t).query);
 
@@ -1627,6 +1655,84 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
     expect(
       (await claim({ labels: ["status:incomplete", "platform:ori"] }, { platform: "ori" })).ok,
     ).toBe(true);
+  });
+  it("every suggested command keeps --repo executable: no shell comment swallows it", async () => {
+    const plans = [
+      await claim({ labels: ["status:ready"], claims: [9] }, { branch: "issue-7" }),
+      await claim({ labels: ["status:ready"], blockedBy: 1 }),
+      await claim({ labels: ["status:ready", "platform:ori"] }),
+      await claim({
+        labels: ["status:awaiting-review"],
+        openPrs: [70],
+        comments: [doneBy("kavya")],
+      }),
+      await claim({ labels: ["status:ready"], openPrs: [70], comments: [doneBy("kavya")] }),
+    ];
+    const commands = plans.flatMap((p) => refused(p).recovery);
+    expect(commands.filter((c) => c.startsWith("github-triage ")).length).toBeGreaterThan(5);
+    for (const c of commands) {
+      expect(c).not.toMatch(/(^|\s)#/);
+      const words = shellWords(c);
+      if (words[0] !== "github-triage" && words[0] !== "gh") continue;
+      expect(words.indexOf("--repo"), c).toBeGreaterThan(0);
+      expect(words[words.indexOf("--repo") + 1], c).toBe(repo);
+    }
+    // The alternatives to the active claim are separate entries, each a whole command.
+    const alternatives = refused(plans[0]).recovery.filter((c) => c.includes("release 9"));
+    expect(alternatives.map((c) => shellWords(c)[5])).toEqual(["--as", "--as", "--as"]);
+    expect(alternatives.map((c) => shellWords(c)[6])).toEqual(["incomplete", "ready", "done"]);
+  });
+  describe("review rework reclaim (doc/design/workflow.md: explicit reclaim)", () => {
+    const waiting = (extra: Partial<Ticket> = {}): Ticket => ({
+      labels: ["status:awaiting-review"],
+      openPrs: [70],
+      comments: [doneBy("kavya")],
+      ...extra,
+    });
+    it("refuses a plain claim on awaiting review but offers the explicit --rework reclaim", async () => {
+      const plan = await claim(waiting());
+      expect(plan).toMatchObject({ ok: false, error: "NOT_READY" });
+      expect(refused(plan).recovery[0]).toBe(
+        `github-triage claim 7 --agent kavya --rework --repo ${repo}`,
+      );
+    });
+    it("reclaims the caller's own awaiting-review issue: claims and leaves review state", async () => {
+      const env = fake({ ...waiting(), repoLabels: ["agent:kavya"] });
+      const plan = await planClaim(repo, { number: 7, agent: "kavya", rework: true }, env.query);
+      const result = await applyPlan(repo, plan, env);
+      expect(result.exitCode).toBe(0);
+      expect(env.writes[0]).toEqual([
+        "issue",
+        "edit",
+        "7",
+        "--repo",
+        repo,
+        "--add-label",
+        "agent:kavya",
+        "--remove-label",
+        "status:awaiting-review",
+      ]);
+      expect(env.writes[1].at(-1)).toMatch(/for review rework/);
+    });
+    it("is ownership-safe: refuses without the caller's own latest done handoff and an open PR", async () => {
+      const cases: Ticket[] = [
+        waiting({ comments: [doneBy("other")] }),
+        waiting({ comments: [doneBy("kavya", "2026-11-12T09:00:00Z"), doneBy("other")] }),
+        waiting({ comments: [doneBy("kavya", undefined, "incomplete")] }),
+        waiting({ comments: [] }),
+        waiting({ openPrs: [] }),
+        waiting({ labels: ["status:ready"] }),
+        waiting({ labels: ["status:awaiting-review", "agent:other"] }),
+      ];
+      for (const t of cases) {
+        const plan = await claim(t, { rework: true });
+        expect(plan.ok, JSON.stringify(t)).toBe(false);
+        expect(["REWORK_NOT_AUTHORISED", "OWNED_BY_OTHER"]).toContain(refused(plan).error);
+      }
+      // Another agent is never offered the rework reclaim.
+      const other = await planClaim(repo, { number: 7, agent: "nicole" }, fake(waiting()).query);
+      expect(refused(other).recovery.join(" ")).not.toMatch(/--rework/);
+    });
   });
   it("reports a competing claim found after writing instead of resolving it", async () => {
     const env = fake({
@@ -6060,6 +6166,22 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
     );
     expect(env.s.comments[0].body).toContain("Parser done; CLI remains.");
     expect(env.s.comments[0].body).toMatch(/<!-- github-triage:release:/);
+  });
+  it("every suggested release command keeps --repo executable", async () => {
+    const note = "Fix # parser, it's half done";
+    const plans = [
+      await release(live({ labels: [] })),
+      await release(live({ labels: ["agent:kavya"], state: "CLOSED" }), { pr }),
+      await release(live({ labels: ["agent:kavya"] }), { note }),
+    ];
+    const commands = plans.flatMap((p) => (p.ok ? [p.retry!] : [...p.recovery]));
+    expect(commands.length).toBeGreaterThan(3);
+    for (const c of commands) {
+      const words = shellWords(c);
+      if (words[0] !== "github-triage" && words[0] !== "gh") continue;
+      expect(words[words.indexOf("--repo") + 1], c).toBe(repo);
+    }
+    expect(shellWords(accepted(plans[2]).retry!)).toContain(note);
   });
   it("releases without a note: never a gate, but noted; parked maps to status:incomplete", async () => {
     const env = live({ labels: ["agent:kavya"] });
