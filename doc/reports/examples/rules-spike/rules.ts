@@ -112,7 +112,7 @@ export interface Diagnostic {
   rules: string[];
   detail: string;
 }
-interface Hit {
+export interface Hit {
   ticket: number;
   action: Action;
   modality: Modality;
@@ -245,6 +245,11 @@ const actionEn = {
   pick_up: "pick up the ticket",
   refresh_evidence: "refresh its evidence before deciding",
   confirm_platform: "confirm your platform before claiming",
+  // Added by the plausibility suite (#154); only plausibility.ts rules use them.
+  continue: "continue your own claimed work",
+  estimate: "estimate its complexity",
+  wait: "wait on the pull request",
+  fix_labels: "correct its conflicting labels",
 };
 
 /** Compile one rule to English from the same record and fact table. */
@@ -256,7 +261,10 @@ export const englishGuide = (rules: Rule[] = RULES): string =>
   [...rules.map(english), `Order for pick_up: ${ORDER.map((o) => o.en).join(", ")}.`].join("\n");
 
 /** Static checks: unknown facts, self-contradictory rules, and contradictory rule pairs. */
-export function checkRules(rules: Rule[] = RULES): Diagnostic[] {
+export function checkRules(
+  rules: Rule[] = RULES,
+  facts: Record<string, unknown> = FACTS,
+): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   const key = (r: Rule): string =>
     r.when
@@ -265,7 +273,7 @@ export function checkRules(rules: Rule[] = RULES): Diagnostic[] {
       .join("&");
   for (const r of rules) {
     for (const c of r.when)
-      if (!FACTS[c.fact])
+      if (!facts[c.fact])
         diagnostics.push({ kind: "unknown-fact", rules: [r.id], detail: `unknown fact ${c.fact}` });
     const pos = new Set(r.when.filter((c) => !c.not).map((c) => c.fact));
     if (r.when.some((c) => c.not && pos.has(c.fact)))
@@ -294,7 +302,7 @@ export function checkRules(rules: Rule[] = RULES): Diagnostic[] {
 }
 
 /** Combine rule hits per (ticket, action): must_not wins over may/must, and the override is shown. */
-function decide(hits: Hit[]): Decision[] {
+export function decide(hits: Hit[]): Decision[] {
   const byKey = new Map<string, Hit[]>();
   for (const h of hits) {
     const k = `${h.ticket}:${h.action}`;
