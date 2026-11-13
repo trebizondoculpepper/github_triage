@@ -2429,3 +2429,53 @@ describe("post-write ownership check with incomplete labels", () => {
     expect(result.conflict).toMatch(/ownership is unverified/);
   });
 });
+
+describe("addressed attention for --agent (#3, doc/design/briefings.md)", () => {
+  it("orders attention to the viewer first, then owned work, then pickup; never a claim", async () => {
+    const { compactBriefing, compactText } = await import("./compact.js");
+    const addressed = issue(20, ["status:parked", "attention:reader", "origin:farhad", "agent:bo"]);
+    const other = issue(21, ["attention:someone"]);
+    const mine = issue(22, ["agent:reader"]);
+    const ready = issue(23, ["status:ready"]);
+    const data = snapshot([ready, mine, other, addressed], []);
+    const expanded = briefing(data, { limit: 100, agent: "reader" }, new Date(time));
+    const compact = compactBriefing(data, { limit: 10, agent: "reader" }, expanded);
+    expect(compact.actions.items.slice(0, 2)).toEqual([addressed.url, mine.url]);
+    expect(compact.actions.items.indexOf(ready.url)).toBeGreaterThan(1);
+    expect(compact.sections.addressed.items).toEqual([addressed.url]);
+    const subject = compact.subjects.find((s) => s.url === addressed.url)!;
+    expect(subject.owners).toEqual(["agent:bo"]);
+    expect(subject.findings[0].reason).toMatch(/raised by farhad.*does not claim/);
+    expect(compactText(compact).indexOf("#20")).toBeLessThan(compactText(compact).indexOf("#22"));
+    // Another agent's attention never addresses this viewer.
+    expect(compact.sections.addressed.items).not.toContain(other.url);
+  });
+  it("says addressed filtering is unavailable without --agent", async () => {
+    const { compactBriefing } = await import("./compact.js");
+    const data = snapshot([issue(20, ["attention:reader"])], []);
+    const compact = compactBriefing(
+      data,
+      { limit: 10 },
+      briefing(data, { limit: 100 }, new Date(time)),
+    );
+    expect(compact.sections.addressed.items).toEqual([]);
+    expect(compact.guidance).toMatch(/No --agent given/);
+  });
+});
+
+describe("addressed attention in the expanded briefing (#3)", () => {
+  it("is a registered rule, so --full keeps it for parked and other-owned work", () => {
+    const addressed = issue(30, ["status:parked", "attention:reader", "agent:bo"]);
+    const full = briefing(
+      snapshot([addressed, issue(31)], []),
+      { limit: 100, agent: "reader" },
+      new Date(time),
+    );
+    expect(full.actions.items[0]).toMatchObject({
+      rule: "addressed-attention",
+      target: addressed.url,
+    });
+    const anonymous = briefing(snapshot([addressed], []), { limit: 100 }, new Date(time));
+    expect(anonymous.actions.items.some((a) => a.rule === "addressed-attention")).toBe(false);
+  });
+});
