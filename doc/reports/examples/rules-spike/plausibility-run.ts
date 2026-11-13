@@ -33,10 +33,13 @@ for (const id of ["S1", "S3", "S4", "S11"]) {
   console.log("  offered, in order:");
   for (const d of o.result.plan)
     console.log(
-      `    ${d.ticket}:${d.action} ${d.modality} because ${d.because.join(",")} [${d.facts.join(",")}]${d.overrides.length ? ` overrides ${d.overrides.join(",")}` : ""}`,
+      `    ${d.ticket}:${d.action}${d.alsoActions.length ? ` (also ${d.alsoActions.join(",")})` : ""} ${d.modality} because ${d.because.join(",")} [${d.facts.join(",")}]${d.overrides.length ? ` overrides ${d.overrides.join(",")}` : ""}`,
     );
+  const offered = new Set(
+    o.result.plan.flatMap((d) => [d.action, ...d.alsoActions].map((a) => `${d.ticket}:${a}`)),
+  );
   console.log("  not offered:");
-  for (const d of o.result.decisions.filter((d) => !o.result.plan.includes(d)))
+  for (const d of o.result.decisions.filter((d) => !offered.has(`${d.ticket}:${d.action}`)))
     console.log(
       `    ${d.ticket}:${d.action} ${d.modality} because ${d.because.join(",")} [${d.facts.join(",")}]${d.overrides.length ? ` overrides ${d.overrides.join(",")}` : ""}`,
     );

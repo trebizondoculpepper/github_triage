@@ -6,6 +6,8 @@
  * permitted decisions into one ordered list of offered work following the briefing action
  * groups (doc/design/briefings.md): addressed attention, actionable PR follow-up, own active
  * work, eligible pickup, then optional estimation (doc/design/complexity-estimation.md).
+ * Each subject (a ticket together with its linked PR) is offered once, in its first matching
+ * group, carrying the reasons of every permitted action; all decisions stay for explanations.
  *
  * Every scenario declares complete synthetic facts and its expectations as data before any
  * evaluation. Checks compare rule IDs, facts, modality and overrides, never English wording.
@@ -135,9 +137,14 @@ export interface PlanItem {
   facts: string[];
   overrides: string[];
 }
+/** One offered subject: its first matching action plus every other permitted work action. */
+export interface OfferedItem extends PlanItem {
+  /** Later-group permitted actions folded into this item, in group order. */
+  alsoActions: Action[];
+}
 export interface PEvaluation {
-  /** Offered work (must/may decisions in a work group), in order. */
-  plan: PlanItem[];
+  /** Offered work, one item per subject (ticket and linked PR), in order. */
+  plan: OfferedItem[];
   decisions: PlanItem[];
 }
 
@@ -199,15 +206,29 @@ export function evaluate(
     if (!found) throw new Error(`no ticket ${n}`);
     return found;
   };
-  const plan = decisions
+  const permitted = decisions
     .filter((d) => GROUP[d.action] !== undefined && (d.modality === "must" || d.modality === "may"))
-    .sort(
-      (x, y) =>
-        (GROUP[x.action] ?? 0) - (GROUP[y.action] ?? 0) ||
-        (x.action === "pick_up"
-          ? comparePickup(ticket(x.ticket), ticket(y.ticket), sort)
-          : x.ticket - y.ticket),
-    );
+    .sort((x, y) => (GROUP[x.action] ?? 0) - (GROUP[y.action] ?? 0));
+  // A ticket record carries its linked PR, so the ticket number identifies the whole subject.
+  const bySubject = new Map<number, OfferedItem>();
+  for (const d of permitted) {
+    const first = bySubject.get(d.ticket);
+    if (!first) {
+      bySubject.set(d.ticket, { ...d, alsoActions: [] });
+      continue;
+    }
+    first.alsoActions.push(d.action);
+    first.because = [...new Set([...first.because, ...d.because])];
+    first.facts = [...new Set([...first.facts, ...d.facts])];
+    first.overrides = [...new Set([...first.overrides, ...d.overrides])];
+  }
+  const plan = [...bySubject.values()].sort(
+    (x, y) =>
+      (GROUP[x.action] ?? 0) - (GROUP[y.action] ?? 0) ||
+      (x.action === "pick_up"
+        ? comparePickup(ticket(x.ticket), ticket(y.ticket), sort)
+        : x.ticket - y.ticket),
+  );
   return { plan, decisions };
 }
 
@@ -239,6 +260,8 @@ export interface Expectation {
   /** Exact set of inspect decisions. */
   inspect?: Key[];
   explain?: Explanation[];
+  /** Consolidated offered items: folded actions and the union of reasons they carry. */
+  carries?: { item: Key; alsoActions: Action[]; because: string[] }[];
   /** Static diagnostic kinds for the scenario's rule set, sorted. */
   diagnostics?: Diagnostic["kind"][];
 }
@@ -330,13 +353,14 @@ export const SCENARIOS: readonly Scenario[] = Object.freeze([
     ],
     agent: me,
     expect: {
-      offered: ["5:respond", "6:pick_up", "5:pick_up", "7:pick_up", "8:pick_up"],
-      before: [
-        ["5:respond", "6:pick_up"],
-        ["6:pick_up", "5:pick_up"],
+      offered: ["5:respond", "6:pick_up", "7:pick_up", "8:pick_up"],
+      before: [["5:respond", "6:pick_up"]],
+      forbidden: ["5:pick_up", "7:respond", "8:respond"],
+      explain: [
+        { item: "5:respond", modality: "must", because: ["R1"], facts: ["addressed"] },
+        { item: "5:pick_up", modality: "may", because: ["R9"] },
       ],
-      forbidden: ["7:respond", "8:respond"],
-      explain: [{ item: "5:respond", modality: "must", because: ["R1"], facts: ["addressed"] }],
+      carries: [{ item: "5:respond", alsoActions: ["pick_up"], because: ["R1", "R9"] }],
     },
   },
   {
@@ -369,12 +393,10 @@ export const SCENARIOS: readonly Scenario[] = Object.freeze([
     tickets: estimationTickets,
     agent: meSizing,
     expect: {
-      offered: ["20:pick_up", "20:estimate", "21:estimate"],
-      before: [
-        ["20:pick_up", "20:estimate"],
-        ["20:pick_up", "21:estimate"],
-      ],
-      forbidden: ["21:pick_up", "22:pick_up", "22:estimate"],
+      offered: ["20:pick_up", "21:estimate"],
+      before: [["20:pick_up", "21:estimate"]],
+      forbidden: ["20:estimate", "21:pick_up", "22:pick_up", "22:estimate"],
+      carries: [{ item: "20:pick_up", alsoActions: ["estimate"], because: ["P7", "R9"] }],
       explain: [
         { item: "21:estimate", modality: "may", because: ["P7"], facts: ["!estimated"] },
         { item: "21:pick_up", modality: "must_not", because: ["R5"], overrides: ["R9"] },
@@ -565,6 +587,19 @@ export function runScenario(s: Scenario): Outcome {
   if (e.pickupOrder) {
     const pick = result.plan.filter((d) => d.action === "pick_up").map((d) => d.ticket);
     check(same(pick, e.pickupOrder), `pickup ${j(pick)} != ${j(e.pickupOrder)}`);
+  }
+  const subjects = result.plan.map((d) => d.ticket);
+  check(new Set(subjects).size === subjects.length, `subject offered twice in ${j(offered)}`);
+  for (const c of e.carries ?? []) {
+    const d = result.plan.find((d) => key(d) === c.item);
+    check(
+      d !== undefined && same(d.alsoActions, c.alsoActions),
+      `${c.item} also ${j(d?.alsoActions)}`,
+    );
+    check(
+      d !== undefined && same(sorted(d.because), sorted(c.because)),
+      `${c.item} carries ${j(d?.because)}`,
+    );
   }
   for (const f of e.forbidden ?? []) check(!offered.includes(f), `forbidden ${f} offered`);
   if (e.inspect) {
