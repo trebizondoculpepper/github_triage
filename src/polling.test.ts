@@ -552,6 +552,33 @@ describe("optional polling and domain events (#32)", () => {
     w.stop();
   });
 
+  it("rejects an already-cancelled reader without leaving an unhandled rejection", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => void unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      let started = 0;
+      const abortAware: Collect = (_repository, options) => {
+        started++;
+        return new Promise<Snapshot>((_resolve, reject) =>
+          options?.signal?.addEventListener("abort", () => reject(new Error("aborted"))),
+        );
+      };
+      const shared = sharedCollect(abortAware);
+      await expect(shared(repo, { signal: AbortSignal.abort() })).rejects.toBeTruthy();
+      expect(started).toBe(0);
+      // A reader that joins and then leaves (abort) must not orphan a rejecting collection.
+      const controller = new AbortController();
+      const pending = shared(repo, { signal: controller.signal });
+      controller.abort();
+      await expect(pending).rejects.toBeTruthy();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
   it("aborts sibling requests when a shared collection fails", async () => {
     let sibling: AbortSignal | undefined;
     // One request fails while its sibling is still paginating under the same signal.

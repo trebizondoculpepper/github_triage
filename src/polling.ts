@@ -933,6 +933,10 @@ export function sharedCollect(collect: Collect): Collect {
     const { signal, ...rest } = options ?? {};
     if (Object.values(rest).some((value) => value !== undefined))
       return collect(repository, options);
+    // A caller that is already cancelled never starts or joins a shared collection, so no
+    // shared promise can be left rejecting without a handler.
+    if (signal?.aborted)
+      return Promise.reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
     let entry = inflight.get(repository);
     if (!entry) {
       const controller = new AbortController();
@@ -951,6 +955,9 @@ export function sharedCollect(collect: Collect): Collect {
             if (inflight.get(repository) === created) inflight.delete(repository);
           }),
       };
+      // Waiters observe the outcome through their own promises; this keeps an abandoned
+      // shared collection (every waiter left) from becoming an unhandled rejection.
+      created.promise.catch(() => {});
       entry = created;
       inflight.set(repository, created);
     }
