@@ -15,6 +15,8 @@ const labelColours: Record<string, string> = {
   agent: "1d76db",
   "design:decision-needed": "d93f0b",
   "status:incomplete": "fbca04",
+  "status:awaiting-review": "5319e7",
+  "status:ready": "0e8a16",
 };
 
 /** Labels these commands use, beyond the briefing's existing policy. */
@@ -25,6 +27,13 @@ export const claimPolicy = {
   /** Deliberate non-pickup states that a stale ready label must not override. */
   held: [workflow.blocked, workflow.parked],
   pickable: [workflow.ready, "status:incomplete"],
+  incomplete: "status:incomplete",
+  /** A handed-over contribution with an open PR: out of implementation pickup (#62). */
+  awaitingReview: "status:awaiting-review",
+  /** Release outcomes (#62); parked is a synonym for incomplete, never `status:parked`. */
+  outcomes: ["ready", "incomplete", "parked", "done"] as const,
+  /** Bounded handoff note length. */
+  maxNote: 4000,
   needsDesign: "status:needs-design",
   decisionNeeded: "design:decision-needed",
   question: "question",
@@ -52,6 +61,11 @@ export interface ClaimFacts {
   pullRequests?: string[];
   platforms?: string[];
   platform?: string | null;
+  /** release: the explicit outcome, deliverable and its verified state. */
+  outcome?: string;
+  deliverable?: string | null;
+  pullRequestState?: string | null;
+  target?: string | null;
 }
 export interface ClaimRefusal {
   ok: false;
@@ -67,7 +81,9 @@ export interface ClaimAccepted {
   reason?: string;
   changes: PlanStep[];
   notes?: string[];
-  recheck?: { agent: string };
+  recheck?: { agent: string; release?: { target: string | null } };
+  /** Exact command that safely retries or completes this operation. */
+  retry?: string;
 }
 export type ClaimPlan = ClaimRefusal | ClaimAccepted;
 export type ClaimResult =
@@ -87,6 +103,15 @@ export interface ClaimRequest {
   agent: string;
   branch?: string | null;
   platform?: string | null;
+}
+export type ReleaseOutcome = (typeof claimPolicy.outcomes)[number];
+export interface ReleaseRequest {
+  number: number;
+  agent: string;
+  outcome: ReleaseOutcome;
+  note?: string | null;
+  pr?: string | null;
+  change?: string | null;
 }
 export interface NeedsHumanRequest {
   number: number;
@@ -121,6 +146,7 @@ interface TicketResponse {
     decisionLabel: { name: string } | null;
     needsDesignLabel: { name: string } | null;
     attentionLabel: { name: string } | null;
+    targetLabel?: { name: string } | null;
   } | null;
 }
 
@@ -134,10 +160,11 @@ async function readTicket(
   agent: string,
   query: GraphQuery,
   designer = "",
+  target = "",
 ) {
   const [owner, name] = repository.split("/");
   const data = await query(
-    `query($owner:String!,$name:String!,$number:Int!,$label:String!,$question:String!,$decision:String!,$needsDesign:String!,$attention:String!){repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on PullRequest{number url} ... on Issue{number title url state updatedAt labels(first:100){nodes{name} pageInfo{hasNextPage}} issueDependenciesSummary{blockedBy} blockedBy(first:20){nodes{number url state}} closedByPullRequestsReferences(first:10,includeClosedPrs:false){nodes{number url state}} comments(last:100){nodes{body createdAt}} timelineItems(itemTypes:[LABELED_EVENT],last:50){nodes{... on LabeledEvent{createdAt label{name}}}}}} claims:issues(first:20,states:OPEN,labels:[$label]){nodes{number title url}} ownerLabel:label(name:$label){name} questionLabel:label(name:$question){name} decisionLabel:label(name:$decision){name} needsDesignLabel:label(name:$needsDesign){name} attentionLabel:label(name:$attention){name}}}`,
+    `query($owner:String!,$name:String!,$number:Int!,$label:String!,$question:String!,$decision:String!,$needsDesign:String!,$attention:String!${target ? ",$target:String!" : ""}){repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on PullRequest{number url} ... on Issue{number title url state updatedAt labels(first:100){nodes{name} pageInfo{hasNextPage}} issueDependenciesSummary{blockedBy} blockedBy(first:20){nodes{number url state}} closedByPullRequestsReferences(first:10,includeClosedPrs:false){nodes{number url state}} comments(last:100){nodes{body createdAt}} timelineItems(itemTypes:[LABELED_EVENT],last:50){nodes{... on LabeledEvent{createdAt label{name}}}}}} claims:issues(first:20,states:OPEN,labels:[$label]){nodes{number title url}} ownerLabel:label(name:$label){name} questionLabel:label(name:$question){name} decisionLabel:label(name:$decision){name} needsDesignLabel:label(name:$needsDesign){name} attentionLabel:label(name:$attention){name}${target ? " targetLabel:label(name:$target){name}" : ""}}}`,
     {
       owner,
       name,
@@ -147,6 +174,7 @@ async function readTicket(
       decision: claimPolicy.decisionNeeded,
       needsDesign: claimPolicy.needsDesign,
       attention: designer ? claimPolicy.attention(designer) : "",
+      ...(target ? { target } : {}),
     },
   );
   // The response shape is fixed by the query text above; GitHub's GraphQL schema guarantees
@@ -164,6 +192,7 @@ async function readTicket(
         repo.decisionLabel,
         repo.needsDesignLabel,
         repo.attentionLabel,
+        repo.targetLabel,
       ]
         .filter((l): l is { name: string } => !!l)
         .map((l) => l.name),
@@ -249,9 +278,10 @@ export async function planClaim(
       { ...facts, activeClaims: ownOther.map((c) => ({ number: c.number, url: c.url })) },
       `${agent} already has an active claim; one active claim per agent.`,
       [
-        ...ownOther.map(
-          (c) =>
-            `manual (release is #62, not yet implemented): gh issue edit ${c.number} --repo ${repository} --remove-label ${mine} --add-label status:incomplete   # or status:ready if untouched; then comment why`,
+        ...ownOther.map((c) =>
+          command(
+            `release ${c.number} --agent ${agent} --as incomplete --note '<what was done and what remains>'   # or --as ready if untouched, --as done --pr URL when finished`,
+          ),
         ),
         command(`claim ${number} --agent ${agent}${branch ? ` --branch ${branch}` : ""}`),
       ],
@@ -525,6 +555,222 @@ export async function planNeedsHuman(
   return { ok: true, noop: !changes.length, facts, changes, notes };
 }
 
+/** Live state of a supplied pull request URL; null when it cannot be verified. */
+async function readPullRequest(url: string, query: GraphQuery): Promise<string | null> {
+  try {
+    const data = (await query(
+      `query($url:URI!){resource(url:$url){__typename ... on PullRequest{state}}}`,
+      { url },
+    )) as { resource: { __typename: string; state?: string } | null };
+    return data.resource?.__typename === "PullRequest" ? (data.resource.state ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Plan `release N --agent NAME --as ready|incomplete|parked|done [--note TEXT] [--pr URL|--change URL]`
+ * (#62, doc/design/workflow.md "Focused handoff"). Reads only.
+ *
+ * The outcome is always the agent's explicit choice. Labels change first, so released work is
+ * never left unpickable by a failed comment; the comment carries an operation marker tied to the
+ * claim being released, so a retry completes a missing comment without duplicating one.
+ */
+export async function planRelease(
+  repository: string,
+  request: ReleaseRequest,
+  query: GraphQuery = ghQuery,
+): Promise<ClaimPlan> {
+  const { number, agent, outcome, note = null, pr = null, change = null } = request;
+  const triage = `github-triage --repo ${repository}`;
+  const command = (text: string): string => `github-triage ${text} --repo ${repository}`;
+  const deliverable = pr ?? change;
+  const prState = pr ? await readPullRequest(pr, query) : null;
+  const preliminary =
+    outcome === "ready" ? workflow.ready : outcome === "done" ? null : claimPolicy.incomplete;
+  // Done with an open PR (supplied or linked) awaits review; otherwise contribution-done.
+  const { item, repoLabels } = await readTicket(
+    repository,
+    number,
+    agent,
+    query,
+    "",
+    preliminary ?? claimPolicy.awaitingReview,
+  );
+  if (!item)
+    return refuse("TICKET_NOT_FOUND", { number }, `#${number} must exist.`, [`${triage} --json`]);
+  if (item.__typename !== "Issue")
+    return refuse(
+      "NOT_AN_ISSUE",
+      { number, url: item.url },
+      "Only an issue holds a claim; hand over on the issue the pull request addresses.",
+      [`gh pr view ${number} --repo ${repository}`],
+    );
+  const linkedOpen = item.closedByPullRequestsReferences.nodes.filter((p) => p.state === "OPEN");
+  const openPr = prState === "OPEN" || (!pr && linkedOpen.length > 0);
+  const target = outcome === "done" ? (openPr ? claimPolicy.awaitingReview : null) : preliminary;
+  const facts = {
+    number,
+    url: item.url,
+    title: item.title,
+    state: item.state,
+    labels: item.labels.nodes.map((l) => l.name),
+    owners: owners(item),
+    outcome,
+    deliverable,
+    pullRequestState: pr ? (prState ?? "UNKNOWN") : null,
+    target,
+    ...(linkedOpen.length ? { pullRequests: linkedOpen.map((p) => p.url) } : {}),
+  } satisfies ClaimFacts;
+  if (item.labels.pageInfo?.hasNextPage)
+    return refuse(
+      "EVIDENCE_INCOMPLETE",
+      facts,
+      "More than 100 labels; the caller's claim and readiness cannot be verified, so nothing is changed.",
+      [`${triage} --issue ${number}`, command(`who ${number}`)],
+    );
+  const mine = claimPolicy.owner(agent);
+  const args = [
+    `release ${number} --agent ${agent} --as ${outcome}`,
+    ...(note ? [`--note ${shellQuote(note)}`] : []),
+    ...(pr ? [`--pr ${shellQuote(pr)}`] : []),
+    ...(change ? [`--change ${shellQuote(change)}`] : []),
+  ].join(" ");
+  const retry = command(args);
+  // The operation identity is the claim being released (when its label was last added), so a
+  // retry finds its own comment whatever wording changed, and a later claim gets a new one.
+  const since = (item.timelineItems?.nodes ?? [])
+    .filter((e) => e.label?.name === mine)
+    .map((e) => e.createdAt ?? "")
+    .sort((a, b) => a.localeCompare(b))
+    .at(-1);
+  const op = marker("release", [repository, number, agent, since ?? null]);
+  const recorded = item.comments.nodes.some(
+    (c) => c.body.includes(op) && (!since || !c.createdAt || c.createdAt >= since),
+  );
+  const holds = label(item, mine);
+  if (!holds && recorded)
+    return {
+      ok: true,
+      noop: true,
+      facts,
+      reason: `Handoff already recorded and ${agent}'s claim already released.`,
+      changes: [],
+    };
+  const others = facts.owners.filter((o) => o !== mine);
+  // A label-only partial release (comment failed): the claim label was added before and is
+  // gone, the recorded target is in place, no handoff comment for that claim exists.
+  const partial = !holds && !!since && !others.length && (target ? label(item, target) : true);
+  if (!holds && !partial)
+    return refuse(
+      "NOT_CLAIMED",
+      facts,
+      `${agent} holds no claim on #${number}${others.length ? ` (owned by ${others.join(", ")})` : ""}; only the caller's own claim can be released.`,
+      [command(`who ${number}`), `${triage} --agent ${agent}`],
+    );
+  if (item.state !== "OPEN" && outcome !== "done")
+    return refuse(
+      "TICKET_CLOSED",
+      facts,
+      `#${number} is closed; only --as done can hand over a closed ticket's claim.`,
+      [
+        command(
+          `release ${number} --agent ${agent} --as done${pr ? ` --pr ${shellQuote(pr)}` : ""}`,
+        ),
+      ],
+    );
+  const notes: string[] = [];
+  if (!note) notes.push("No handoff note supplied; release proceeds, but a note is expected.");
+  if (others.length) notes.push(`Other owners kept: ${others.join(", ")}.`);
+  if (pr && !prState)
+    notes.push(
+      `Pull request state is UNKNOWN (${pr} could not be verified); not treated as open or merged.`,
+    );
+  if (outcome === "done" && !deliverable && !linkedOpen.length)
+    notes.push("Done without a PR or change link; inspect the ticket to confirm the deliverable.");
+  if (outcome === "done" && !target)
+    notes.push(
+      "Contribution done with no open PR: no readiness label is added, so the ticket is reported for inspection, not returned to pickup or closed.",
+    );
+  const held = [...claimPolicy.held, claimPolicy.needsDesign].filter((l) => label(item, l));
+  if (held.length) notes.push(`Kept unrelated state: ${held.join(", ")}.`);
+  // Exactly one handoff readiness state; questions, blockers, attention and others untouched.
+  const handoff = [...claimPolicy.pickable, claimPolicy.awaitingReview];
+  const remove = [
+    ...(holds ? [mine] : []),
+    ...handoff.filter((l) => l !== target && label(item, l)),
+  ];
+  const add = target && !label(item, target) ? [target] : [];
+  const changes: PlanStep[] = [];
+  for (const name of add.filter((l) => !repoLabels.has(l)))
+    changes.push({
+      step: "create-label",
+      command: [
+        "label",
+        "create",
+        name,
+        "--repo",
+        repository,
+        "--color",
+        claimPolicy.labelColours[name] ?? "ededed",
+      ],
+    });
+  if (add.length || remove.length)
+    changes.push({
+      step: "labels",
+      command: [
+        "issue",
+        "edit",
+        String(number),
+        "--repo",
+        repository,
+        ...add.flatMap((l) => ["--add-label", l]),
+        ...remove.flatMap((l) => ["--remove-label", l]),
+      ],
+    });
+  const describe =
+    outcome === "done"
+      ? target
+        ? `done; awaiting review (\`${target}\`)`
+        : "done (contribution finished; no open PR, for inspection)"
+      : outcome === "parked"
+        ? `incomplete (parked; \`${target}\`)`
+        : `${outcome} (\`${target}\`)`;
+  changes.push({
+    step: "comment",
+    command: [
+      "issue",
+      "comment",
+      String(number),
+      "--repo",
+      repository,
+      "--body",
+      [
+        `Handoff by \`${agent}\` with \`github-triage release\`: **${describe}**. Claim released.`,
+        "",
+        ...(pr
+          ? [`Pull request: ${pr}${prState ? ` (${prState})` : " (state unknown)"}`, ""]
+          : change
+            ? [`Change: ${change}`, ""]
+            : []),
+        note ? `**Note:** ${note}` : "_No handoff note supplied._",
+        "",
+        op,
+      ].join("\n"),
+    ],
+  });
+  return {
+    ok: true,
+    noop: false,
+    facts,
+    reason: partial ? "Claim already released; recording the missing handoff comment." : undefined,
+    changes,
+    notes,
+    recheck: { agent, release: { target } },
+    retry,
+  };
+}
+
 /**
  * Apply a plan step by step. The comment comes first for needs-human, so a failed comment
  * leaves nothing changed. After a claim, ownership is re-read and conflicts are reported.
@@ -565,25 +811,34 @@ export async function applyPlan(
       const elsewhere = claims.filter((c) => c.number !== plan.facts.number);
       // GitHub label edits are not a lock: report conflicts rather than resolve them.
       const problems: string[] = [];
-      // An incomplete label page cannot confirm ownership: a competing claim may be unseen.
-      if (item?.labels?.pageInfo?.hasNextPage)
-        problems.push(
-          `ownership is unverified: #${plan.facts.number} has more than 100 labels, so a competing claim may be unseen`,
-        );
-      if (!item || item.state !== "OPEN" || !owners(item).includes(mine))
-        problems.push(
-          `the claim is no longer recorded on #${plan.facts.number} (open, labelled ${mine})`,
-        );
-      if (others.length) problems.push(`another claim appeared concurrently: ${others.join(", ")}`);
-      if (elsewhere.length)
-        problems.push(
-          `${plan.recheck.agent} now also claims ${elsewhere.map((c) => `#${c.number}`).join(", ")}; one active claim per agent`,
-        );
+      if (plan.recheck.release) {
+        const target = plan.recheck.release.target;
+        if (item && owners(item).includes(mine))
+          problems.push(`${mine} is still recorded on #${plan.facts.number}`);
+        if (item && target && !label(item, target))
+          problems.push(`${target} is no longer on #${plan.facts.number}`);
+      } else {
+        // An incomplete label page cannot confirm ownership: a competing claim may be unseen.
+        if (item?.labels?.pageInfo?.hasNextPage)
+          problems.push(
+            `ownership is unverified: #${plan.facts.number} has more than 100 labels, so a competing claim may be unseen`,
+          );
+        if (!item || item.state !== "OPEN" || !owners(item).includes(mine))
+          problems.push(
+            `the claim is no longer recorded on #${plan.facts.number} (open, labelled ${mine})`,
+          );
+        if (others.length)
+          problems.push(`another claim appeared concurrently: ${others.join(", ")}`);
+        if (elsewhere.length)
+          problems.push(
+            `${plan.recheck.agent} now also claims ${elsewhere.map((c) => `#${c.number}`).join(", ")}; one active claim per agent`,
+          );
+      }
       if (problems.length)
         conflict = `${problems.join("; ")}. Coordinate on the tickets; nothing was removed.`;
     } catch (error) {
       // Keep the completed writes; ownership is merely unverified.
-      conflict = `Writes completed, but ownership could not be re-checked (${errorMessage(error)}). Re-run the claim to verify.`;
+      conflict = `Writes completed, but ownership could not be re-checked (${errorMessage(error)}). Re-run the same command to verify${plan.retry ? `: ${plan.retry}` : ""}.`;
     }
   }
   const exitCode = failed ? (done ? 2 : 1) : conflict ? 2 : 0;
@@ -609,6 +864,10 @@ export function claimText(result: ClaimPlan | ClaimResult, dryRun = false): stri
       ].join("\n") + "\n"
     );
   const lines = [`${result.facts.url} ${result.facts.title}`];
+  if (result.facts.outcome)
+    lines.push(
+      `Handoff: ${result.facts.outcome} -> ${result.facts.target ?? "no readiness label (contribution done, inspect)"}${result.facts.deliverable ? ` · ${result.facts.deliverable}${result.facts.pullRequestState ? ` (${result.facts.pullRequestState})` : ""}` : ""}`,
+    );
   if (result.noop) lines.push(result.reason ?? "Nothing to change.");
   if (dryRun) lines.push("DRY RUN: no changes made.");
   for (const c of ("steps" in result ? result.steps : undefined) ?? result.changes)
@@ -618,6 +877,8 @@ export function claimText(result: ClaimPlan | ClaimResult, dryRun = false): stri
     );
   for (const n of result.notes ?? []) lines.push(`Note: ${n}`);
   if ("conflict" in result && result.conflict) lines.push(`CONFLICT: ${result.conflict}`);
+  if (result.retry && "exitCode" in result && result.exitCode !== 0)
+    lines.push(`Retry (safe; completes only the missing steps): ${result.retry}`);
   return lines.join("\n") + "\n";
 }
 

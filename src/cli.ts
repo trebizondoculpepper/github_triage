@@ -17,7 +17,14 @@ import {
 import { roleNames, roleRegistry } from "./roles.js";
 import { prStatusText, pullRequestStatus } from "./prstatus.js";
 import { doctorStaleHours, ticketDoctor, ticketDoctorText } from "./ticketdoctor.js";
-import { applyPlan, claimText, planClaim, planNeedsHuman } from "./claims.js";
+import {
+  applyPlan,
+  claimPolicy,
+  claimText,
+  planClaim,
+  planNeedsHuman,
+  planRelease,
+} from "./claims.js";
 import { checkForUpdate, installedVersion, optOutEnv, updateAdvisory } from "./updates.js";
 import { defaultStaleHours, teamText, teamView } from "./team.js";
 import { ticketOwnership, ticketOwnershipText } from "./who.js";
@@ -92,6 +99,11 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
                         in the mapped native field with provenance (estimate --help)
   pr N                  Why is pull request N not progressing? Every blocker at once
   claim N --agent NAME [--branch B] [--platform P] [--dry-run]  Claim an eligible ticket
+  release N --agent NAME --as ready|incomplete|parked|done [--note TEXT] [--pr URL|--change URL]
+                        [--dry-run]  Hand over your claim in one operation: record the outcome,
+                        release agent:NAME and set readiness (ready; incomplete=parked, still
+                        pickable; done+open PR -> status:awaiting-review; done without one ->
+                        no readiness, for inspection). Never closes; retry is safe (release --help)
   needs-human N --agent NAME --designer NAME --why TEXT --question TEXT... [--dry-run]
                         Record questions for a designer and mark the ticket decision-needed
   team [--stale-hours N]  Read-only: each agent's claims, linked PRs, activity and warnings
@@ -134,7 +146,7 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   version               Show the installed version and the update check result
   --help                Show usage
 Exit: 0 complete; 2 incomplete evidence; 1 invalid arguments/API/cache failure.
-The briefing never changes GitHub; only deps add/remove, claim, needs-human
+The briefing never changes GitHub; only deps add/remove, claim, release, needs-human
 and estimate N do;
 config set changes only the local .github/triage.json; setup complexity may
 also create an owner-wide issue field, only after --create/confirmation. Hints require inspection.
@@ -235,10 +247,31 @@ const plannedExit = (changes: { status: string }[]): number => {
   const refused = changes.some((c) => c.status === "refused");
   return !applying ? (refused ? 1 : 0) : refused ? 2 : 0;
 };
+const releaseUsage =
+  "Usage: github-triage release N --agent NAME --as ready|incomplete|parked|done [--note TEXT] [--pr URL|--change URL] [--dry-run] [--json]";
+export const releaseHelp = `${releaseUsage}
+Hand over your active claim on issue N in one operation (doc/design/workflow.md, #62).
+Re-reads live state, then: removes agent:NAME (only yours; other owners are kept), sets one
+handoff readiness label, and posts a handoff comment with the outcome, note and deliverable.
+  --as ready        Untouched: back to status:ready
+  --as incomplete   Partly worked (parked is a synonym): status:incomplete, still pickable
+  --as done         Your contribution is finished. With an open PR (--pr, or one linked to
+                    the issue): status:awaiting-review, out of pickup. Without one: no
+                    readiness label, reported for inspection. Never closes the issue or PR;
+                    an unverifiable --pr is reported UNKNOWN, not guessed merged
+  --note TEXT       What was done and what remains (expected; absence never blocks release)
+  --pr URL          Preferred deliverable link; --change URL for a direct-main change set
+Questions, blockers, attention:*, needs-design and parked/blocked labels are left untouched.
+Labels change before the comment, so released work stays pickable if the comment fails.
+Each step is reported done/failed/skipped; a retry of the same command completes only the
+missing steps and never duplicates the handoff comment. Changed live state is re-evaluated.
+You choose the outcome; the tool never chooses one for you.
+Exit: 0 done; 2 partly done or conflict (see Retry); 1 refused or nothing done.
+`;
 /**
- * Arguments for `claim` and `needs-human` (doc/design/workflow.md).
+ * Arguments for `claim`, `release` and `needs-human` (doc/design/workflow.md).
  */
-export function workflowArgumentsFor(command: "claim" | "needs-human", args: string[]) {
+export function workflowArgumentsFor(command: "claim" | "needs-human" | "release", args: string[]) {
   const { values, positionals } = parseArgs({
     args,
     allowPositionals: true,
@@ -252,12 +285,18 @@ export function workflowArgumentsFor(command: "claim" | "needs-human", args: str
       designer: { type: "string" },
       why: { type: "string" },
       question: { type: "string", multiple: true },
+      as: { type: "string" },
+      note: { type: "string" },
+      pr: { type: "string" },
+      change: { type: "string" },
     },
   });
   const usage =
     command === "claim"
       ? "Usage: github-triage claim N --agent NAME [--branch BRANCH] [--platform P] [--dry-run] [--json]"
-      : "Usage: github-triage needs-human N --agent NAME --designer NAME --why TEXT --question TEXT [--question TEXT...] [--dry-run] [--json]";
+      : command === "release"
+        ? releaseUsage
+        : "Usage: github-triage needs-human N --agent NAME --designer NAME --why TEXT --question TEXT [--question TEXT...] [--dry-run] [--json]";
   const number =
     positionals.length === 1 && /^[1-9]\d*$/.test(positionals[0]) ? Number(positionals[0]) : null;
   const name = /^[A-Za-z0-9][\w.-]*$/;
@@ -271,6 +310,25 @@ export function workflowArgumentsFor(command: "claim" | "needs-human", args: str
     json: values.json,
     dryRun: !!values["dry-run"],
   };
+  const releaseOnly = values.as ?? values.note ?? values.pr ?? values.change;
+  if (command === "release") {
+    if (values.designer || values.why || values.question || values.branch || values.platform)
+      throw new Error(usage);
+    const outcome = claimPolicy.outcomes.find((o) => o === values.as);
+    if (!outcome)
+      throw new Error(`--as must be one of ${claimPolicy.outcomes.join(", ")}.\n${usage}`);
+    if (values.pr && values.change) throw new Error(`Use --pr or --change, not both.\n${usage}`);
+    const pr = values.pr?.trim() || null;
+    const change = values.change?.trim() || null;
+    if (pr && !/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+\/?$/.test(pr))
+      throw new Error("--pr must be a GitHub pull request URL.");
+    if (change && !/^https?:\/\/\S+$/.test(change)) throw new Error("--change must be a URL.");
+    const note = values.note?.trim() || null;
+    if (note && note.length > claimPolicy.maxNote)
+      throw new Error(`--note is limited to ${claimPolicy.maxNote} characters.`);
+    return { ...common, outcome, note, pr, change };
+  }
+  if (releaseOnly !== undefined) throw new Error(usage);
   if (command === "claim") {
     if (values.designer || values.why || values.question) throw new Error(usage);
     return { ...common, branch: values.branch, platform: values.platform };
@@ -492,7 +550,11 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
     await output(values.json ? JSON.stringify(report, null, 2) + "\n" : ticketDoctorText(report));
     return report.completeness.complete ? 0 : 2;
   }
-  if (args[0] === "claim" || args[0] === "needs-human") {
+  if (args[0] === "release" && (args[1] === "--help" || args[1] === "-h")) {
+    await output(releaseHelp);
+    return 0;
+  }
+  if (args[0] === "claim" || args[0] === "needs-human" || args[0] === "release") {
     const values = workflowArgumentsFor(args[0], args.slice(1));
     const repository = values.repo ?? (await runtime.currentRepository());
     const query = runtime.query ?? ghQuery;
@@ -500,7 +562,9 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
     const plan =
       "questions" in values
         ? await planNeedsHuman(repository, values, query)
-        : await planClaim(repository, values, query);
+        : "outcome" in values
+          ? await planRelease(repository, values, query)
+          : await planClaim(repository, values, query);
     const result =
       values.dryRun || !plan.ok
         ? { ...plan, exitCode: plan.ok ? 0 : 1 }

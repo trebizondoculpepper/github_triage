@@ -52,7 +52,7 @@ import {
   type Query,
 } from "./github.js";
 import { clauseFor, hedged, listWideHedge, planMigration } from "./migration.js";
-import { applyPlan, planClaim, planNeedsHuman } from "./claims.js";
+import { applyPlan, planClaim, planNeedsHuman, planRelease } from "./claims.js";
 import type { ClaimAccepted, ClaimPlan, ClaimRefusal } from "./claims.js";
 import { teamText, teamView } from "./team.js";
 import { ticketOwnership, ticketOwnershipText } from "./who.js";
@@ -1621,7 +1621,9 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
     const owned = await claim({ labels: ["status:ready", "agent:other"] });
     expect(refused(owned).recovery.join(" ")).not.toMatch(/agent:other/);
     const other = await claim({ labels: ["status:ready"], claims: [9] });
-    expect(refused(other).recovery[0]).toMatch(/^manual \(release is #62/);
+    expect(refused(other).recovery[0]).toMatch(
+      /^github-triage release 9 --agent kavya --as incomplete/,
+    );
     expect(
       (await claim({ labels: ["status:incomplete", "platform:ori"] }, { platform: "ori" })).ok,
     ).toBe(true);
@@ -5958,5 +5960,244 @@ describe("role-shaped briefings (#1, doc/design/briefings.md)", () => {
     expect(() => argumentsFor(["--role", "owner"])).toThrow(/implementer, designer/);
     expect(() => argumentsFor(["--role", "designer", "--full"])).toThrow(/--full/);
     expect(argumentsFor(["--role=designer"]).role).toBe("designer");
+  });
+});
+
+describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
+  type Live = {
+    labels: string[];
+    comments: { body: string; createdAt: string }[];
+    state?: string;
+    linkedOpenPr?: boolean;
+    prState?: string | null;
+    labelledAt?: string;
+  };
+  /** A mutable fake GitHub: writes through `run` change what later reads see. */
+  const live = (initial: Partial<Live> & { labels: string[] }) => {
+    const s: Live = { comments: [], labelledAt: "2026-11-12T09:00:00.000Z", ...initial };
+    const writes: string[][] = [];
+    const query = async (source: string, variables: Record<string, unknown> = {}) => {
+      if (source.includes("resource(url:"))
+        return {
+          resource: s.prState === null ? null : { __typename: "PullRequest", state: s.prState },
+        };
+      return {
+        repository: {
+          issueOrPullRequest: {
+            __typename: "Issue",
+            number: 7,
+            title: "T7",
+            url: `https://github.com/${repo}/issues/7`,
+            state: s.state ?? "OPEN",
+            updatedAt: time,
+            labels: page(s.labels.map((name) => ({ name }))),
+            issueDependenciesSummary: { blockedBy: 0 },
+            blockedBy: page([]),
+            closedByPullRequestsReferences: page(
+              s.linkedOpenPr
+                ? [{ number: 70, url: `https://github.com/${repo}/pull/70`, state: "OPEN" }]
+                : [],
+            ),
+            comments: page(s.comments),
+            timelineItems: page(
+              s.labelledAt ? [{ createdAt: s.labelledAt, label: { name: "agent:kavya" } }] : [],
+            ),
+          },
+          claims: page([]),
+          ownerLabel: { name: "agent:kavya" },
+          questionLabel: null,
+          decisionLabel: null,
+          needsDesignLabel: null,
+          attentionLabel: null,
+          targetLabel: variables.target ? { name: variables.target } : null,
+        },
+      };
+    };
+    const run = async (args: string[]) => {
+      writes.push(args);
+      if (args[1] === "edit")
+        for (let i = 0; i < args.length; i++) {
+          if (args[i] === "--add-label") s.labels.push(args[i + 1]);
+          if (args[i] === "--remove-label") s.labels = s.labels.filter((l) => l !== args[i + 1]);
+        }
+      if (args[1] === "comment")
+        s.comments.push({ body: args[args.indexOf("--body") + 1], createdAt: time });
+    };
+    return { s, query, run, writes };
+  };
+  const pr = `https://github.com/${repo}/pull/70`;
+  const release = (env: ReturnType<typeof live>, extra: Record<string, unknown> = {}) =>
+    planRelease(repo, { number: 7, agent: "kavya", outcome: "incomplete", ...extra }, env.query);
+
+  it("releases incomplete work with a note: labels first, then one handoff comment", async () => {
+    const env = live({ labels: ["agent:kavya", "bug", "question", "attention:nicole"] });
+    const result = await applyPlan(
+      repo,
+      await release(env, { note: "Parser done; CLI remains." }),
+      env,
+    );
+    expect(result.exitCode).toBe(0);
+    expect(env.writes.map((w) => w[1])).toEqual(["edit", "comment"]);
+    expect(env.s.labels.sort()).toEqual(
+      ["attention:nicole", "bug", "question", "status:incomplete"].sort(),
+    );
+    expect(env.s.comments[0].body).toContain("Parser done; CLI remains.");
+    expect(env.s.comments[0].body).toMatch(/<!-- github-triage:release:/);
+  });
+  it("releases without a note: never a gate, but noted; parked maps to status:incomplete", async () => {
+    const env = live({ labels: ["agent:kavya"] });
+    const plan = await release(env, { outcome: "parked" });
+    expect(accepted(plan).notes!.join(" ")).toMatch(/No handoff note/);
+    const result = await applyPlan(repo, plan, env);
+    expect(result.exitCode).toBe(0);
+    expect(env.s.labels).toEqual(["status:incomplete"]);
+    expect(env.s.labels).not.toContain("status:parked");
+    expect(env.s.comments[0].body).toContain("No handoff note supplied");
+  });
+  it("ready returns untouched work to pickup and drops a stale awaiting-review label", async () => {
+    const env = live({ labels: ["agent:kavya", "status:awaiting-review"] });
+    await applyPlan(repo, await release(env, { outcome: "ready" }), env);
+    expect(env.s.labels).toEqual(["status:ready"]);
+  });
+  it("done with an open PR awaits review and leaves pickup; never closes", async () => {
+    const env = live({ labels: ["agent:kavya", "status:ready"], prState: "OPEN" });
+    const plan = await release(env, { outcome: "done", pr, note: "Ready for review." });
+    expect(plan).toMatchObject({
+      ok: true,
+      facts: { target: "status:awaiting-review", pullRequestState: "OPEN" },
+    });
+    const result = await applyPlan(repo, plan, env);
+    expect(result.exitCode).toBe(0);
+    expect(env.s.labels).toEqual(["status:awaiting-review"]);
+    expect(env.writes.flat().join(" ")).not.toMatch(/close/);
+    // A PR linked to the issue counts even without --pr.
+    const linked = live({ labels: ["agent:kavya"], linkedOpenPr: true });
+    expect(accepted(await release(linked, { outcome: "done" })).facts.target).toBe(
+      "status:awaiting-review",
+    );
+  });
+  it("done without an open PR releases without returning to pickup or closing; unknown PR stays unknown", async () => {
+    const env = live({ labels: ["agent:kavya", "status:incomplete"], prState: "MERGED" });
+    const plan = await release(env, { outcome: "done", pr });
+    expect(accepted(plan).facts.target).toBeNull();
+    await applyPlan(repo, plan, env);
+    expect(env.s.labels).toEqual([]);
+    const unknown = live({ labels: ["agent:kavya"], prState: null });
+    const u = accepted(await release(unknown, { outcome: "done", pr }));
+    expect(u.facts.pullRequestState).toBe("UNKNOWN");
+    expect(u.facts.target).toBeNull();
+    expect(u.notes!.join(" ")).toMatch(/UNKNOWN/);
+  });
+  it("refuses when the caller holds no claim or another agent owns it; keeps other owners", async () => {
+    const other = live({ labels: ["agent:other", "status:ready"], labelledAt: undefined });
+    expect(await release(other)).toMatchObject({ ok: false, error: "NOT_CLAIMED" });
+    // Someone else claimed after our label was removed: re-evaluate, never post.
+    const taken = live({ labels: ["agent:other", "status:incomplete"] });
+    expect(await release(taken)).toMatchObject({ ok: false, error: "NOT_CLAIMED" });
+    const shared = live({ labels: ["agent:kavya", "agent:other"] });
+    const plan = await release(shared);
+    expect(accepted(plan).notes!.join(" ")).toMatch(/Other owners kept: agent:other/);
+    await applyPlan(repo, plan, shared);
+    expect(shared.s.labels).toContain("agent:other");
+    const many = live({ labels: ["agent:kavya"] });
+    const q = async (source: string) => {
+      const d = (await many.query(source)) as ReturnType<typeof Object>;
+      (
+        d as {
+          repository: { issueOrPullRequest: { labels: { pageInfo: { hasNextPage: boolean } } } };
+        }
+      ).repository.issueOrPullRequest.labels.pageInfo.hasNextPage = true;
+      return d;
+    };
+    expect(
+      await planRelease(repo, { number: 7, agent: "kavya", outcome: "ready" }, q),
+    ).toMatchObject({
+      ok: false,
+      error: "EVIDENCE_INCOMPLETE",
+    });
+  });
+  it("reports a concurrent change after writing as a conflict", async () => {
+    const env = live({ labels: ["agent:kavya"] });
+    const plan = await release(env);
+    const racing = async (args: string[]) => {
+      await env.run(args);
+      if (args[1] === "edit") env.s.labels = env.s.labels.filter((l) => l !== "status:incomplete");
+    };
+    const result = await applyPlan(repo, plan, { run: racing, query: env.query });
+    expect(result.exitCode).toBe(2);
+    expect(result.conflict).toMatch(/status:incomplete is no longer/);
+  });
+  it("partial API failure: released work stays pickable, the failure is visible, retry completes once", async () => {
+    const env = live({ labels: ["agent:kavya", "status:ready"] });
+    const failing = async (args: string[]) => {
+      if (args[1] === "comment") throw new Error("gh issue comment failed.");
+      await env.run(args);
+    };
+    const first = await applyPlan(repo, await release(env, { note: "half" }), {
+      run: failing,
+      query: env.query,
+    });
+    expect(first.exitCode).toBe(2);
+    expect(first.steps!.map((s) => s.status)).toEqual(["done", "failed"]);
+    expect(env.s.labels).toEqual(["status:incomplete"]);
+    const { claimText } = await import("./claims.js");
+    expect(claimText(first)).toMatch(
+      /Retry \(safe.*github-triage release 7 --agent kavya --as incomplete --note half --repo/,
+    );
+    const retry = await release(env, { note: "half" });
+    expect(accepted(retry).changes.map((c) => c.step)).toEqual(["comment"]);
+    expect((await applyPlan(repo, retry, env)).exitCode).toBe(0);
+    expect(env.s.comments).toHaveLength(1);
+    // A further retry, even with different wording, recognises the recorded handoff.
+    const again = await release(env, { note: "different" });
+    expect(again).toMatchObject({ ok: true, noop: true, changes: [] });
+    expect((await applyPlan(repo, again, env)).exitCode).toBe(0);
+    expect(env.s.comments).toHaveLength(1);
+  });
+  it("validates arguments and dry-runs without writing", async () => {
+    for (const bad of [
+      ["release", "7", "--agent", "a"],
+      ["release", "7", "--agent", "a", "--as", "closed"],
+      ["release", "7", "--agent", "a", "--as", "done", "--pr", pr, "--change", "https://x/y"],
+      ["release", "7", "--agent", "a", "--as", "done", "--pr", "not-a-url"],
+      ["release", "7", "--agent", "a", "--as", "ready", "--branch", "b"],
+      ["claim", "7", "--agent", "a", "--as", "ready"],
+    ])
+      await expect(main(bad, async () => {})).rejects.toThrow();
+    let help = "";
+    expect(await main(["release", "--help"], async (t) => void (help = t))).toBe(0);
+    expect(help).toMatch(/parked is a synonym/);
+    const env = live({ labels: ["agent:kavya"] });
+    let text = "";
+    const code = await main(
+      [
+        "release",
+        "7",
+        "--agent",
+        "kavya",
+        "--as",
+        "incomplete",
+        "--dry-run",
+        "--json",
+        "--repo",
+        repo,
+      ],
+      async (t) => void (text = t),
+      {
+        collect: async () => {
+          throw new Error("no briefing");
+        },
+        currentRepository: async () => repo,
+        query: env.query,
+        ghRun: env.run,
+      },
+    );
+    expect(code).toBe(0);
+    expect(env.writes).toEqual([]);
+    expect(JSON.parse(text)).toMatchObject({
+      schemaVersion: 1,
+      ok: true,
+      facts: { outcome: "incomplete" },
+    });
   });
 });
