@@ -21,8 +21,14 @@
  */
 
 import { dirname, isAbsolute, join } from "node:path";
-import { parse, stringify, TomlError } from "smol-toml";
-import { ConfigError, githubRepositories, nodeFileSystem, nodeGit } from "./config.js";
+import { stringify } from "smol-toml";
+import {
+  ConfigError,
+  githubRepositories,
+  nodeFileSystem,
+  nodeGit,
+  parseTomlTable,
+} from "./config.js";
 import type { ConfigFileSystem, GitRunner } from "./config.js";
 import { acquireFileLock, type LockFs, type LockTiming } from "./filelock.js";
 
@@ -185,17 +191,7 @@ const malformed = (detail: string): ConfigError =>
 
 /** Parse the whole document with types preserved (integers as BigInt). Never writes. */
 export function parseIdentityDocument(raw: string): Table {
-  let document: unknown;
-  try {
-    document = parse(raw, { integersAsBigInt: true });
-  } catch (error) {
-    if (error instanceof TomlError) {
-      // Line/column only: the message's code frame could echo private values.
-      throw malformed(`TOML syntax error at line ${error.line}, column ${error.column}.`);
-    }
-    throw error;
-  }
-  if (!isTable(document)) throw malformed("the document is not a table.");
+  const document = parseTomlTable(raw, malformed);
   if (document.agents !== undefined && !isTable(document.agents)) {
     throw malformed("'agents' is not a table.");
   }

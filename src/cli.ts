@@ -138,8 +138,9 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
                         configuration checks: Node, gh install/auth, checkout, agent-inbox.toml
                         presence, parse, Git ignore vs tracked, selected entry, persisted name
                         and triage_role; exact next commands per check, nothing repaired
-  config get KEY | set KEY VALUE | list | help [KEY]  Repository settings in
-                        .github/triage.json of this checkout; identity.name and
+  config get KEY | set KEY VALUE | list | convert | help [KEY]  Repository settings
+                        in .github/triage.toml of this checkout (an earlier
+                        .github/triage.json is read until config convert); identity.name and
                         identity.triage_role in local agent-inbox.toml, entry chosen by
                         --entry KEY, --harness NAME or the detected harness
   --repo owner/name     Repository (default: current gh checkout)
@@ -183,7 +184,7 @@ ${guideRules()
   Details: ${PROCESS_COMMAND}
 Exit: 0 complete; 2 incomplete evidence; 1 invalid arguments/API/cache failure.
 The briefing never changes GitHub; only ${mutatingCommands().join(", ")} do;
-config set changes only the local .github/triage.json or agent-inbox.toml. Hints require inspection.
+config set/convert change only the local .github/triage.toml/.json or agent-inbox.toml. Hints require inspection.
 `;
 export const depsHelp = `Usage: github-triage deps N [--tree] [--json] [--repo owner/name]
        github-triage deps add N --on M [--on K] --note WHY [--dry-run] [--json]
