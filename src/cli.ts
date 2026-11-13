@@ -641,7 +641,7 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
     // Read live immediately before changing; never act on a cached snapshot.
     const plan =
       "questions" in values
-        ? await planNeedsHuman(repository, values, query)
+        ? await planNeedsHuman(repository, values, query, permission)
         : "outcome" in values
           ? await planRelease(repository, values, query, permission)
           : await planClaim(repository, values, query, permission);

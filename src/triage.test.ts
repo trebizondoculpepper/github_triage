@@ -2026,6 +2026,82 @@ describe("claim and needs-human review fixes", () => {
       error: "EVIDENCE_INCOMPLETE",
     });
   });
+  describe("needs-human dedupe marker authority (#214)", () => {
+    /** The exact question comment needs-human would post, so its marker matches this request. */
+    const questionBody = async () => {
+      const plan = await planNeedsHuman(
+        repo,
+        ask,
+        async () => base(["status:ready"]),
+        permissions(),
+      );
+      return accepted(plan)
+        .changes.find((c) => c.step === "comment")!
+        .command.at(-1)!;
+    };
+    const withMarker = async (author: string) => {
+      const data = base(["status:ready"]);
+      (data.repository.issueOrPullRequest.comments as unknown) = page([
+        { ...by(author), body: await questionBody(), createdAt: "2026-11-12T10:00:00Z" },
+      ]);
+      return async () => data;
+    };
+    const commented = (plan: Awaited<ReturnType<typeof planNeedsHuman>>) =>
+      accepted(plan).changes.some((c) => c.step === "comment");
+    it("a forged marker does not suppress the question and is named in a warning", async () => {
+      const permission = permissions({ mallory: "read" });
+      const plan = await planNeedsHuman(repo, ask, await withMarker("mallory"), permission);
+      expect(commented(plan)).toBe(true);
+      expect(accepted(plan).notes!.join(" ")).toMatch(
+        /Ignored marker\(s\) without write authority:.*mallory has read permission/,
+      );
+      expect(permission.calls).toEqual(["mallory"]);
+    });
+    it("a genuine marker from a write author still deduplicates", async () => {
+      const permission = permissions({ kavya: "write" });
+      const plan = await planNeedsHuman(repo, ask, await withMarker("kavya"), permission);
+      expect(commented(plan)).toBe(false);
+      expect(permission.calls).toEqual(["kavya"]);
+    });
+    it("a failed permission lookup does not suppress the question", async () => {
+      const plan = await planNeedsHuman(
+        repo,
+        ask,
+        await withMarker("kavya"),
+        permissions({ kavya: "unknown" }),
+      );
+      expect(commented(plan)).toBe(true);
+      expect(accepted(plan).notes!.join(" ")).toMatch(/could not be verified do not suppress/);
+    });
+    /** Comment pages newest first: page 0 is readTicket's window, later ones are older. */
+    const paged = async (pages: { author: string; at: string }[][], endless = false) => {
+      const body = await questionBody();
+      const window = (i: number) => ({
+        nodes: (pages[i] ?? []).map((c) => ({ ...by(c.author), body, createdAt: c.at })),
+        pageInfo: { hasPreviousPage: endless || i + 1 < pages.length, startCursor: String(i + 1) },
+      });
+      const data = base(["status:ready"]);
+      (data.repository.issueOrPullRequest.comments as unknown) = window(0);
+      return async (source: string, variables: Record<string, unknown> = {}) =>
+        source.includes("comments(last:100,before:$before)")
+          ? { repository: { issue: { comments: window(Number(variables.before)) } } }
+          : data;
+    };
+    it("a newer forged marker does not hide an older genuine one on an earlier page", async () => {
+      const query = await paged([
+        [{ author: "mallory", at: "2026-11-12T11:00:00Z" }],
+        [{ author: "kavya", at: "2026-11-12T10:00:00Z" }],
+      ]);
+      const permission = permissions({ mallory: "read", kavya: "write" });
+      const plan = await planNeedsHuman(repo, ask, query, permission);
+      expect(commented(plan)).toBe(false);
+    });
+    it("refuses as incomplete evidence when the bound is reached with only forged markers", async () => {
+      const query = await paged([[{ author: "mallory", at: "2026-11-12T11:00:00Z" }]], true);
+      const plan = await planNeedsHuman(repo, ask, query, permissions({ mallory: "read" }));
+      expect(refused(plan).error).toBe("EVIDENCE_INCOMPLETE");
+    });
+  });
   it("re-check reports a lost claim and a concurrent second claim by the same agent", async () => {
     const lost = async () => base(["status:ready"]);
     const r1 = await applyPlan(repo, await planClaim(repo, { number: 7, agent: "kavya" }, lost), {

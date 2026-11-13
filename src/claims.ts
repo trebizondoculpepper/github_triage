@@ -432,13 +432,13 @@ async function commentHistory(
   repository: string,
   number: number,
   item: TicketIssue,
-  enough: (comments: Comment[]) => boolean,
+  enough: (comments: Comment[]) => boolean | Promise<boolean>,
   query: GraphQuery,
 ): Promise<{ comments: Comment[]; complete: boolean }> {
   let comments = item.comments.nodes;
   let info = item.comments.pageInfo;
   const [owner, name] = repository.split("/");
-  for (let pageNo = 0; info?.hasPreviousPage && !enough(comments); pageNo++) {
+  for (let pageNo = 0; info?.hasPreviousPage && !(await enough(comments)); pageNo++) {
     if (!info.startCursor || pageNo >= commentHistoryPages) return { comments, complete: false };
     const data = (await query(
       `query($owner:String!,$name:String!,$number:Int!,$before:String!){repository(owner:$owner,name:$name){issue(number:$number){comments(last:100,before:$before){nodes{${commentFields}} pageInfo{hasPreviousPage startCursor}}}}}`,
@@ -877,6 +877,7 @@ export async function planNeedsHuman(
   repository: string,
   request: NeedsHumanRequest,
   query: GraphQuery = ghQuery,
+  permission: PermissionLookup = permissionLookup(repository),
 ): Promise<ClaimPlan> {
   const { number, agent, designer, why, questions } = request;
   const { item, repoLabels } = await readTicket(repository, number, agent, query, designer);
@@ -911,13 +912,19 @@ export async function planNeedsHuman(
     );
   const mine = claimPolicy.owner(agent);
   const op = marker("needs-human", [repository, number, agent, designer, why, questions]);
+  // Page back until a marker WITH authority is found (#214): stopping at any matching marker
+  // would let a newer forged copy hide an older genuine one, so a retry would post twice.
+  // Permission lookups are cached per run, so re-checking candidates per page costs no requests.
+  const candidates = (c: Comment[]) => c.filter((x) => x.body.includes(op));
   const seen = await commentHistory(
     repository,
     number,
     item,
-    (c) => c.some((x) => x.body.includes(op)),
+    async (c) => (await newestTrusted(candidates(c), (x) => x, permission)).trusted !== null,
     query,
   );
+  // The bound reached with no trusted marker: an older genuine one may be unseen, so whether
+  // the questions were posted is unknown evidence (not unknown authority) and nothing is posted.
   if (!seen.complete)
     return refuse(
       "EVIDENCE_INCOMPLETE",
@@ -925,7 +932,10 @@ export async function planNeedsHuman(
       "The comment history is longer than the bounded read, so whether these questions were already posted is unknown; nothing is posted.",
       [`${triage} --issue ${number}`],
     );
-  const already = seen.comments.some((c) => c.body.includes(op));
+  // Only a marker with write authority suppresses a repeat question (#214): a forged copy is
+  // ignored with a warning, and an unverifiable one never suppresses, so the question is posted.
+  const posted = await newestTrusted(candidates(seen.comments), (c) => c, permission);
+  const already = posted.trusted !== null;
   const readiness = workflow.readiness.filter((l) => label(item, l));
   const swap = claimPolicy.pickable.filter((l) => label(item, l));
   // Exactly one readiness label: replace ready/incomplete with needs-design; add it when there
@@ -942,7 +952,11 @@ export async function planNeedsHuman(
     ...(addNeedsDesign ? [claimPolicy.needsDesign] : []),
   ].filter((l) => !label(item, l));
   const remove = [...swap, ...(label(item, mine) ? [mine] : [])];
-  const notes: string[] = [];
+  const notes: string[] = ignoredNote(posted.ignored);
+  if (!already && posted.unverified.length)
+    notes.push(
+      `Marker(s) whose authority could not be verified do not suppress the question: ${posted.unverified.join("; ")}.`,
+    );
   if (held.length)
     notes.push(`Readiness ${held.join(", ")} kept; not replaced with ${claimPolicy.needsDesign}.`);
   const changes: PlanStep[] = [];
