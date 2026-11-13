@@ -281,7 +281,7 @@ const closedBy = `closedByPullRequestsReferences(first:10,includeClosedPrs:false
 const prFields = `${common} headRefOid headRefName baseRefName isDraft mergeable mergeStateStatus reviewDecision mergedAt
  closingIssuesReferences(first:100){nodes{number url} ${info}}
  reviewThreads(first:100){nodes{isResolved isOutdated comments(first:1){totalCount nodes{${comment}} ${info}}} ${info}}
- reviews(first:100){nodes{body url author{login} state} ${info}}
+ reviews(first:100){nodes{body url author{login} state submittedAt} ${info}}
  commits(last:1){nodes{commit{statusCheckRollup{state contexts(first:100){nodes{__typename ... on CheckRun{name status conclusion detailsUrl databaseId} ... on StatusContext{context state targetUrl}} ${info}}}}}}`;
 
 /** Cursor pagination also detects a broken/repeating cursor instead of spinning forever. */

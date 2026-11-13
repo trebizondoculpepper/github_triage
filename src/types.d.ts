@@ -69,7 +69,8 @@ export type PullRequest = Issue & {
     isOutdated: boolean;
     comments: Page<Comment>;
   }>;
-  reviews: Page<Comment & { state: string }>;
+  /** `submittedAt` is the review event time; null for a pending review. */
+  reviews: Page<Comment & { state: string; submittedAt?: string | null }>;
   commits: {
     nodes: { commit: { statusCheckRollup: { state: string; contexts: Page<Check> } | null } }[];
   };

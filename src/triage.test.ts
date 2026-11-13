@@ -3603,6 +3603,27 @@ describe("designer groups: decision needed vs agreed-needs-documentation (#40)",
   });
 });
 
+describe("briefing attention covers open pull requests (#169)", () => {
+  it("reports attention labels and design markers on a PR, without question scanning", () => {
+    const base = pr();
+    const change: PullRequest = {
+      ...base,
+      labels: page([{ name: "blocked:credential" }, { name: "design:decision-needed" }]),
+      comments: page([
+        { body: "Any questions?", url: `${base.url}#c1`, author: null, createdAt: time },
+      ]),
+    };
+    const report = briefing(snapshot([], [change]), { limit: 100 }, new Date(time));
+    expect(
+      report.actions.items
+        .filter((a) => a.target === change.url && a.rule !== "pr-inspect-merge")
+        .map((a) => a.rule)
+        .sort(),
+    ).toEqual(["attention-label", "design-decision-needed"]);
+    expect(report.attention.items.map((i) => i.url)).toEqual([change.url]);
+  });
+});
+
 describe("pr status: formal reviews and in-progress reviews", () => {
   it("counts a formal review by the requested service and blocks while Codex is running", async () => {
     const { prStatus } = await import("./prstatus.js");
