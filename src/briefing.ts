@@ -336,9 +336,10 @@ analysisRules.set("addressed-attention", ({ issues, prs, viewer }) =>
 );
 // Decision needed versus agreed-but-undocumented (#40, doc/design/briefings.md). Both markers
 // may be valid together for different parts of a ticket. The reason is the latest comment that
-// names the marker, as a source link; without one the reason is unknown, never guessed.
-analysisRules.set("design-markers", ({ issues }) =>
-  issues.flatMap((issue) =>
+// names the marker, as a source link; without one the reason is unknown, never guessed. Open pull
+// requests carry the same markers, so they are subjects too (#169).
+analysisRules.set("design-markers", ({ issues, prs }) =>
+  [...issues, ...prs].flatMap((issue) =>
     Object.entries(workflow.designMarkers)
       .filter(([label]) => labels(issue).includes(label))
       .map(([label, rule]) => {
@@ -358,9 +359,12 @@ analysisRules.set("design-markers", ({ issues }) =>
       }),
   ),
 );
-analysisRules.set("attention", ({ issues }) =>
-  issues.flatMap((issue) => {
+// Attention labels apply to issues and pull requests alike (#169); question-shaped comments are
+// only scanned on issues, where owner questions are recorded.
+analysisRules.set("attention", ({ issues, prs }) =>
+  [...issues, ...prs].flatMap((issue) => {
     const findings: Action[] = [];
+    const isPr = !issues.includes(issue);
     const attention = labels(issue).filter((label) => workflow.attention.includes(label));
     if (attention.length && !labels(issue).includes(workflow.parked))
       findings.push(
@@ -378,7 +382,7 @@ analysisRules.set("attention", ({ issues }) =>
         /\?|human review|owner review|questions? (?:remain|for)/i.test(comment.body),
       )
       .slice(-2);
-    if (candidates.length && !labels(issue).includes(workflow.parked))
+    if (!isPr && candidates.length && !labels(issue).includes(workflow.parked))
       findings.push(
         action(
           "question-candidate",
@@ -648,8 +652,9 @@ export function briefing(snapshot: Snapshot, options: BriefingOptions, now: Date
       requested: options.estimate,
     }),
     claimed: limit(issues.filter((issue) => owners(issue).length).map(context)),
+    // Pull requests carry attention labels too (#169).
     attention: limit(
-      issues
+      [...issues, ...prs]
         .filter(
           (issue) =>
             labels(issue).some((label) => workflow.attention.includes(label)) ||

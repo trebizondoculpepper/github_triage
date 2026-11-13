@@ -523,13 +523,13 @@ describe("repository catch-up aggregation (#169)", () => {
     };
   };
   const fakeGh =
-    (prs: PullRequest[]): Query =>
+    (prs: PullRequest[], issues: Issue[] = []): Query =>
     async (source) => {
       const field = source.includes("pullRequests(") ? "pullRequests" : "issues";
       const allStates = source.includes("states:[");
       const nodes =
         field === "issues"
-          ? []
+          ? issues.filter((i) => allStates || i.state === "OPEN")
           : prs
               .filter((p) => allStates || p.state === "OPEN")
               .map((p) => selectReviewFields(source, p));
@@ -625,6 +625,72 @@ describe("repository catch-up aggregation (#169)", () => {
     expect(report.completeness.history).toBe("incomplete");
     expect(report.checkpoint.candidate).toBeNull();
     expect(catchUpText(report)).not.toContain("0 review(s)");
+  });
+
+  it("reports recorded attention labels on open pull requests (#169)", async () => {
+    const blocked = pr(60, [], "SUCCESS", {
+      createdAt: inside(30),
+      updatedAt: inside(1),
+      labels: page([{ name: "blocked:credential" }]),
+    });
+    const decision = pr(61, [], "SUCCESS", {
+      createdAt: inside(30),
+      updatedAt: inside(1),
+      labels: page([{ name: "design:decision-needed" }]),
+    });
+    const snapshot = await collect(
+      repo,
+      { changeWindow: window },
+      fakeGh([blocked, decision]),
+      clock,
+    );
+    const report = catchUp(snapshot, { now: clock, limit: 100 });
+    const rows = report.sections.attention.items;
+    expect(rows.map((r) => `${r.subject.kind}#${r.subject.number}:${r.kind}`).sort()).toEqual([
+      "pull-request#60:recorded",
+      "pull-request#61:recorded",
+    ]);
+    expect(report.attentionStatus).toBe("recorded");
+  });
+
+  it("keeps a linked PR's owner in the grouped contribution (#169)", async () => {
+    const claimed = issue(70, ["agent:ana"], { createdAt: inside(30), updatedAt: inside(1) });
+    const other = pr(71, [70], "SUCCESS", {
+      createdAt: inside(20),
+      updatedAt: inside(1),
+      labels: page([{ name: "agent:bo" }]),
+    });
+    let report = catchUp(
+      await collect(repo, { changeWindow: window }, fakeGh([other], [claimed]), clock),
+      { now: clock, limit: 100 },
+    );
+    const groups = report.activityGroups.map((g) => [g.agent, g.shown]);
+    expect(groups).toEqual([
+      ["ana", [`${repo}#issue#70#activity`]],
+      ["bo", [`${repo}#issue#70#activity`]],
+    ]);
+    expect(report.sections.activity.total).toBe(1);
+    const row = report.sections.activity.items[0]!;
+    expect(row.attribution.map((a) => [a.agent, a.relation, a.source])).toEqual([
+      ["ana", "current-owner", "agent:ana"],
+      ["bo", "linked-pr-owner", "agent:bo on PR #71"],
+    ]);
+
+    const same = pr(71, [70], "SUCCESS", {
+      createdAt: inside(20),
+      updatedAt: inside(1),
+      labels: page([{ name: "agent:ana" }]),
+    });
+    report = catchUp(
+      await collect(repo, { changeWindow: window }, fakeGh([same], [claimed]), clock),
+      { now: clock, limit: 100 },
+    );
+    expect(report.activityGroups.map((g) => [g.agent, g.total])).toEqual([["ana", 1]]);
+    expect(report.sections.activity.total).toBe(1);
+    expect(report.sections.activity.items[0]!.attribution.map((a) => a.relation)).toEqual([
+      "current-owner",
+      "linked-pr-owner",
+    ]);
   });
 
   it("describes cancelled checks the same way in activity and blockers", () => {

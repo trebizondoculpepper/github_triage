@@ -35,6 +35,7 @@ export interface Attribution {
   agent: string | null;
   relation:
     | "current-owner"
+    | "linked-pr-owner"
     | "origin"
     | "claim-record"
     | "release-record"
@@ -698,7 +699,19 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
       evidence: [issue.url, ...prs.map((pr) => pr.url)],
       next: prs.length ? nextFor(prs[0]!) : "Implementation in progress; no linked PR observed.",
       uncertainty: "reported",
-      attribution: labelAttribution(issue),
+      // The linked PR's own owner labels stay in the grouped contribution, sourced to that PR.
+      attribution: [
+        ...labelAttribution(issue),
+        ...prs.flatMap((pr) =>
+          owners(pr).map((label): Attribution => ({
+            agent: label.slice(workflow.ownerPrefix.length),
+            relation: "linked-pr-owner",
+            source: `${label} on PR #${pr.number}`,
+            certainty: "reported",
+            githubActor: null,
+          })),
+        ),
+      ],
       detailCommand: detail("issue", issue.number),
     });
   }
@@ -732,11 +745,18 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
       detailCommand: detail("pull-request", pr.number),
     });
   }
-  // Group by agent identity (owner labels only); every agent gets the row, unresolved last.
+  // Group by agent identity (owner labels, including a linked PR's); every agent gets the row
+  // once, unresolved last.
   const groups = new Map<string | null, CatchUpRow[]>();
   for (const row of dedupe(activityRows)) {
-    const agents = row.attribution.filter((a) => a.relation === "current-owner" && a.agent);
-    for (const key of agents.length ? agents.map((a) => a.agent) : [null])
+    const agents = new Set(
+      row.attribution
+        .filter(
+          (a) => (a.relation === "current-owner" || a.relation === "linked-pr-owner") && a.agent,
+        )
+        .map((a) => a.agent),
+    );
+    for (const key of agents.size ? agents : [null])
       groups.set(key, [...(groups.get(key) ?? []), row]);
   }
   const activityGroups: ActivityGroup[] = [...groups.entries()]
