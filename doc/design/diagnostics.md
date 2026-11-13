@@ -31,3 +31,7 @@ Add deterministic correction plans and exact commands to v1, never execution. Ex
 ## Acceptance
 
 Fixtures cover current versus stale SHA, cancelled/no-log CI, multiple blockers, meaningful resolved feedback versus bot noise, incomplete history, duplicate issue/PR rows, comment-only ownership, missing presence, malformed configuration, distinct triage/mail roles, Git-tracked identity files, stale agent versus human assignment, and correction-command parser validity. Show request/output costs. Each ticket is a separate implementation slice; #67 depends on #66 and #60 reuses #59 without requiring unrelated deferred work.
+
+## #39: transferred issue inspection
+
+Use `--include-transferred` to opt into transferred-out work in recommendations; default excludes it from actionable local work. Explicit `--issue N` always diagnoses its transfer when GitHub supplies authoritative transfer/redirect evidence, showing original and destination URLs. Do not silently take destination ownership or infer transfer from a missing/forbidden response. Missing, inaccessible and moved are distinct; if evidence cannot distinguish them, report unavailable/unknown with a next inspection command. Preserve origin repository and destination identity in JSON and cross-repository links. Inject redirects/transfer evidence in tests; no live transfer or automatic issue rewrite. Document bounded fallback reads rather than generic GraphQL failure alone.

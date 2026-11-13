@@ -4,6 +4,10 @@
 
 Evidence-linked GitHub issue and pull request briefings for coding agents. A standalone JavaScript CLI using your existing authenticated `gh` session, with Vite+ for checks, tests and builds.
 
+## Why this tool exists
+
+Repeatedly searching issues, PRs, review feedback and dependencies costs agents time and tokens. GitHub Triage collects the relevant evidence into a compact briefing with source links and detail on demand. It helps implementers find the next useful action, and helps a designer answer “what changed, and what needs the owner’s attention?” Dedicated role views remain planned, not shipped.
+
 ## Get started
 
 Requires Node.js 20+ and an authenticated [GitHub CLI](https://cli.github.com/).
@@ -25,17 +29,19 @@ node /path/to/github_triage/src/cli.js --json
 
 The briefing and `deps N` are read-only. They do not claim, label, merge or close tickets. Suggestions, closed dependencies and question candidates require human/agent inspection; they are not approval. `deps add` and `deps remove` are the only commands that change GitHub: they edit native blocked-by relationships after live validation, post one explanatory comment, and support `--dry-run` ([dependency design](doc/issue-dependencies.md)). `deps migrate --plan` writes a read-only report of how `Depends on` text and `blocked:work` labels map to native dependencies; automatic apply is deferred (#48). Claiming and flagging are specified separately and not implemented yet.
 
-## Install in another project
+## Install once, use across projects
 
-Once published (see [npm releases](doc/npm-releases.md); nothing is published yet), install a pinned version into a consumer project and run it with `npx`:
+Recommend a global installation of this standalone CLI rather than a dev dependency in each project:
 
 ```sh
-npm install --save-dev @trebizondoculpepper/github-triage        # official releases (latest)
-npm install --save-dev @trebizondoculpepper/github-triage@next   # development builds from main
-npx github-triage --help
+npm install -g @trebizondoculpepper/github-triage
+github-triage --help
+github-triage --repo owner/repository
 ```
 
-The package contains only the built CLI, README and licence, and runs no install scripts. It still needs an authenticated `gh` at run time.
+Use `@next` to opt into development prereleases, or `@VERSION` to pin a release. One executable serves multiple checkouts; project identity/configuration stays project-specific. The first registry publications are prereleases; see the [release contract](doc/npm-releases.md) for channels and official-release policy. Running the source checkout remains useful for development.
+
+See the [usage guide](doc/usage.md) for ticket intake, dependencies, catch-up, cache/offline behavior and exit codes. The [design handoff](doc/design/README.md) describes planned role, workflow, doctor, MCP and update features; it does not claim those commands already exist.
 
 ## Supported runtimes
 
@@ -53,7 +59,7 @@ npm run smoke    # credential-free exit-code smoke test of dist/cli.mjs
 
 Vite+ owns formatting, linting, type checking, testing, packaging and staged-file hooks. Runtime uses only Node built-ins and `gh`: no SDK, token handling, frontend or build step is needed to run the source CLI. Tests use fixtures and injected boundaries, not live GitHub credentials.
 
-Start with [HANDOFF.md](HANDOFF.md) for transferred issues, provenance, verified behavior and unfinished work. The [CLI contract](doc/github-triage-cli.md) and [dependency design](doc/issue-dependencies.md) describe the design inherited from the original repository. [npm releases](doc/npm-releases.md) records the agreed packaging and release design, not yet implemented. [CONTRIBUTING.md](CONTRIBUTING.md) covers contributions.
+Start with [HANDOFF.md](HANDOFF.md) for transferred issues, provenance, verified behavior and unfinished work. The [CLI contract](doc/github-triage-cli.md) and [dependency design](doc/issue-dependencies.md) describe the design inherited from the original repository. [npm releases](doc/npm-releases.md) records release behavior and owner setup. [CONTRIBUTING.md](CONTRIBUTING.md) covers contributions.
 
 ## License
 

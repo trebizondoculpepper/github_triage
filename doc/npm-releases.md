@@ -1,6 +1,6 @@
 # npm distribution and releases
 
-Status: agreed release design, pending a reviewed documentation PR and implementation. Nothing here claims publication is configured or complete. Tracked in [#17](https://github.com/trebizondoculpepper/github_triage/issues/17).
+Status: packaging/publishing implementation is merged and initial prereleases have been published. This document includes the release contract and owner setup; it does not imply an official stable release has occurred. Tracked in [#17](https://github.com/trebizondoculpepper/github_triage/issues/17).
 
 ## Purpose and package
 
