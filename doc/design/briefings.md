@@ -28,6 +28,8 @@ Include a minimal implementation-PR summary near the bottom. Evidence of repeate
 
 Lead with actionable human decisions, answers, access and interventions, stating what each blocks. Say explicitly when no human action is needed. Then material changes/completions/releases since the comparison window; risks/stalls/repeated review cycles; finally lower-priority current-work and next-outcome summaries. Separate reported claims/activity from confirmed presence. Exclude routine bot/commit chatter unless material. Name the time window/baseline; never invent “since last visit” history. Reuse since/checkpoint observations across open/closed/merged states. This is a presentation use case, not a new privileged identity.
 
+The concrete repository-wide catch-up interface and bounded source coverage are defined in [briefing-mode.md](briefing-mode.md) (#163). That mode is distinct from the next-action view; its first slice reports issue/PR evidence and explicitly does not audit releases/deployments.
+
 ## Pickup ordering and manual urgency
 
 Default impact mode sorts: urgency high, unspecified, low; then distinct immediate dependants that become otherwise eligible when this ticket (their last open native blocker) completes; incomplete before unstarted; oldest creation time; numeric issue identity. Do not count distant descendants, dependants still needing design, or unknown eligibility as definite impact. Both urgency labels are a conflict: report it and use the unspecified band pending correction. Urgency applies to general pickup, not above addressed attention or lifecycle groups.

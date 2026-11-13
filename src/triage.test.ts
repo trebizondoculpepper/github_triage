@@ -98,6 +98,7 @@ import {
   resolveIdentityTarget,
   setIdentity,
 } from "./identity.js";
+import { detectClientEntry, detectHarness, HARNESS_DETECTORS, resolveEntry } from "./harness.js";
 import { localDoctor, localDoctorExitCode, localDoctorText } from "./localdoctor.js";
 import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
 
@@ -4736,7 +4737,7 @@ describe("config get/set/list/help commands (#117)", () => {
         currentRepository: async () => {
           throw new Error("no GitHub");
         },
-        config: { fs, git, cwd: root },
+        config: { fs, git, cwd: root, env: {} },
       });
     return { files, fs, out, call, json: () => JSON.parse(out.at(-1)!) };
   }
@@ -7980,7 +7981,10 @@ api_key = "private-key"
 [[extra]]
 x = 1
 `;
-  function setup(initial?: string, options: { tracked?: boolean; ignored?: boolean } = {}) {
+  function setup(
+    initial?: string,
+    options: { tracked?: boolean; ignored?: boolean; env?: Record<string, string> } = {},
+  ) {
     const files = new Map<string, string>(initial === undefined ? [] : [[file, initial]]);
     const fs: ConfigFileSystem = {
       readText: async (path) => files.get(path) ?? null,
@@ -8024,7 +8028,7 @@ x = 1
         currentRepository: async () => {
           throw new Error("no GitHub");
         },
-        config: { fs, git, cwd: `${root}/nested/dir`, random },
+        config: { fs, git, cwd: `${root}/nested/dir`, random, env: options.env ?? {} },
       });
     return { files, fs, git, calls, out, call, json: () => JSON.parse(out.at(-1)!) };
   }
@@ -8159,6 +8163,179 @@ x = 1
     expect(t.json()).toMatchObject({ code: "repository-mismatch" });
   });
 
+  it("detects the harness from each registered signal by name only", () => {
+    for (const detector of HARNESS_DETECTORS) {
+      for (const signal of detector.environment) {
+        expect(detectHarness({ [signal]: "secret-value" })).toEqual({
+          status: "detected",
+          harness: detector.harness,
+          signals: [signal],
+        });
+      }
+    }
+    expect(detectHarness({})).toEqual({ status: "none", signals: [] });
+    // Empty values and weak installation settings are not evidence of a live session.
+    expect(detectHarness({ CLAUDECODE: "", CODEX_HOME: "/x", PATH: "/bin" })).toMatchObject({
+      status: "none",
+    });
+    expect(detectHarness({ CLAUDECODE: "1", CODEX_THREAD_ID: "t" })).toEqual({
+      status: "conflict",
+      harnesses: ["claude", "codex"],
+      signals: ["CLAUDECODE", "CODEX_THREAD_ID"],
+    });
+  });
+
+  it("matches the Ori server prefix before embedded generic client names", () => {
+    expect(detectClientEntry("ori-github-triage")).toEqual({
+      harness: "ori",
+      entry: "ori.github-triage",
+    });
+    expect(detectClientEntry("ori-claude-helper")).toEqual({
+      harness: "ori",
+      entry: "ori.claude-helper",
+    });
+    expect(detectClientEntry("ori-github-triage-2")?.entry).not.toBe("ori.github-triage");
+    expect(detectClientEntry("ori-")).toBeNull();
+    expect(detectClientEntry("ori-bad name")).toBeNull();
+    expect(detectClientEntry("claude-code")).toBeNull();
+    expect(detectClientEntry("codex")).toBeNull();
+  });
+
+  it("resolves explicit --entry, then --harness, then detection, reading only entry keys", async () => {
+    const files = new Map([[file, sample]]);
+    const fs = { readText: async (path: string) => files.get(path) ?? null } as ConfigFileSystem;
+    const codexEnv = { CODEX_THREAD_ID: "t" };
+    expect(
+      await resolveEntry({ entry: "ori.review", harness: "codex", env: codexEnv, root, fs }),
+    ).toMatchObject({ status: "resolved", entry: "ori.review", source: "--entry" });
+    expect(await resolveEntry({ harness: "claude", env: codexEnv, root, fs })).toMatchObject({
+      status: "resolved",
+      entry: "claude",
+      source: "--harness",
+    });
+    expect(await resolveEntry({ env: codexEnv, root, fs })).toEqual({
+      status: "resolved",
+      entry: "codex",
+      source: "environment",
+      harness: "codex",
+      signals: ["CODEX_THREAD_ID"],
+    });
+    await expect(resolveEntry({ harness: "cursor", env: {}, root, fs })).rejects.toMatchObject({
+      code: "invalid-value",
+    });
+    // Ori in a shell names no server entry: never borrow ori.review, even though it is the only one.
+    expect(await resolveEntry({ env: { ORI_SESSION_ID: "s" }, root, fs })).toMatchObject({
+      status: "unresolved",
+      reason: "no-entry-key",
+      candidates: ["ori.review"],
+    });
+    expect(await resolveEntry({ harness: "ori", env: {}, root, fs })).toMatchObject({
+      status: "unresolved",
+      reason: "no-entry-key",
+    });
+    // Several logical entries for one harness need explicit selection.
+    files.set(file, `${sample}\n[agents."codex.review"]\nname = "third_one"\n`);
+    expect(await resolveEntry({ env: codexEnv, root, fs })).toMatchObject({
+      status: "unresolved",
+      reason: "several-entries",
+      candidates: ["codex", "codex.review"],
+    });
+    // Only an unrelated or differently keyed entry exists: still no borrowing.
+    files.set(file, `[agents."codex.review"]\nname = "third_one"\n`);
+    expect(await resolveEntry({ env: codexEnv, root, fs })).toMatchObject({
+      status: "unresolved",
+      reason: "several-entries",
+    });
+    files.set(file, `[agents.other]\nname = "x"\n`);
+    expect(await resolveEntry({ env: { CLAUDECODE: "1" }, root, fs })).toMatchObject({
+      status: "resolved",
+      entry: "claude",
+    });
+    expect(
+      await resolveEntry({ env: { CLAUDECODE: "1", ORI_SESSION_ID: "s" }, root, fs }),
+    ).toMatchObject({
+      status: "unresolved",
+      reason: "conflict",
+      harnesses: ["claude", "ori"],
+    });
+    expect(await resolveEntry({ env: {}, root, fs })).toMatchObject({
+      status: "unresolved",
+      reason: "no-signal",
+    });
+  });
+
+  it("config get/set/list use the detected entry and report the deciding source", async () => {
+    const t = setup(sample, { env: { CODEX_SANDBOX: "seatbelt-secret" } });
+    expect(await t.call("get", "identity.name", "--json")).toBe(0);
+    expect(t.json()).toMatchObject({
+      entry: "codex",
+      value: "stable_one",
+      selection: "environment",
+      harness: "codex",
+      signals: ["CODEX_SANDBOX"],
+    });
+    expect(await t.call("get", "identity.name")).toBe(0);
+    expect(t.out.at(-1)).toContain("detected codex from CODEX_SANDBOX");
+    expect(await t.call("set", "identity.triage_role", "designer", "--json")).toBe(0);
+    expect(t.json()).toMatchObject({ entry: "codex", changed: true, selection: "environment" });
+    expect(parseIdentityDocument(t.files.get(file)!).agents).toMatchObject({
+      codex: { name: "stable_one", role: "agent", triage_role: "designer" },
+      "ori.review": { name: "other_agent", triage_role: "designer" },
+    });
+    expect(await t.call("list", "--json")).toBe(0);
+    expect(t.json().identity).toMatchObject({ resolved: true, entry: "codex", harness: "codex" });
+    expect(await t.call("get", "identity.name", "--harness", "claude", "--json")).toBe(0);
+    expect(t.json()).toMatchObject({ entry: "claude", selection: "--harness", value: null });
+    expect(await t.call("get", "identity.name", "--entry", "ori.review", "--json")).toBe(0);
+    expect(t.json()).toMatchObject({ value: "other_agent", selection: "--entry" });
+    expect(t.out.join("")).not.toContain("seatbelt-secret");
+    expect(
+      await t.call("get", "identity.name", "--entry", "codex", "--harness", "codex", "--json"),
+    ).toBe(1);
+    expect(t.json()).toMatchObject({ code: "usage" });
+    expect(await t.call("get", "complexity.enabled", "--harness", "codex", "--json")).toBe(1);
+    expect(t.json()).toMatchObject({ code: "usage" });
+  });
+
+  it("refuses conflicting, ambiguous or missing evidence with exact explicit commands", async () => {
+    const conflict = setup(sample, { env: { CLAUDECODE: "1", CODEX_CI: "1" } });
+    expect(
+      await conflict.call(
+        "set",
+        "identity.triage_role",
+        "designer",
+        "--repo",
+        "owner/name",
+        "--json",
+      ),
+    ).toBe(1);
+    const refused = conflict.json();
+    expect(refused).toMatchObject({ code: "identity-unresolved" });
+    expect(refused.message).toContain("claude, codex");
+    expect(refused.message).toContain("CLAUDECODE, CODEX_CI");
+    expect(refused.recovery).toContain(
+      "github-triage config set identity.triage_role designer --entry KEY --repo owner/name",
+    );
+    expect(refused.recovery).not.toContain("#");
+    expect(conflict.files.get(file)).toBe(sample);
+
+    const ori = setup(sample, { env: { ORI_SESSION_ID: "s" } });
+    expect(await ori.call("get", "identity.name", "--json")).toBe(1);
+    expect(ori.json().recovery).toContain(
+      "github-triage config get identity.name --entry ori.review",
+    );
+    expect(await ori.call("list", "--json")).toBe(0);
+    expect(ori.json().identity).toMatchObject({ resolved: false, reason: "no-entry-key" });
+    expect(await ori.call("list")).toBe(0);
+    expect(ori.out.at(-1)).toContain("github-triage config list --entry ori.review");
+
+    const none = setup(undefined, { env: {} });
+    expect(await none.call("set", "identity.triage_role", "designer", "--json")).toBe(1);
+    expect(none.json()).toMatchObject({ code: "identity-unresolved" });
+    expect(none.json().message).toContain("No supported harness was detected");
+    expect(none.files.size).toBe(0);
+  });
+
   it("keeps repository settings listable when the identity file is unreadable", async () => {
     const t = setup(sample);
     const realRead = t.fs.readText;
@@ -8170,6 +8347,17 @@ x = 1
     const listed = t.json();
     expect(listed.settings.length).toBeGreaterThan(0);
     expect(listed.identity).toMatchObject({ resolved: false, error: { code: "filesystem" } });
+  });
+
+  it("keeps repository settings listable after --harness lookup errors, but rejects bad harness names", async () => {
+    const bad = setup('[agents.codex]\nname = "x"\ntoken = "leak-me\n');
+    expect(await bad.call("list", "--harness", "codex", "--json")).toBe(0);
+    const listed = bad.json();
+    expect(listed.settings.length).toBeGreaterThan(0);
+    expect(listed.identity).toMatchObject({ resolved: false, error: { code: "malformed" } });
+    expect(bad.out.at(-1)).not.toContain("leak-me");
+    const t = setup(sample);
+    expect(await t.call("list", "--harness", "bogus", "--json")).toBe(1);
   });
 
   it("refuses malformed or tracked files without rewriting or echoing contents", async () => {

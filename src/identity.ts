@@ -250,6 +250,21 @@ export async function readIdentity(
   return recordFor(raw === null ? null : parseIdentityDocument(raw), entry);
 }
 
+/**
+ * Entry keys present in the root file (read-only; empty when the file is absent). Only the
+ * keys are returned, never any entry's values, so harness resolution (#38) can tell whether
+ * several logical entries share one harness without seeing other agents' data.
+ */
+export async function listEntryKeys(
+  root: string,
+  fs: ConfigFileSystem = nodeFileSystem,
+): Promise<string[]> {
+  const raw = await fs.readText(join(root, IDENTITY_FILE));
+  if (raw === null) return [];
+  const agents = parseIdentityDocument(raw).agents;
+  return isTable(agents) ? Object.keys(agents) : [];
+}
+
 /** Read-only service for consumers (#38 detection, #64 doctor, #25 MCP): resolve then read. */
 export async function lookupIdentity(options: {
   readonly cwd: string;
