@@ -3,7 +3,11 @@
  * Output-size and wall-time comparison of the CLI and the MCP adapter (#25, doc/design/mcp.md).
  *
  * Credential-free and offline: both interfaces run in this process over the same injected,
- * synthetic snapshot (no gh, no GitHub, no tokens). The CLI is driven through `main` with an
+ * synthetic snapshot (no gh, no GitHub, no tokens). Every local boundary is injected too: the
+ * workflow-guide and estimation settings read an empty in-memory filesystem and a fake git that
+ * reports a synthetic checkout of the synthetic repository, so nothing depends on the machine
+ * running the script. Subprocesses are forbidden for the whole run, and every measured output is
+ * checked for the real working directory and home directory; either guard fails the run. The CLI is driven through `main` with an
  * injected runtime; the MCP server through the official SDK client over an in-memory transport.
  * Token counts are an approximation (characters / 4, rounded up), not a model tokenizer.
  *
@@ -13,9 +17,19 @@ import { parseArgs } from "node:util";
 import { performance } from "node:perf_hooks";
 import { Client } from "@modelcontextprotocol/client";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
-import { main } from "../src/cli.js";
-import { createServer } from "../src/mcp.js";
 import type { McpRuntime } from "../src/mcp.js";
+import {
+  assertNoLocalPaths,
+  emptyFileSystem,
+  fakeGit,
+  forbidSubprocesses,
+  SYNTHETIC_ROOT,
+} from "./benchmark-isolation.js";
+
+// Before the modules under test load, so their child_process bindings are the throwing ones.
+forbidSubprocesses();
+const { main } = await import("../src/cli.js");
+const { createServer } = await import("../src/mcp.js");
 
 const { values } = parseArgs({
   options: {
@@ -71,6 +85,7 @@ const snapshot = (since: string | null = null) => ({
   rateLimit: null,
 });
 
+const local = { cwd: SYNTHETIC_ROOT, fs: emptyFileSystem, git: fakeGit(repo) };
 const runtime: McpRuntime = {
   currentRepository: async () => repo,
   collect: (async (_r: string, options?: { since?: string }) =>
@@ -79,6 +94,15 @@ const runtime: McpRuntime = {
     throw new Error("dependencies are not part of this benchmark");
   }) as McpRuntime["dependencyReport"],
   now: clock,
+  guide: local,
+  estimation: {
+    ...local,
+    api: new Proxy({} as NonNullable<McpRuntime["estimation"]>["api"] & object, {
+      get: (_t, name) => {
+        throw new Error(`benchmark isolation: unexpected field API ${String(name)}`);
+      },
+    }),
+  },
 };
 
 const cli = async (args: string[]): Promise<string> => {
@@ -121,7 +145,8 @@ interface Row {
   medianMs: number;
 }
 const rows: Row[] = [];
-const add = (scenario: string, output: string, text: string, ms: number) =>
+const add = (scenario: string, output: string, text: string, ms: number) => {
+  assertNoLocalPaths(`${scenario} / ${output}`, text);
   rows.push({
     scenario,
     output,
@@ -129,6 +154,7 @@ const add = (scenario: string, output: string, text: string, ms: number) =>
     approxTokens: tokens(text.length),
     medianMs: ms,
   });
+};
 
 const scenarios: { name: string; cli: string[]; tool: string; args: Record<string, unknown> }[] = [
   { name: "briefing", cli: ["--repo", repo], tool: "triage_briefing", args: {} },
