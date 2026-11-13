@@ -703,4 +703,133 @@ describe("repository catch-up aggregation (#169)", () => {
     const blockers = report.sections.blockers.items.filter((r) => r.subject.number === 55);
     expect(blockers.map((r) => r.kind)).toEqual(["cancelled-checks"]);
   });
+
+  it("keeps a release marker after a long handoff note through the real collector", async () => {
+    const note = "Handoff detail. ".repeat(200);
+    const release = comment(
+      80,
+      11,
+      `Released.\n\n${note}\n<!-- github-triage:release:abcd {"v":1,"agent":"ana","outcome":"handoff"} -->`,
+      inside(3),
+    );
+    const closed = {
+      ...pr(80, [], "SUCCESS", {
+        state: "MERGED",
+        mergedAt: inside(1),
+        createdAt: inside(30),
+        updatedAt: inside(1),
+        comments: page([release]),
+      }),
+      closedAt: inside(1),
+    };
+    const snapshot = await collect(repo, { changeWindow: window }, fakeGh([closed]), clock);
+    const report = catchUp(snapshot, { now: clock, limit: 100 });
+    const rows = report.sections.progress.items.filter((r) => r.kind === "release");
+    expect(rows.map((r) => r.attribution[0]!.agent)).toEqual(["ana"]);
+    expect(report.summary.operations).toBe(1);
+    expect(report.completeness.history).toBe("complete");
+
+    // Evidence retained before markers were parsed at collection: a truncated marker is unknown.
+    const legacy = structuredClone(snapshot);
+    for (const s of legacy.changeEvidence!.subjects)
+      for (const op of s.operations ?? []) delete op.record;
+    const stale = catchUp(legacy, { now: clock, limit: 100 });
+    expect(stale.completeness.history).toBe("incomplete");
+    expect(stale.completeness.warnings.join(" ")).toContain(url("pull", 80));
+    expect(stale.checkpoint.candidate).toBeNull();
+  });
+
+  it("withholds the checkpoint when a changed subject's event time is unknown", async () => {
+    const closed = issue(81, [], {
+      state: "CLOSED",
+      stateReason: "COMPLETED",
+      createdAt: inside(30),
+      updatedAt: inside(1),
+    });
+    const report = catchUp(
+      await collect(repo, { changeWindow: window }, fakeGh([], [closed]), clock),
+      { now: clock, limit: 100 },
+    );
+    expect(report.completeness.history).toBe("incomplete");
+    expect(report.completeness.complete).toBe(false);
+    expect(report.checkpoint.candidate).toBeNull();
+    expect(report.completeness.warnings.join(" ")).toContain(`${url("issues", 81)} (closedAt`);
+  });
+
+  it("reports passing checks only when every outcome is a supported pass", () => {
+    const odd = pr(82, [], "UNKNOWN");
+    const report = catchUp(snap([], [odd], evidence([])), { now: clock, limit: 100 });
+    const row = report.sections.activity.items.find((r) => r.subject.number === 82)!;
+    expect(row.description).toContain("checks unknown");
+    expect(row.description).not.toContain("passing");
+    const fine = catchUp(snap([], [pr(83, [])], evidence([])), { now: clock, limit: 100 });
+    expect(fine.sections.activity.items[0]!.description).toContain("checks passing");
+  });
+
+  it("groups one PR closing two claimed issues into one contribution, in any order", () => {
+    const a = issue(84, ["agent:ana", "status:ready"]);
+    const b = issue(85, ["agent:bo"]);
+    const both = pr(90, [84, 85], "SUCCESS", { labels: page([{ name: "agent:cy" }]) });
+    const second = pr(91, [84], "FAILURE");
+    const build = (issues: Issue[], prs: PullRequest[]) =>
+      catchUp(snap(issues, prs, evidence([])), { now: clock, limit: 100 });
+    const report = build([a, b], [both, second]);
+    expect(report.sections.activity.total).toBe(1);
+    expect(report.summary.activeContributions).toBe(1);
+    const row = report.sections.activity.items[0]!;
+    expect(row.related.map((r) => `${r.relation}#${r.number}`)).toEqual([
+      "co-closed#85",
+      "closed-by#90",
+      "closed-by#91",
+    ]);
+    expect(row.attribution.map((a) => a.agent)).toEqual(["ana", "bo", "cy"]);
+    expect(report.activityGroups.map((g) => [g.agent, g.total])).toEqual([
+      ["ana", 1],
+      ["bo", 1],
+      ["cy", 1],
+    ]);
+    // Collection order never changes the row.
+    expect(build([b, a], [second, both]).sections.activity.items[0]).toEqual(row);
+  });
+
+  it("times current activity by the observation and keeps the start apart", () => {
+    const claimed = issue(86, ["agent:ana"], { createdAt: inside(3) });
+    const report = catchUp(snap([claimed], [pr(92, [])], evidence([])), {
+      now: clock,
+      limit: 100,
+    });
+    for (const row of report.sections.activity.items) {
+      expect(row.at).toBe("2026-11-13T09:00:05.000Z");
+      expect(row.timing).toBe("observation");
+    }
+    const row = report.sections.activity.items.find((r) => r.subject.number === 86)!;
+    expect(row.startedAt).toBe(inside(3));
+    expect(row.description).toContain("started in window");
+  });
+
+  it("renders evidence links in text", () => {
+    const logs = `${url("pull", 93)}/checks?check_run_id=7`;
+    const failing = pr(93, [], "FAILURE", {
+      commits: {
+        nodes: [
+          {
+            commit: {
+              statusCheckRollup: {
+                state: "FAILURE",
+                contexts: page([
+                  { name: "verify", status: "COMPLETED", conclusion: "FAILURE", detailsUrl: logs },
+                ]),
+              },
+            },
+          },
+        ],
+      },
+    });
+    const report = catchUp(snap([], [failing], evidence([])), { now: clock, limit: 100 });
+    const blocker = report.sections.blockers.items.find((r) => r.kind === "failed-checks")!;
+    expect(blocker.evidence.length).toBeGreaterThan(0);
+    const text = catchUpText(report);
+    const evidenceLine = text.split("\n").find((l) => l.startsWith("  Evidence:"));
+    expect(evidenceLine).toContain(logs);
+  });
 });

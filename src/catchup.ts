@@ -11,7 +11,7 @@
  */
 import { analysisRules, excerpt, owners, prChecks, workflow } from "./briefing.js";
 import type { Bounded } from "./briefing.js";
-import { inWindow, snapshotChangeEvidence } from "./changes.js";
+import { inWindow, parseOperationMarker, snapshotChangeEvidence } from "./changes.js";
 import type {
   ChangeEvidence,
   ChangeSubject,
@@ -63,6 +63,8 @@ export interface CatchUpRow {
   /** Event time for history rows, observation time for current rows; null when unknown. */
   at: string | null;
   timing: "event" | "observation" | "unknown";
+  /** For current activity: when the subject started (its creation), kept apart from `at`. */
+  startedAt?: string | null;
   description: string;
   /** All reasons that put the row here; grouping never drops one. */
   reasons: string[];
@@ -149,23 +151,8 @@ interface OperationRecord {
   comment: Comment;
 }
 function operationRecord(comment: Comment): OperationRecord | null {
-  const body = comment.body ?? "";
-  if (body.includes("<!-- github-triage:claim:")) {
-    const agent = /Claimed by `([^`]+)`/.exec(body)?.[1] ?? null;
-    return { operation: "claim", agent, comment };
-  }
-  const release = /<!-- github-triage:release:[0-9a-f]+ (\{.*?\}) -->/.exec(body);
-  if (release) {
-    let agent: string | null = null;
-    try {
-      const parsed = JSON.parse(release[1]!) as { agent?: unknown };
-      if (typeof parsed.agent === "string") agent = parsed.agent;
-    } catch {
-      // Unparsable records stay unattributed rather than guessed.
-    }
-    return { operation: "release", agent, comment };
-  }
-  return null;
+  const marker = parseOperationMarker(comment.body ?? "");
+  return marker ? { ...marker, comment } : null;
 }
 
 /** Sort known times newest first, unknown times after, then stable id. */
@@ -522,12 +509,13 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
       });
       continue;
     }
-    const record = operationRecord({
-      body: op.body,
-      url: op.url,
-      author: op.author ? { login: op.author } : null,
-    });
-    if (!record) continue;
+    // Prefer the marker parsed from the full body at collection; older evidence is reparsed, and
+    // a marker that no longer parses (for example, truncated) makes the subject's history unknown.
+    const record = op.record !== undefined ? op.record : parseOperationMarker(op.body);
+    if (!record) {
+      unknownOperations.add(s.url);
+      continue;
+    }
     progressRows.push({
       id: rowId(s.kind, s.number, `${record.operation}:${op.url}`),
       kind: record.operation,
@@ -557,6 +545,28 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
   if (historyStatus === "complete" && unknownOperations.size) {
     historyStatus = "incomplete";
     historyNotice = `Operation history (reviews, claims, releases) is incomplete for ${[...unknownOperations].sort().join(", ")}; absent rows do not mean nothing happened.`;
+  }
+  // A changed subject whose creation, closure or merge time is unknown may hide an event in the
+  // window: history cannot be complete and no checkpoint may pass it.
+  // Only a time whose absence drops an event counts: a merged PR's closedAt yields no event.
+  const missingTimes = (s: ChangeSubject) =>
+    [
+      !s.createdAt && "createdAt",
+      s.state === "MERGED" && !s.mergedAt && "mergedAt",
+      s.state === "CLOSED" && !s.closedAt && "closedAt",
+    ].filter((f): f is string => !!f);
+  const untimed = window?.from
+    ? subjects
+        .filter((s) => missingTimes(s).length)
+        .map((s) => `${s.url} (${missingTimes(s).join(", ")} unknown)`)
+        .sort()
+    : [];
+  const untimedNotice = untimed.length
+    ? `Event times are unknown for ${untimed.join(", ")}; a merge, closure or creation may be unreported.`
+    : null;
+  if (untimedNotice && historyStatus === "complete") {
+    historyStatus = "incomplete";
+    historyNotice = untimedNotice;
   }
 
   // ---- Blockers / risks (current). Onset is unknown without delta evidence.
@@ -674,34 +684,82 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
   const claimedPr = new Set<string>();
   const startedOrOngoing = (createdAt: string | null) =>
     window?.from && qualifies(createdAt) ? "started in window" : "ongoing (not new)";
-  for (const issue of snapshot.issues) {
-    if (!workflow.openStates.includes(issue.state) || !owners(issue).length) continue;
-    const prs = snapshot.pullRequests.filter(
-      (pr) =>
-        workflow.openStates.includes(pr.state) &&
-        pr.closingIssuesReferences.nodes.some((r) => r.url === issue.url),
-    );
+  const byUrlOrder = (a: { url: string }, b: { url: string }) =>
+    a.url < b.url ? -1 : a.url > b.url ? 1 : 0;
+  const openPrs = snapshot.pullRequests
+    .filter((pr) => workflow.openStates.includes(pr.state))
+    .sort(byUrlOrder);
+  const claimedIssues = snapshot.issues
+    .filter((issue) => workflow.openStates.includes(issue.state) && owners(issue).length)
+    .sort((a, b) => a.number - b.number || byUrlOrder(a, b));
+  // One contribution per connected set of claimed issues and the open PRs that natively close
+  // them, so a PR closing two claimed issues is one row, counted once.
+  const component = new Map<string, string>();
+  const root = (key: string): string => {
+    const parent = component.get(key) ?? key;
+    if (parent === key) return key;
+    const top = root(parent);
+    component.set(key, top);
+    return top;
+  };
+  const join = (a: string, b: string) => {
+    const [ra, rb] = [root(a), root(b)].sort();
+    if (ra !== rb) component.set(rb!, ra!);
+  };
+  const prsOf = (issue: Issue) =>
+    openPrs.filter((pr) => pr.closingIssuesReferences.nodes.some((r) => r.url === issue.url));
+  for (const issue of claimedIssues) for (const pr of prsOf(issue)) join(issue.url, pr.url);
+  const contributions = new Map<string, Issue[]>();
+  for (const issue of claimedIssues)
+    contributions.set(root(issue.url), [...(contributions.get(root(issue.url)) ?? []), issue]);
+  for (const issues of contributions.values()) {
+    const [lead, ...others] = issues;
+    const issue = lead!;
+    const prs = openPrs.filter((pr) => issues.some((i) => prsOf(i).includes(pr)));
     prs.forEach((pr) => claimedPr.add(pr.url));
-    const status = labelsOf(issue).filter((l) => l.startsWith("status:"));
+    const status = issues.flatMap((i) =>
+      labelsOf(i)
+        .filter((l) => l.startsWith("status:"))
+        .map((l) => (i === issue ? l : `#${i.number} ${l}`)),
+    );
     const prState = prs.map((pr) => `PR #${pr.number} ${prStatusWord(pr)}`);
+    const startedAt = issue.createdAt ?? null;
     activityRows.push({
       id: rowId("issue", issue.number, "activity"),
       kind: "claim",
       subject: ref(issue, "issue"),
-      related: prs.map((pr) => ({ ...ref(pr, "pull-request"), relation: "closed-by" })),
-      at: issue.createdAt ?? null,
-      timing: "observation",
-      description: `${issue.title} — ${startedOrOngoing(issue.createdAt ?? null)}; ${[...status, ...prState].join("; ") || "no status label"}.`,
-      reasons: [
-        `Reported owner label ${owners(issue).join(", ")}`,
-        ...prs.map((pr) => `Linked open PR #${pr.number} (native closing reference)`),
+      related: [
+        ...others.map((i) => ({ ...ref(i, "issue" as const), relation: "co-closed" })),
+        ...prs.map((pr) => ({ ...ref(pr, "pull-request" as const), relation: "closed-by" })),
       ],
-      evidence: [issue.url, ...prs.map((pr) => pr.url)],
+      // A current observation is timed by the collection, never by the subject's creation.
+      at: snapshot.fetchedAt,
+      timing: "observation",
+      startedAt,
+      description: `${issue.title}${others.length ? ` (with ${others.map((i) => `#${i.number}`).join(", ")})` : ""} — ${startedOrOngoing(startedAt)}; ${[...status, ...prState].join("; ") || "no status label"}.`,
+      reasons: [
+        ...issues.map((i) =>
+          i === issue
+            ? `Reported owner label ${owners(i).join(", ")}`
+            : `#${i.number}: reported owner label ${owners(i).join(", ")}`,
+        ),
+        ...prs.map(
+          (pr) =>
+            `Linked open PR #${pr.number} closes ${issues
+              .filter((i) => pr.closingIssuesReferences.nodes.some((r) => r.url === i.url))
+              .map((i) => `#${i.number}`)
+              .join(", ")} (native closing reference)`,
+        ),
+      ],
+      evidence: [...issues.map((i) => i.url), ...prs.map((pr) => pr.url)],
       next: prs.length ? nextFor(prs[0]!) : "Implementation in progress; no linked PR observed.",
       uncertainty: "reported",
-      // The linked PR's own owner labels stay in the grouped contribution, sourced to that PR.
+      // Each issue's and linked PR's own owner labels stay in the contribution, sourced to them.
       attribution: [
         ...labelAttribution(issue),
+        ...others.flatMap((i) =>
+          labelAttribution(i).map((a) => ({ ...a, source: `${a.source} on issue #${i.number}` })),
+        ),
         ...prs.flatMap((pr) =>
           owners(pr).map((label): Attribution => ({
             agent: label.slice(workflow.ownerPrefix.length),
@@ -729,8 +787,9 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
         title: byUrl.get(l.url)?.title ?? "",
         relation: "closes",
       })),
-      at: pr.createdAt ?? null,
+      at: snapshot.fetchedAt,
       timing: "observation",
+      startedAt: pr.createdAt ?? null,
       description: `${pr.title} — ${startedOrOngoing(pr.createdAt ?? null)}; ${prStatusWord(pr)}.`,
       reasons: [
         "Open PR",
@@ -805,6 +864,7 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
   const warnings = [
     ...snapshot.warnings,
     ...(historyNotice ? [historyNotice] : []),
+    ...(untimedNotice && untimedNotice !== historyNotice ? [untimedNotice] : []),
     ...(evidence?.coverage ?? [])
       .filter((c) => !c.complete)
       .map((c) => `${c.source}: ${c.omission ?? "incomplete"}`),
@@ -888,18 +948,27 @@ function classifyChecks(pr: PullRequest) {
     failed: checks.filter((c) => workflow.failure.includes(c.outcome) && c.outcome !== "CANCELLED"),
     cancelled: checks.filter((c) => c.outcome === "CANCELLED"),
     pending: checks.filter((c) => workflow.unfinished.includes(c.outcome)),
+    /** Outcomes that are neither a supported pass, failure nor unfinished state. */
+    unknown: checks.filter(
+      (c) => ![...workflow.pass, ...workflow.failure, ...workflow.unfinished].includes(c.outcome),
+    ),
+    /** False when the check connection was truncated: more outcomes exist than were seen. */
+    complete: !pr.commits.nodes[0]?.commit.statusCheckRollup?.contexts.pageInfo?.hasNextPage,
   };
 }
 const CANCELLED_WORD = "checks cancelled; verification incomplete";
 function prStatusWord(pr: PullRequest): string {
-  const { checks, failed, cancelled, pending } = classifyChecks(pr);
+  const { checks, failed, cancelled, pending, unknown, complete } = classifyChecks(pr);
   if (pr.isDraft) return "draft";
   if (workflow.conflicts.includes(pr.mergeable)) return "conflicting";
   if (failed.length) return "checks failing";
   if (cancelled.length) return CANCELLED_WORD;
   if (pending.length) return "checks pending";
   if (pr.reviewThreads.nodes.some((t) => !t.isResolved)) return "review findings open";
-  return checks.length ? "checks passing" : "checks unknown";
+  // Passing only when every observed outcome is a supported pass and none were left unseen.
+  if (!checks.length || unknown.length) return "checks unknown";
+  if (!complete) return "checks incomplete";
+  return "checks passing";
 }
 function nextFor(pr: PullRequest): string {
   const word = prStatusWord(pr);
@@ -962,6 +1031,8 @@ export function catchUpText(
           : `attribution unknown${a.githubActor ? ` (GitHub ${a.githubActor})` : ""}`,
       )
       .join("; ");
+    // Evidence beyond the subject itself (question comments, reviews, failed checks).
+    const links = r.evidence.filter((link) => link !== r.subject.url);
     const related = r.related.length
       ? ` [+ ${r.related.map((x) => `${x.relation} #${x.number}`).join(", ")}]`
       : "";
@@ -970,6 +1041,11 @@ export function catchUpText(
       `  ${r.at ?? "time unknown"} (${r.timing}); ${who}`,
       ...(r.reasons.length > 1 ? [`  Reasons: ${r.reasons.join(" | ")}`] : []),
       ...(r.next ? [`  Next: ${r.next}`] : []),
+      ...(links.length
+        ? [
+            `  Evidence: ${links.slice(0, 3).join(" ")}${links.length > 3 ? ` (+${links.length - 3} more in --json)` : ""}`,
+          ]
+        : []),
       `  ${r.subject.url} — ${r.detailCommand}`,
     ].join("\n");
   };
