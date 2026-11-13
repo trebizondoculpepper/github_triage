@@ -1,7 +1,7 @@
 /** Native dependency queries and pure facts. Contract: doc/issue-dependencies.md. */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { ghQuery, pages, declaredDependencies, prop, selected } from "./github.js";
+import { ghQuery, ghQueryWith, pages, declaredDependencies, prop, selected } from "./github.js";
 import type { Query } from "./github.js";
 import type { Issue, NativeNode, Reference } from "./types.js";
 
@@ -150,8 +150,8 @@ export interface DependencyReport {
 export async function dependencyReport(
   repository: string,
   number: number,
-  { tree = false }: { tree?: boolean } = {},
-  query: Query = ghQuery,
+  { tree = false, signal }: { tree?: boolean; signal?: AbortSignal } = {},
+  query: Query = ghQueryWith(signal),
   now: () => Date = () => new Date(),
 ): Promise<DependencyReport> {
   const startedAt = now().toISOString();
@@ -161,6 +161,7 @@ export async function dependencyReport(
     const [repo, n] = next;
     const key = `${repo}#${n}`;
     if (nodes.has(key)) continue;
+    signal?.throwIfAborted();
     const item = await readDependencyIssue(repo, n, query);
     nodes.set(key, dependencyFacts(item, repo));
     if (tree)

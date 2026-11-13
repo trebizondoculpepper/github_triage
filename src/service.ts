@@ -98,6 +98,8 @@ export interface BriefingRequest {
   since?: string;
   limit: number;
   maxChars: number;
+  /** Cancellation: stops collection and terminates running gh child processes. */
+  signal?: AbortSignal;
 }
 
 /** A live briefing read: either a report, or a diagnosis of an unavailable issue. */
@@ -120,6 +122,7 @@ export async function readBriefing(
     snapshot = await runtime.collect(request.repository, {
       issue: request.issue,
       since: request.since,
+      signal: request.signal,
     });
   } catch (error) {
     if (!(error instanceof IssueUnavailable)) throw error;
@@ -150,7 +153,8 @@ export async function readDependencies(
   repository: string,
   number: number,
   tree: boolean,
+  signal?: AbortSignal,
 ): Promise<{ report: DependencyReport; text: string }> {
-  const report = await runtime.dependencyReport(repository, number, { tree });
+  const report = await runtime.dependencyReport(repository, number, { tree, signal });
   return { report, text: dependencyText(report) };
 }
