@@ -1,3 +1,5 @@
 # Ranking baseline and designer impact direction
 
 Recorded the approved bounded first ordering: addressed attention, own PR follow-up, actionable other-agent review, own active work, eligible implementation, optional estimation. Preserve existing pickup overrides and explicit age-only modes, with complexity informational until a later reviewed heuristic. Recorded designer impact XS–XXL as the mirror of implementer complexity, distinct from computed immediate unlock utility. Created #244–#248 with rationale and native delivery sequencing. No ranking or estimation runtime implementation changed.
+
+The stale machine-global executable did not recognize briefing. Under the owner's standing source-install authorization, packed the tested build from main base 52466e8, refreshed both global bins with install scripts disabled and byte-verified them against dist. Live installed briefing succeeded and label-backed estimation returned an available queue without field setup. Source package version is still 0.1.0; no npm publication or registry-version test is claimed. Recorded installed evidence on #174 and kept real-client MCP acceptance separate.
