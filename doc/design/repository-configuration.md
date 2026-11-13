@@ -16,15 +16,15 @@ Use a repository-owned, versioned `.github/triage.json` file for non-secret shar
 
 A shared TypeScript configuration service owns registered keys, typed validation, defaults, schema versioning, migrations and filesystem access. CLI, setup and diagnostics call that service. Read-only operations never rewrite or migrate files. Writes validate and migrate supported older versions in memory, preserve unrelated supported values, and replace the file atomically after checking for intervening edits. Refuse malformed, unsupported-future or incompatible data without destructive rewriting; expose exact recovery guidance. Test missing/current/old/future versions and failed/concurrent writes through injected filesystem boundaries. No configuration framework or global daemon is required.
 
-## Initial complexity settings
+## Complexity settings
 
-`complexity.enabled` is Boolean and defaults to true, including when the file/key is absent. `complexity.fieldId` is an explicitly selected native GitHub field identifier, initially unset. Enabled does not mean configured: absent mapping is a setup diagnostic, never permission to create a shared GitHub field. `config set complexity.enabled false` is the proposed opt-out. An empty ticket estimate is not a configuration fault.
+`complexity.enabled` is Boolean and defaults to true, including when absent. Complexity uses the fixed recognized T-shirt label vocabulary in [complexity-estimation.md](complexity-estimation.md). Remove the earlier `complexity.fieldId` registry entry and field-backend settings in the labels-only implementation; no storage-backend selector, migration or account-wide field setup is needed.
 
-Disabling complexity suppresses its estimation queue and complexity-field diagnostics; retain existing mapping and remote estimates without deleting them. Existing unrelated triage commands remain usable when setup is incomplete. A missing field mapping must not crash ordinary briefings.
+Disabling complexity suppresses its estimation queue while retaining labels and history. General triage remains usable independently. Missing size labels and absent label definitions are not setup failures. The explicit estimate operation creates a requested missing label; read-only configuration/diagnostics never do so. Use `config set complexity.enabled false` for the opt-out; agents continue using config commands rather than file edits.
 
 ## Delivery boundary
 
-Configuration foundation and CLI commands are separate focused slices. Complexity setup, native API verification, diagnostics and estimates build on them. Architecture review must land before runtime implementation. The configuration epic tracks these slices without making parent completion a prerequisite for children. No live configuration is changed by this design.
+Configuration foundation and CLI commands are separate focused slices. Label-backed estimates and their queue use the shared service. Architecture review must land before runtime implementation. The configuration epic tracks these slices without making parent completion a prerequisite for children. No live configuration is changed by this design.
 
 ## Confirmed local identity and TOML direction
 

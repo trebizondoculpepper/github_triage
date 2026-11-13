@@ -20,7 +20,7 @@ Team view lists explicit named-agent claims, linked PR state, latest ticket/PR a
 
 Diagnose intended project, selected harness/server entry, supported local configuration parse/identity/name, triage_role, supported role, Git ignored versus already tracked configuration, and missing runtime/gh access as separate checks. No repairs, login, identity creation, role writes, hooks or Git tracking changes. Return actionable in-band results, especially for hosts discarding stderr. Missing/ambiguous detection is explicit. Reuse the confirmed root-level local TOML identity resolver and config boundary in identity.md. Diagnose missing, malformed, ambiguous or unimplemented resolution explicitly; no external service/check-in is required.
 
-Implementation defaults (routine, under this contract): the command is `doctor`; check IDs, statuses (`ok`/`missing`/`invalid`/`access`/`unsupported`/`unknown`) and exit codes are documented in `doc/usage.md`. The current baseline reports identity entry/name/role parsing as unsupported. The owner has confirmed the local TOML file and delegated parser selection; completing these checks no longer waits on an owner parser decision. Preserve existing check/exit semantics or explicitly version documented changes.
+Implementation defaults (routine, under this contract): the command is `doctor`; check IDs, statuses (`ok`/`missing`/`invalid`/`access`/`unsupported`/`unknown`) and exit codes are documented in `doc/usage.md`. The current baseline reports identity entry/name/role parsing as unsupported. The owner has confirmed the local TOML file and delegated parser selection; completing these checks no longer waits on an owner parser decision. Preserve existing check/exit semantics or explicitly version documented changes. The labels-only decision retires field-specific setup/permission diagnostics; explicit label mutations still report their own denied/unknown operation access.
 
 ## #66: Ticket Doctor v1
 
@@ -41,3 +41,7 @@ Fixtures cover current versus stale SHA, cancelled/no-log CI, multiple blockers,
 ## #39: transferred issue inspection
 
 Use `--include-transferred` to opt into transferred-out work in recommendations; default excludes it from actionable local work. Explicit `--issue N` always diagnoses its transfer when GitHub supplies authoritative transfer/redirect evidence, showing original and destination URLs. Do not silently take destination ownership or infer transfer from a missing/forbidden response. Missing, inaccessible and moved are distinct; if evidence cannot distinguish them, report unavailable/unknown with a next inspection command. Preserve origin repository and destination identity in JSON and cross-repository links. Inject redirects/transfer evidence in tests; no live transfer or automatic issue rewrite. Document bounded fallback reads rather than generic GraphQL failure alone.
+
+## Complexity label consistency
+
+Follow [complexity-estimation.md](complexity-estimation.md): conflicting recognized size labels are an inspection finding, incomplete label evidence stays unknown, and no size is an ordinary unestimated ticket. Read-only doctors never create labels or repair conflicts. Native field mappings, definition discovery and creation-permission probes are removed by the labels-only replacement; no missing-label-definition setup warning is needed.

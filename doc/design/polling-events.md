@@ -1,6 +1,6 @@
 # Optional polling and domain events
 
-Contract for #32, after baseline MCP #25. TypeScript implementation only. This document does not start a watcher. Detection is independent of notification/wake-up delivery; shared daemon, SQLite and web UI #42 remain deferred.
+Contract for #32, after the baseline MCP interface delivered under #25. Remaining real-host acceptance evidence on #25 does not block injected polling/event implementation against the delivered adapter. TypeScript implementation only. This document does not start a watcher. Detection is independent of notification/wake-up delivery; shared daemon, SQLite and web UI #42 remain deferred.
 
 ## Enablement and lifecycle
 
