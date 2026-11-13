@@ -44,6 +44,50 @@ jobs:
       - run: npx tsx scripts/smoke.ts src/cli.ts
       - run: npm run package-test
 
+  # FreeBSD TRIAL (owner decision, 2026-11-13): exercises the runtime inside a FreeBSD VM on an
+  # Ubuntu host. Deliberately NOT in `verify`'s needs, so a slow or broken VM cannot block merges.
+  # Remove this job if it proves flaky, slow or costly to maintain.
+  # Vite+ (vp: check/test/build) ships no FreeBSD binding, so `npm run check`, `npm test` and
+  # `npm run build` cannot run there. dist/ is built on the Linux host and synced into the VM,
+  # where npm lifecycle scripts (prepare -> vp, prepack -> build) are disabled; the VM then runs
+  # the built CLI, the source CLI via tsx, both smoke tests and the installed-archive test.
+  freebsd:
+    name: test (freebsd 15.1, node 26) [trial, non-blocking]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Test in FreeBSD VM
+        # vmactions/freebsd-vm v1.6.0
+        uses: vmactions/freebsd-vm@811efaaac0668df8bfb8308c3ec997b5ab50037b
+        env:
+          npm_config_ignore_scripts: "true"
+        with:
+          release: "15.1"
+          usesh: true
+          sync: rsync
+          envs: npm_config_ignore_scripts
+          prepare: |
+            pkg install -y git node26 npm-node26
+          run: |
+            set -e
+            node --version
+            npm --version
+            npm ci
+            node dist/cli.mjs --help
+            npx tsx src/cli.ts --help
+            npm run smoke
+            npx tsx scripts/smoke.ts src/cli.ts
+            npm run package-test
+
   # Single stable check name for branch protection and the triage tool's
   # required "verify" check; passes only if every matrix job passed.
   verify:

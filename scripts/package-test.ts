@@ -32,7 +32,12 @@ interface PackResult {
 /** Validate `npm pack --json` output instead of trusting its shape. */
 function parsePack(stdout: string): PackResult {
   const parsed: unknown = JSON.parse(stdout);
-  const first: unknown = Array.isArray(parsed) ? parsed[0] : undefined;
+  // npm <= 11 prints an array of results; npm 12 prints an object keyed by package name.
+  const first: unknown = Array.isArray(parsed)
+    ? parsed[0]
+    : typeof parsed === "object" && parsed !== null
+      ? Object.values(parsed)[0]
+      : undefined;
   if (
     typeof first === "object" &&
     first !== null &&
