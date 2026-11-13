@@ -452,7 +452,10 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
     for (const item of items) {
       const kind = kindOf(item);
       for (const comment of item.comments.nodes)
-        if (operationRecord(comment))
+        if (operationRecord(comment)) {
+          // A structured operation without its time cannot be placed in or out of the window:
+          // the subject's operation history is unknown, never silently empty.
+          if (!comment.createdAt) unknownOperations.add(item.url);
           operations.push({
             s: ref(item, kind),
             op: {
@@ -464,6 +467,7 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
               state: null,
             },
           });
+        }
       if (isPr(item))
         for (const review of item.reviews.nodes) {
           if (review.state === "PENDING") continue;
@@ -486,7 +490,10 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
       for (const op of s.operations ?? []) operations.push({ s: subjectRef(s), op });
       // An open subject's comments are fully paginated in the snapshot (truncated reviews are a
       // snapshot warning); a closed subject has only its retained, possibly truncated, evidence.
-      if (s.operationsComplete !== true && !byUrl.has(s.url)) unknownOperations.add(s.url);
+      // An open subject's untimed operations are flagged by the loop above; a retained record
+      // that is itself incomplete (unparseable marker, truncated history) is unknown either way.
+      if (s.operationsComplete === false || (s.operationsComplete !== true && !byUrl.has(s.url)))
+        unknownOperations.add(s.url);
     }
   }
   for (const { s, op } of operations) {
@@ -965,6 +972,9 @@ function prStatusWord(pr: PullRequest): string {
   if (cancelled.length) return CANCELLED_WORD;
   if (pending.length) return "checks pending";
   if (pr.reviewThreads.nodes.some((t) => !t.isResolved)) return "review findings open";
+  // A reviewer can request changes without inline threads; same rule as the blocker section.
+  if (pr.reviewDecision && workflow.changesRequested.includes(pr.reviewDecision))
+    return "changes requested";
   // Passing only when every observed outcome is a supported pass and none were left unseen.
   if (!checks.length || unknown.length) return "checks unknown";
   if (!complete) return "checks incomplete";
@@ -976,7 +986,8 @@ function nextFor(pr: PullRequest): string {
   if (word === CANCELLED_WORD) return `Rerun checks on PR #${pr.number}.`;
   if (word === "checks pending") return `Wait for checks on PR #${pr.number}.`;
   if (word === "conflicting") return `Resolve conflicts on PR #${pr.number}.`;
-  if (word === "review findings open") return `Address review findings on PR #${pr.number}.`;
+  if (word === "review findings open" || word === "changes requested")
+    return `Address review findings on PR #${pr.number}.`;
   if (word === "draft") return `Finish draft PR #${pr.number}.`;
   return `Review PR #${pr.number}; verify the current head before merging.`;
 }

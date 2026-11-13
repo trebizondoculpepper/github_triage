@@ -704,6 +704,30 @@ describe("repository catch-up aggregation (#169)", () => {
     expect(blockers.map((r) => r.kind)).toEqual(["cancelled-checks"]);
   });
 
+  it("reports a changes-requested review in activity like the blocker section", () => {
+    const requested = pr(56, [], "SUCCESS", { reviewDecision: "CHANGES_REQUESTED" });
+    const report = catchUp(snap([], [requested], evidence([])), { now: clock, limit: 100 });
+    const row = report.sections.activity.items.find((r) => r.subject.number === 56)!;
+    expect(row.description).toContain("changes requested");
+    expect(row.description).not.toContain("checks passing");
+    expect(row.next).toBe("Address review findings on PR #56.");
+  });
+
+  it("treats an untimed claim/release comment on an open subject as unknown history", async () => {
+    const untimed = { ...claimOn(57, 10, inside(3)), createdAt: null };
+    const open = pr(57, [], "SUCCESS", {
+      createdAt: inside(30),
+      updatedAt: inside(1),
+      comments: page([untimed as never]),
+    });
+    const report = catchUp(await collect(repo, { changeWindow: window }, fakeGh([open]), clock), {
+      now: clock,
+      limit: 100,
+    });
+    expect(report.completeness.history).toBe("incomplete");
+    expect(report.checkpoint.candidate).toBeNull();
+  });
+
   it("keeps a release marker after a long handoff note through the real collector", async () => {
     const note = "Handoff detail. ".repeat(200);
     const release = comment(
