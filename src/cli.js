@@ -289,6 +289,7 @@ async function run(args, output, runtime) {
       staleHours,
       limit,
       now: runtime.now?.() ?? new Date(),
+      offline: !!values.offline,
     });
     await output(values.json ? JSON.stringify(report, null, 2) + "\n" : ticketDoctorText(report));
     return report.completeness.complete ? 0 : 2;

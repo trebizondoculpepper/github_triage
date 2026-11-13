@@ -1716,13 +1716,14 @@ describe("Ticket Doctor v1 (#66, doc/design/diagnostics.md)", () => {
     expect(small.tickets).toHaveLength(2);
     expect(small.omittedTickets).toBe(small.summary.tickets - 2);
     expect(small.tickets.every((x) => x.findings[0].certainty === "definite")).toBe(true);
-    expect(ticketDoctorText(small)).toContain("more tickets; use --limit or --json");
+    expect(ticketDoctorText(small)).toContain("more tickets; raise --limit to see them");
   });
   it("reports missing native evidence as unknown and runs offline from the CLI", async () => {
     const old = t(20, ["bug", "status:ready"]) as Partial<Issue>;
     delete old.blockedBy;
     const r = ticketDoctor(snapshot([old as Issue], []), { now: new Date(time) });
     expect(kinds(r, 20)).toEqual(["unknown:dependency-evidence-unknown"]);
+    expect(r.completeness.complete).toBe(false);
     const dir = await mkdtemp(join(tmpdir(), "triage-doctor-"));
     try {
       const cache = join(dir, "cache.json");
@@ -1746,7 +1747,15 @@ describe("Ticket Doctor v1 (#66, doc/design/diagnostics.md)", () => {
         kind: "ticket-doctor",
         schemaVersion: 1,
         scanned: 12,
+        freshness: { offline: true },
       });
+      let text = "";
+      await main(
+        ["ticket-doctor", "--offline", "--cache", cache],
+        async (x) => void (text = x),
+        runtime,
+      );
+      expect(text.split("\n")[0]).toMatch(/OFFLINE cache fetched .*not verified live/);
       for (const bad of [
         ["ticket-doctor", "--limit", "0"],
         ["ticket-doctor", "--stale-hours", "-1"],
@@ -1756,5 +1765,67 @@ describe("Ticket Doctor v1 (#66, doc/design/diagnostics.md)", () => {
     } finally {
       await rm(dir, { recursive: true });
     }
+  });
+});
+
+describe("Ticket Doctor review fixes", () => {
+  it("reports every ticket on overlapping blocker cycles", async () => {
+    const { blockerCycles } = await import("./ticketdoctor.js");
+    // Blocked-by edges 1 -> 2, 1 -> 3, 2 -> 1, 3 -> 2: tickets 1, 2 and 3 are all on a cycle.
+    const edges = new Map([
+      ["1", ["2", "3"]],
+      ["2", ["1"]],
+      ["3", ["2"]],
+      ["4", ["1"]],
+    ]);
+    expect(blockerCycles(edges)).toEqual([["1", "2", "3"]]);
+    expect(blockerCycles(new Map([["5", ["5"]]]))).toEqual([["5"]]);
+  });
+  it("flags conflicting classification and awaiting-review without a PR; keeps absence unknown with partial labels", () => {
+    const partialLabels = (names: string[]) => ({
+      nodes: names.map((name) => ({ name })),
+      pageInfo: { hasNextPage: true, endCursor: "x" },
+    });
+    const r = ticketDoctor(
+      snapshot(
+        [
+          issue(30, ["bug", "enhancement", "status:ready"]),
+          issue(32, ["bug", "status:awaiting-review", "agent:y"]),
+          { ...issue(33, ["status:blocked"]), labels: partialLabels(["status:blocked"]) } as Issue,
+          issue(34, ["bug", "status:ready"]),
+        ],
+        [],
+      ),
+      { now: new Date(time) },
+    );
+    const k = (n: number) =>
+      r.tickets.find((t) => t.number === n)?.findings.map((f) => `${f.certainty}:${f.kind}`) ?? [];
+    expect(k(30)).toEqual(["candidate:classification-conflict"]);
+    expect(k(32)).toEqual(["candidate:awaiting-review-without-pr"]);
+    expect(k(33)).toEqual([
+      "unknown:labels-incomplete",
+      "unknown:classification-missing",
+      "unknown:blocked-without-reason",
+    ]);
+    expect(k(34)).toEqual([]);
+    expect(r.completeness.complete).toBe(false);
+  });
+  it("does not flag ready tickets with open native blockers (ready when blockers close)", () => {
+    const blocked = issue(35, ["bug", "status:ready"]);
+    blocked.issueDependenciesSummary!.blockedBy = 1;
+    blocked.issueDependenciesSummary!.totalBlockedBy = 1;
+    blocked.blockedBy = page([
+      {
+        ...issue(36),
+        repository: { nameWithOwner: repo },
+        issueDependenciesSummary: {
+          blockedBy: 0,
+          totalBlockedBy: 0,
+          blocking: 0,
+          totalBlocking: 0,
+        },
+      },
+    ]);
+    expect(ticketDoctor(snapshot([blocked], []), { now: new Date(time) }).tickets).toEqual([]);
   });
 });
