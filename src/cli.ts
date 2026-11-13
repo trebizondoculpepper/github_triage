@@ -137,7 +137,8 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
                         install/auth, checkout, agent-inbox.toml presence, Git ignore vs
                         tracked, identity and triage role; exact next commands per check
   config get KEY | set KEY VALUE | list | help [KEY]  Repository settings in
-                        .github/triage.json of this checkout (config help)
+                        .github/triage.json of this checkout; identity.name and
+                        identity.triage_role with --entry KEY in local agent-inbox.toml
   setup complexity [--select ID | --create]  Discover native issue fields and map one
                         for complexity; creation is explicit (setup --help)
   --repo owner/name     Repository (default: current gh checkout)
@@ -181,7 +182,7 @@ ${guideRules()
   Details: ${PROCESS_COMMAND}
 Exit: 0 complete; 2 incomplete evidence; 1 invalid arguments/API/cache failure.
 The briefing never changes GitHub; only ${mutatingCommands().join(", ")} do;
-config set changes only the local .github/triage.json; setup complexity may
+config set changes only the local .github/triage.json or agent-inbox.toml; setup complexity may
 also create an owner-wide issue field, only after --create/confirmation. Hints require inspection.
 `;
 export const depsHelp = `Usage: github-triage deps N [--tree] [--json] [--repo owner/name]

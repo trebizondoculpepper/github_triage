@@ -71,6 +71,14 @@ import { ticketOwnership, ticketOwnershipText } from "./who.js";
 import { ticketDoctor, ticketDoctorText } from "./ticketdoctor.js";
 import { shellQuote } from "./doctorplans.js";
 import type { CorrectionStep } from "./doctorplans.js";
+import {
+  generateName,
+  IDENTITY_FILE,
+  parseIdentityDocument,
+  readIdentity,
+  resolveIdentityTarget,
+  setIdentity,
+} from "./identity.js";
 import { localDoctor, localDoctorExitCode, localDoctorText } from "./localdoctor.js";
 import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
 
@@ -8001,5 +8009,302 @@ describe("workflow guide in help and briefings (#71, doc/design/workflow-guide.m
       id: rule.id,
     }));
     expect(policyVersion(reordered)).toBe(policyVersion(rules));
+  });
+});
+
+describe("agent identity in root agent-inbox.toml (#70)", () => {
+  const root = "/repo";
+  const file = join(root, IDENTITY_FILE);
+  const exclude = join(root, ".git/info/exclude");
+  const sample = `# keep me?
+title = "unrelated"
+big = 9007199254740993
+ratio = 1.0
+when = 1979-05-27T07:32:00-08:00
+day = 1979-05-27
+list = [1, 2]
+
+[agents.codex]
+name = "stable_one"   # trailing comment
+role = "agent"
+token = "s3cret-token"
+
+[agents."ori.review"]
+name = "other_agent"
+triage_role = "designer"
+api_key = "private-key"
+
+[[extra]]
+x = 1
+`;
+  function setup(initial?: string, options: { tracked?: boolean; ignored?: boolean } = {}) {
+    const files = new Map<string, string>(initial === undefined ? [] : [[file, initial]]);
+    const fs: ConfigFileSystem = {
+      readText: async (path) => files.get(path) ?? null,
+      writeText: async (path, text) => void files.set(path, text),
+      rename: async (from, to) => {
+        files.set(to, files.get(from)!);
+        files.delete(from);
+      },
+      remove: async (path) => void files.delete(path),
+      makeDirectory: async () => undefined,
+    };
+    const calls: string[] = [];
+    const fail = (code: number) => Object.assign(new Error(`exit ${code}`), { code });
+    const git: GitRunner = async (args) => {
+      calls.push(args.join(" "));
+      if (args[0] === "rev-parse" && args[1] === "--show-toplevel") return `${root}\n`;
+      if (args[0] === "rev-parse" && args[1] === "--git-path") return ".git/info/exclude\n";
+      if (args[0] === "remote") return "origin\thttps://github.com/owner/name.git (fetch)\n";
+      if (args[0] === "ls-files") {
+        if (options.tracked) return IDENTITY_FILE;
+        throw fail(1);
+      }
+      if (args[0] === "check-ignore") {
+        if (options.ignored || (files.get(exclude) ?? "").includes(`/${IDENTITY_FILE}`)) return "";
+        throw fail(1);
+      }
+      throw new Error(`unexpected git ${args.join(" ")}`);
+    };
+    let seed = 0;
+    const random = () => ((seed = (seed * 7 + 3) % 11) + 0.5) / 11;
+    const out: string[] = [];
+    const call = (...args: string[]) =>
+      main(["config", ...args, "--no-update-check"], async (t) => void out.push(t), {
+        collect: async () => {
+          throw new Error("no GitHub");
+        },
+        currentRepository: async () => {
+          throw new Error("no GitHub");
+        },
+        config: { fs, git, cwd: `${root}/nested/dir`, random },
+      });
+    return { files, fs, git, calls, out, call, json: () => JSON.parse(out.at(-1)!) };
+  }
+
+  it("reads only the selected entry's registered values and never creates files", async () => {
+    const t = setup(sample);
+    expect(await t.call("get", "identity.name", "--entry", "codex", "--json")).toBe(0);
+    expect(t.json()).toMatchObject({
+      kind: "config-get",
+      scope: "agent",
+      path: IDENTITY_FILE,
+      entry: "codex",
+      key: "identity.name",
+      value: "stable_one",
+      source: "explicit",
+    });
+    expect(await t.call("list", "--entry", "ori.review", "--json")).toBe(0);
+    const listed = t.json();
+    expect(listed.identity.settings).toEqual([
+      { key: "identity.name", value: "other_agent", source: "explicit" },
+      { key: "identity.triage_role", value: "designer", source: "explicit" },
+    ]);
+    const everything = t.out.join("");
+    for (const secret of ["s3cret-token", "private-key", "unrelated", "stable_one\n", root + "/"]) {
+      expect(everything.replace(/"path": "\/repo\/\.github[^"]*"/g, "")).not.toContain(secret);
+    }
+    const empty = setup();
+    expect(await empty.call("get", "identity.triage_role", "--entry", "codex")).toBe(0);
+    expect(empty.out[0]).toContain("(unset)");
+    expect(empty.out[0]).toContain(
+      "config set identity.triage_role implementer|designer --entry codex",
+    );
+    expect(empty.files.size).toBe(0);
+    expect(empty.calls.some((c) => c.startsWith("check-ignore"))).toBe(false);
+  });
+
+  it("adds triage_role preserving names, role, typed unknown values and other agents", async () => {
+    const t = setup(sample);
+    expect(
+      await t.call("set", "identity.triage_role", "implementer", "--entry", "codex", "--json"),
+    ).toBe(0);
+    expect(t.json()).toMatchObject({ changed: true, createdEntry: false, generatedName: null });
+    const written = t.files.get(file)!;
+    const document = parseIdentityDocument(written);
+    expect(document.big).toBe(9007199254740993n);
+    expect(document.ratio).toBe(1);
+    expect(written).toMatch(/^ratio = 1\.0$/m);
+    expect(written).toContain("when = 1979-05-27T07:32:00.000-08:00");
+    expect(written).toMatch(/^day = 1979-05-27$/m);
+    expect(written).toContain('[agents."ori.review"]');
+    expect(document.agents).toEqual({
+      codex: {
+        name: "stable_one",
+        role: "agent",
+        token: "s3cret-token",
+        triage_role: "implementer",
+      },
+      "ori.review": { name: "other_agent", triage_role: "designer", api_key: "private-key" },
+    });
+    expect(document.extra).toEqual([{ x: 1n }]);
+    // Documented limitation: the serializer does not keep comments.
+    expect(written).not.toContain("#");
+    expect(await t.call("set", "identity.triage_role", "implementer", "--entry", "codex")).toBe(0);
+    expect(t.out.at(-1)).toContain("unchanged");
+  });
+
+  it("initialises a missing file once with a generated unique name after excluding it", async () => {
+    const t = setup();
+    expect(
+      await t.call("set", "identity.triage_role", "designer", "--entry", "claude", "--json"),
+    ).toBe(0);
+    const first = t.json();
+    expect(first).toMatchObject({ createdFile: true, createdEntry: true, excludeRuleAdded: true });
+    expect(first.generatedName).toMatch(/^[a-z]+_[a-z]+$/);
+    expect(t.files.get(exclude)).toBe(`/${IDENTITY_FILE}\n`);
+    expect(t.calls.indexOf("rev-parse --git-path info/exclude")).toBeGreaterThan(-1);
+    expect(
+      await t.call("set", "identity.triage_role", "implementer", "--entry", "claude", "--json"),
+    ).toBe(0);
+    expect(t.json()).toMatchObject({
+      createdEntry: false,
+      generatedName: null,
+      excludeRuleAdded: false,
+    });
+    expect(await t.call("get", "identity.name", "--entry", "claude", "--json")).toBe(0);
+    expect(t.json().value).toBe(first.generatedName);
+    const taken = new Set(["amara_abara"]);
+    expect(generateName(taken, () => 0.999)).not.toBe("amara_abara");
+    let calls = 0;
+    expect(generateName(taken, () => (calls++ < 2 ? 0 : 0.5))).not.toBe("amara_abara");
+  });
+
+  it("explicit name changes refuse local collisions and never regenerate", async () => {
+    const t = setup(sample);
+    expect(await t.call("set", "identity.name", "OTHER_AGENT", "--entry", "codex", "--json")).toBe(
+      1,
+    );
+    expect(t.json()).toMatchObject({ code: "conflict" });
+    expect(await t.call("set", "identity.name", "renamed", "--entry", "codex", "--json")).toBe(0);
+    expect(parseIdentityDocument(t.files.get(file)!).agents).toMatchObject({
+      codex: { name: "renamed", role: "agent" },
+    });
+    expect(await t.call("set", "identity.name", "bad name", "--entry", "codex", "--json")).toBe(1);
+    expect(t.json()).toMatchObject({ code: "invalid-value" });
+    expect(await t.call("set", "identity.triage_role", "agent", "--entry", "codex", "--json")).toBe(
+      1,
+    );
+    expect(t.json()).toMatchObject({ code: "invalid-value" });
+  });
+
+  it("requires explicit entry selection without breaking repository settings", async () => {
+    const t = setup(sample);
+    expect(await t.call("get", "identity.name", "--repo", "owner/name", "--json")).toBe(1);
+    expect(t.json()).toMatchObject({ code: "identity-unresolved" });
+    expect(t.json().recovery).toContain(
+      "github-triage config get identity.name --entry KEY --repo owner/name",
+    );
+    expect(t.json().recovery).not.toContain("#");
+    expect(await t.call("list", "--json")).toBe(0);
+    expect(t.json()).toMatchObject({ identity: { resolved: false } });
+    expect(await t.call("get", "complexity.enabled")).toBe(0);
+    expect(await t.call("get", "complexity.enabled", "--entry", "codex", "--json")).toBe(1);
+    expect(await t.call("get", "identity.name", "--entry", "__proto__", "--json")).toBe(1);
+    expect(t.json()).toMatchObject({ code: "invalid-value" });
+    expect(await t.call("get", "identity.colour", "--entry", "codex", "--json")).toBe(1);
+    expect(t.json()).toMatchObject({ code: "unknown-key" });
+    expect(
+      await t.call("get", "identity.name", "--entry", "codex", "--repo", "other/x", "--json"),
+    ).toBe(1);
+    expect(t.json()).toMatchObject({ code: "repository-mismatch" });
+  });
+
+  it("refuses malformed or tracked files without rewriting or echoing contents", async () => {
+    const bad = setup('[agents.codex]\nname = "x"\ntoken = "leak-me\n');
+    expect(await bad.call("get", "identity.name", "--entry", "codex", "--json")).toBe(1);
+    expect(bad.json()).toMatchObject({ code: "malformed" });
+    expect(bad.out.at(-1)).not.toContain("leak-me");
+    expect(await bad.call("list", "--entry", "codex", "--json")).toBe(0);
+    expect(bad.json().identity).toMatchObject({ resolved: false, error: { code: "malformed" } });
+    expect(
+      await bad.call("set", "identity.triage_role", "designer", "--entry", "codex", "--json"),
+    ).toBe(1);
+    expect(bad.files.get(file)).toBe('[agents.codex]\nname = "x"\ntoken = "leak-me\n');
+    const notTable = setup("agents = 3\n");
+    expect(await notTable.call("set", "identity.name", "a", "--entry", "codex", "--json")).toBe(1);
+    expect(notTable.json()).toMatchObject({ code: "malformed" });
+    const tracked = setup(sample, { tracked: true, ignored: true });
+    expect(
+      await tracked.call("set", "identity.triage_role", "designer", "--entry", "codex", "--json"),
+    ).toBe(1);
+    expect(tracked.json()).toMatchObject({ code: "tracked" });
+    expect(tracked.files.get(file)).toBe(sample);
+    expect(tracked.calls.some((c) => /\brm\b|commit|add/.test(c))).toBe(false);
+  });
+
+  it("refuses a concurrent edit instead of overwriting it", async () => {
+    const t = setup(sample, { ignored: true });
+    const original = t.fs.writeText;
+    t.fs.writeText = async (path, text) => {
+      await original(path, text);
+      t.files.set(file, sample + '\n[agents.late]\nname = "late_comer"\n');
+    };
+    await expect(
+      setIdentity({ root, repository: null }, "codex", "identity.triage_role", "designer", {
+        fs: t.fs,
+        git: t.git,
+      }),
+    ).rejects.toMatchObject({ code: "conflict" });
+    expect(t.files.get(file)).toContain("late_comer");
+    expect([...t.files.keys()].filter((k) => k.endsWith(".tmp"))).toEqual([]);
+    await expect(
+      setIdentity({ root, repository: null }, "codex", "identity.triage_role", "designer", {
+        fs: t.fs,
+        git: t.git,
+        expectedRaw: sample,
+      }),
+    ).rejects.toMatchObject({ code: "conflict" });
+  });
+
+  it("resolves the working-tree root from nested directories and linked worktrees", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "triage-identity-"));
+    try {
+      const run = (cwd: string, ...args: string[]) =>
+        new Promise<string>((resolve, reject) =>
+          execFile("git", args, { cwd }, (error, stdout) =>
+            error ? reject(error) : resolve(stdout),
+          ),
+        );
+      const main_ = join(dir, "main");
+      await mkdir(join(main_, "a", "b"), { recursive: true });
+      await run(main_, "init", "-q");
+      await run(
+        main_,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@e",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "x",
+      );
+      await writeFile(join(dir, IDENTITY_FILE), '[agents.codex]\nname = "parent_leak"\n');
+      const nested = await resolveIdentityTarget(join(main_, "a", "b"), undefined);
+      expect(await readFile(join(nested.root, ".git", "HEAD"), "utf8")).toContain("ref:");
+      const write = await setIdentity(nested, "codex", "identity.triage_role", "designer", {
+        random: () => 0.1,
+      });
+      expect(write.createdFile).toBe(true);
+      expect(write.record.name).not.toBe("parent_leak");
+      expect(await run(main_, "status", "--porcelain")).toBe("");
+      const tree = join(dir, "tree");
+      await run(main_, "worktree", "add", "-q", tree);
+      const linked = await resolveIdentityTarget(tree, undefined);
+      expect(await readdir(linked.root)).not.toContain(IDENTITY_FILE);
+      expect((await readIdentity(linked.root, "codex")).fileExists).toBe(false);
+      await setIdentity(linked, "codex", "identity.triage_role", "implementer", {
+        random: () => 0.2,
+      });
+      expect(await run(tree, "status", "--porcelain")).toBe("");
+      expect(await readFile(join(dir, IDENTITY_FILE), "utf8")).toContain("parent_leak");
+      await expect(resolveIdentityTarget(dir, undefined)).rejects.toMatchObject({
+        code: "not-a-repository",
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -23,7 +23,8 @@ import type { ConfigFileSystem, GitRunner } from "./config.js";
 import { roleNames } from "./roles.js";
 
 export const LOCAL_DOCTOR_SCHEMA_VERSION = 1;
-export const IDENTITY_FILE = "agent-inbox.toml";
+export { IDENTITY_FILE } from "./identity.js";
+import { IDENTITY_FILE } from "./identity.js";
 export const MINIMUM_NODE_MAJOR = 26;
 
 /** Distinct outcomes: only `ok` is healthy; `unsupported` means this version cannot tell. */

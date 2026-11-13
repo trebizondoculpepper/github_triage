@@ -93,7 +93,10 @@ export type ConfigErrorCode =
   | "conflict"
   | "repository-mismatch"
   | "not-a-repository"
-  | "filesystem";
+  | "filesystem"
+  | "tracked"
+  | "not-ignored"
+  | "identity-unresolved";
 
 /** A refusal with exact recovery guidance. The file is left untouched. */
 export class ConfigError extends Error {
