@@ -117,10 +117,7 @@ export function complexityGuidanceText(g: ComplexityGuidance = complexityGuidanc
       (b) => `  ${b.size.padEnd(width)}  ${b.guidance}\n  ${"".padEnd(width)}  e.g. ${b.example}`,
     )
     .join("\n");
-  return `Usage: github-triage estimate --help [--json]
-(From a source checkout, use npm run triage -- estimate --help)
-Complexity estimation guidance (version ${g.guidanceVersion}). Read-only; this release only
-explains how to size a ticket. Recording estimates is not yet available.
+  return `Complexity estimation guidance (version ${g.guidanceVersion}):
 
 Scale: ${g.scale}
 ${bands}
@@ -137,8 +134,7 @@ Prerequisites:
 ${list(g.prerequisites)}
 Boundaries:
 ${list(g.boundaries)}
-  --json                Versioned structured guidance (schemaVersion 1)
-  --help                Show this guidance
+With --help: --json gives the versioned structured guidance (schemaVersion 1).
 `;
 }
 
