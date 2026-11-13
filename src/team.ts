@@ -8,26 +8,84 @@
  * releases a claim or infers abandonment.
  */
 import { owners, prChecks, workflow } from "./briefing.js";
+import type { PullRequest, Snapshot } from "./types.js";
 
-/**
- * @typedef {{ number: number, url: string, draft: boolean, verify: string, reviewDecision: string | null,
- *   unresolvedThreads: number, mergeState: string, updatedAt: string | null }} LinkedPullRequest
- * @typedef {{ number: number, title: string, url: string, coOwners: string[], pullRequests: LinkedPullRequest[],
- *   latestActivity: { at: string, source: string } | null, candidates: string[] }} TeamClaim
- * @typedef {{ kind: string, certainty: "definite" | "candidate", detail: string, ticket?: number }} TeamWarning
- * @typedef {{ agent: string, presence: string, claims: TeamClaim[], warnings: TeamWarning[] }} TeamAgent
- */
+export interface LinkedPullRequest {
+  number: number;
+  url: string;
+  draft: boolean;
+  verify: string;
+  reviewDecision: string | null;
+  unresolvedThreads: number;
+  mergeState: string;
+  updatedAt: string | null;
+}
+export interface TeamClaim {
+  number: number;
+  title: string;
+  url: string;
+  coOwners: string[];
+  pullRequests: LinkedPullRequest[];
+  latestActivity: { at: string; source: string } | null;
+  candidates: string[];
+}
+export interface TeamWarning {
+  kind: string;
+  certainty: "definite" | "candidate";
+  detail: string;
+  ticket?: number;
+}
+export interface TeamAgent {
+  agent: string;
+  presence: string;
+  claims: TeamClaim[];
+  warnings: TeamWarning[];
+}
+export interface TeamConflict {
+  number: number;
+  url: string;
+  agents: string[];
+}
+export interface TeamView {
+  schemaVersion: 1;
+  kind: "team-view";
+  repository: string;
+  fetchedAt: string;
+  freshness: {
+    startedAt: string;
+    fetchedAt: string;
+    offline: boolean;
+    ageSeconds: number;
+    liveVerification: string;
+  };
+  staleHours: number;
+  presence: string;
+  agents: TeamAgent[];
+  conflicts: TeamConflict[];
+  completeness: { complete: boolean; warnings: string[] };
+  guidance: string;
+}
+export interface TeamOptions {
+  now?: Date;
+  staleHours?: number;
+  offline?: boolean;
+}
+
+interface ActivityEvent {
+  at: string | null | undefined;
+  source: string;
+}
 
 /** Default staleness candidate threshold: the general briefing's two days (#41 contract). */
 export const defaultStaleHours = 48;
 
-const latest = (events) =>
+const latest = (events: ActivityEvent[]): { at: string; source: string } | null =>
   events
-    .filter((e) => e.at && Number.isFinite(Date.parse(e.at)))
+    .filter((e): e is { at: string; source: string } => !!e.at && Number.isFinite(Date.parse(e.at)))
     .sort((a, b) => b.at.localeCompare(a.at))[0] ?? null;
 
 /** A linked pull request's state, from the evidence the briefing already collects. */
-function pullRequestState(pr) {
+function pullRequestState(pr: PullRequest): LinkedPullRequest {
   const checks = prChecks(pr);
   const verify = checks.find((c) => c.name === workflow.verify)?.outcome ?? "UNKNOWN";
   return {
@@ -44,22 +102,18 @@ function pullRequestState(pr) {
 
 /**
  * Aggregate open claims by agent.
- * @param {import("./types.js").Snapshot} snapshot
- * @param {{ now?: Date, staleHours?: number, offline?: boolean }} [options]
  */
 export function teamView(
-  snapshot,
-  { now = new Date(), staleHours = defaultStaleHours, offline = false } = {},
-) {
+  snapshot: Snapshot,
+  { now = new Date(), staleHours = defaultStaleHours, offline = false }: TeamOptions = {},
+): TeamView {
   const open = snapshot.issues.filter((i) => i.state === "OPEN");
-  const linked = new Map();
+  const linked = new Map<string, PullRequest[]>();
   for (const pr of snapshot.pullRequests)
     for (const ref of pr.closingIssuesReferences?.nodes ?? [])
       linked.set(ref.url, [...(linked.get(ref.url) ?? []), pr]);
-  /** @type {Map<string, TeamAgent>} */
-  const agents = new Map();
-  /** @type {{ number: number, url: string, agents: string[] }[]} */
-  const conflicts = [];
+  const agents = new Map<string, TeamAgent>();
+  const conflicts: TeamConflict[] = [];
   for (const issue of open) {
     const labels = issue.labels.nodes.map((l) => l.name);
     const holders = owners(issue).map((o) => o.slice(workflow.ownerPrefix.length));
@@ -74,8 +128,7 @@ export function teamView(
       ...prs.map((p) => ({ at: p.updatedAt, source: `PR #${p.number} updated` })),
     ]);
     const ageHours = activity ? (now.getTime() - Date.parse(activity.at)) / 3_600_000 : null;
-    /** @type {string[]} */
-    const candidates = [];
+    const candidates: string[] = [];
     if (ageHours === null) candidates.push("activity unknown");
     else if (ageHours > staleHours)
       candidates.push(
@@ -89,8 +142,7 @@ export function teamView(
       candidates.push(`claimed but still labelled ${workflow.ready}`);
     for (const blocker of ["status:needs-design", "question", "design:decision-needed"])
       if (labels.includes(blocker)) candidates.push(`claimed while ${blocker}`);
-    /** @type {TeamClaim} */
-    const claim = {
+    const claim: TeamClaim = {
       number: issue.number,
       title: issue.title,
       url: issue.url,
@@ -100,9 +152,12 @@ export function teamView(
       candidates,
     };
     for (const agent of holders) {
-      if (!agents.has(agent))
-        agents.set(agent, { agent, presence: "unknown", claims: [], warnings: [] });
-      agents.get(agent).claims.push(claim);
+      let entry = agents.get(agent);
+      if (!entry) {
+        entry = { agent, presence: "unknown", claims: [], warnings: [] };
+        agents.set(agent, entry);
+      }
+      entry.claims.push(claim);
     }
   }
   for (const entry of agents.values()) {
@@ -150,7 +205,7 @@ export function teamView(
 }
 
 /** Text rendering. */
-export function teamText(view) {
+export function teamText(view: TeamView): string {
   const age = view.freshness.ageSeconds;
   const lines = [
     view.freshness.offline

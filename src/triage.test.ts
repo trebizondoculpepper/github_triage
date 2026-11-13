@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -23,9 +23,17 @@ import {
   planDependencyChange,
 } from "./dependencies.js";
 import { briefing, dependencyDone, textReport } from "./briefing.js";
-import { collect, declaredDependencies, graphqlAnswer, pages, type Query } from "./github.js";
+import {
+  collect,
+  declaredDependencies,
+  graphqlAnswer,
+  pages,
+  type IssueDiagnosis,
+  type Query,
+} from "./github.js";
 import { clauseFor, hedged, listWideHedge, planMigration } from "./migration.js";
 import { applyPlan, planClaim, planNeedsHuman } from "./claims.js";
+import type { ClaimAccepted, ClaimPlan, ClaimRefusal } from "./claims.js";
 import { teamText, teamView } from "./team.js";
 import { ticketDoctor, ticketDoctorText } from "./ticketdoctor.js";
 import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
@@ -411,7 +419,8 @@ esac
         await writeFile(join(dir, "gh"), fake, { mode: 0o700 });
         const { stdout } = await promisify(execFile)(
           process.execPath,
-          [fileURLToPath(new URL("./cli.js", import.meta.url)), "--json"],
+          // Source development runs through tsx (doc/design/typescript.md); Node 20 cannot run .ts.
+          ["--import", "tsx", fileURLToPath(new URL("./cli.ts", import.meta.url)), "--json"],
           {
             env: {
               ...process.env,
@@ -424,7 +433,7 @@ esac
         expect(JSON.parse(stdout).repository).toBe(repo);
         expect((await readFile(log, "utf8")).trim().split("\n")).toEqual(["repo", "api", "api"]);
         for (const name of ["cli", "github", "briefing"]) {
-          const code = await readFile(new URL(`./${name}.js`, import.meta.url), "utf8");
+          const code = await readFile(new URL(`./${name}.ts`, import.meta.url), "utf8");
           expect(code).not.toMatch(/(?:from|import)\s+["'][^"']+\.ts["']/);
         }
       } finally {
@@ -983,11 +992,11 @@ describe("GraphQL NOT_FOUND answers", () => {
 });
 
 // The installed-bin check (#11) runs against the real packed archive in
-// scripts/package-test.mjs (npm run package-test), which builds first and runs in every CI job.
+// scripts/package-test.ts (npm run package-test), which builds first and runs in every CI job.
 describe("release versions (doc/npm-releases.md)", () => {
   const sha = (n: number) => String(n).repeat(40).slice(0, 40);
   it("follows the contract's sequence: 0.0.x-next before 0.1.0, patch per main build, minor per release", async () => {
-    const { chooseVersion } = await import("../scripts/release-version.mjs");
+    const { chooseVersion } = await import("../scripts/release-version.js");
     const history: { version: string; gitHead: string }[] = [];
     const step = (channel: "next" | "latest", n: number) => {
       const { version } = chooseVersion({ channel, sha: sha(n), published: history });
@@ -1001,7 +1010,7 @@ describe("release versions (doc/npm-releases.md)", () => {
     expect(step("next", 7)).toBe("0.2.1-next.1");
   });
   it("recognises a commit already published on the channel instead of assigning another version", async () => {
-    const { chooseVersion } = await import("../scripts/release-version.mjs");
+    const { chooseVersion } = await import("../scripts/release-version.js");
     const published = [{ version: "0.0.1-next.1", gitHead: sha(1) }];
     expect(chooseVersion({ channel: "next", sha: sha(1), published })).toMatchObject({
       version: null,
@@ -1011,13 +1020,13 @@ describe("release versions (doc/npm-releases.md)", () => {
     expect(chooseVersion({ channel: "latest", sha: sha(1), published }).version).toBe("0.1.0");
   });
   it("moves to the following prerelease after a registry-lag conflict, never bumping a release", async () => {
-    const { followingPrerelease } = await import("../scripts/release-version.mjs");
+    const { followingPrerelease } = await import("../scripts/release-version.js");
     expect(followingPrerelease("0.1.1-next.1")).toBe("0.1.2-next.1");
     expect(followingPrerelease("0.0.9-next.1")).toBe("0.0.10-next.1");
     expect(() => followingPrerelease("0.1.0")).toThrow();
   });
   it("orders prereleases before their release and ignores unrelated versions", async () => {
-    const { chooseVersion, compare, parse } = await import("../scripts/release-version.mjs");
+    const { chooseVersion, compare, parse } = await import("../scripts/release-version.js");
     expect(compare(parse("0.1.0-next.1")!, parse("0.1.0")!)).toBeLessThan(0);
     expect(compare(parse("0.0.9-next.1")!, parse("0.1.0")!)).toBeLessThan(0);
     expect(parse("1.0.0-beta.1")).toBeNull();
@@ -1492,7 +1501,9 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
   });
   it("comments on every new acquisition, and on retry repairs only a missing comment", async () => {
     const first = await claim({ labels: ["status:ready"], repoLabels: ["agent:kavya"] });
-    const comment = first.changes!.find((c) => c.step === "comment")!.command.at(-1)!;
+    const comment = accepted(first)
+      .changes.find((c) => c.step === "comment")!
+      .command.at(-1)!;
     const marker = comment.match(/<!-- github-triage:claim:[0-9a-f]+ -->/)![0];
     // Released and claimed again later: the old comment must not suppress the new one.
     const again = await claim({
@@ -1500,7 +1511,7 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
       repoLabels: ["agent:kavya"],
       comments: [marker],
     });
-    expect(again.changes!.map((c) => c.step)).toEqual(["labels", "comment"]);
+    expect(accepted(again).changes.map((c) => c.step)).toEqual(["labels", "comment"]);
     // Labelled now, comment posted after the label was added: complete.
     const done = await claim({
       labels: ["agent:kavya"],
@@ -1516,9 +1527,9 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
       comments: [{ body: marker, createdAt: at(5) }],
       labelledAt: at(2),
     });
-    expect(stale.changes!.map((c) => c.step)).toEqual(["comment"]);
+    expect(accepted(stale).changes.map((c) => c.step)).toEqual(["comment"]);
     const repair = await claim({ labels: ["agent:kavya"], claims: [7] });
-    expect(repair.changes!.map((c) => c.step)).toEqual(["comment"]);
+    expect(accepted(repair).changes.map((c) => c.step)).toEqual(["comment"]);
   });
   it("refuses with stable error IDs, facts and recovery commands", async () => {
     const cases: [Ticket, Record<string, string>, string][] = [
@@ -1538,12 +1549,12 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
     for (const [t, extra, id] of cases) {
       const plan = await claim(t, extra);
       expect(plan).toMatchObject({ ok: false, error: id });
-      expect(plan.prerequisite).toBeTruthy();
+      expect(refused(plan).prerequisite).toBeTruthy();
     }
     const owned = await claim({ labels: ["status:ready", "agent:other"] });
-    expect(owned.recovery!.join(" ")).not.toMatch(/agent:other/);
+    expect(refused(owned).recovery.join(" ")).not.toMatch(/agent:other/);
     const other = await claim({ labels: ["status:ready"], claims: [9] });
-    expect(other.recovery![0]).toMatch(/^manual \(release is #62/);
+    expect(refused(other).recovery[0]).toMatch(/^manual \(release is #62/);
     expect(
       (await claim({ labels: ["status:incomplete", "platform:ori"] }, { platform: "ori" })).ok,
     ).toBe(true);
@@ -1578,7 +1589,7 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
   it("finds existing labels by exact name, and keeps completed writes when the re-check fails", async () => {
     // Exact-name lookup: an existing label is never scheduled for creation.
     const existing = await claim({ labels: ["status:ready"], repoLabels: ["agent:kavya"] });
-    expect(existing.changes!.map((c) => c.step)).toEqual(["labels", "comment"]);
+    expect(accepted(existing).changes.map((c) => c.step)).toEqual(["labels", "comment"]);
     const env = fake({ labels: ["status:ready"], repoLabels: ["agent:kavya"], failRecheck: true });
     const result = await applyPlan(
       repo,
@@ -1657,10 +1668,10 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
         repoLabels: ["question", "design:decision-needed"],
       }).query,
     );
-    const edit = blocked.changes!.find((c) => c.step === "labels")!.command;
+    const edit = accepted(blocked).changes.find((c) => c.step === "labels")!.command;
     expect(edit).not.toContain("status:needs-design");
     expect(edit.join(" ")).not.toContain("blocked:credential");
-    expect(blocked.notes![0]).toMatch(/status:blocked kept/);
+    expect(accepted(blocked).notes![0]).toMatch(/status:blocked kept/);
   });
   it("validates arguments, and a dry run writes nothing", async () => {
     for (const bad of [
@@ -1725,18 +1736,20 @@ describe("claim and needs-human review fixes", () => {
         base(["status:ready", held]),
       );
       expect(plan).toMatchObject({ ok: false, error: "NOT_READY" });
-      expect(plan.prerequisite).toContain(held);
+      expect(refused(plan).prerequisite).toContain(held);
     }
   });
   it("needs-human keeps blocked, drops the stale ready label, and addresses the designer", async () => {
     const plan = await planNeedsHuman(repo, ask, async () =>
       base(["status:ready", "status:blocked"]),
     );
-    const edit = plan.changes!.find((c) => c.step === "labels")!.command.join(" ");
+    const edit = accepted(plan)
+      .changes.find((c) => c.step === "labels")!
+      .command.join(" ");
     expect(edit).toContain("--remove-label status:ready");
     expect(edit).toContain("--add-label attention:nicole");
     expect(edit).not.toContain("status:needs-design");
-    expect(plan.notes![0]).toMatch(/status:blocked kept/);
+    expect(accepted(plan).notes![0]).toMatch(/status:blocked kept/);
   });
   it("needs-human refuses before posting when labels are incomplete", async () => {
     const data = base(["status:ready"]);
@@ -1771,7 +1784,7 @@ describe("claim and needs-human review fixes", () => {
     const blocked = base(["status:ready"]);
     blocked.repository.issueOrPullRequest.issueDependenciesSummary.blockedBy = 1;
     const plan = await planClaim(repo, { number: 7, agent: "kavya" }, async () => blocked);
-    expect(plan.recovery![0]).toBe(`github-triage deps 7 --repo ${repo}`);
+    expect(refused(plan).recovery[0]).toBe(`github-triage deps 7 --repo ${repo}`);
     const { shellQuote } = await import("./claims.js");
     expect(shellQuote("$(rm -rf x)")).toBe("'$(rm -rf x)'");
     expect(shellQuote("it's")).toBe("'it'\\''s'");
@@ -1842,7 +1855,7 @@ describe("claim comment repair re-checks ownership", () => {
       };
     };
     const plan = await planClaim(repo, { number: 7, agent: "kavya" }, q);
-    expect(plan.changes!.map((c) => c.step)).toEqual(["comment"]);
+    expect(accepted(plan).changes.map((c) => c.step)).toEqual(["comment"]);
     const result = await applyPlan(repo, plan, { run: async () => {}, query: q });
     expect(result.exitCode).toBe(2);
     expect(result.conflict).toMatch(/agent:other/);
@@ -2213,7 +2226,7 @@ describe("version check (#51, doc/design/updates.md)", () => {
       fetchImpl: registry(tags),
     });
     expect(pre).toMatchObject({
-      status: "newer",
+      status: "newer" as const,
       channel: "next",
       command: expect.stringMatching(/@next$/),
     });
@@ -2275,7 +2288,7 @@ describe("version check (#51, doc/design/updates.md)", () => {
         currentRepository: async () => repo,
         stderr: (t: string) => void err.push(t),
         updateCheck: async () => ({
-          status: "newer",
+          status: "newer" as const,
           installed: "0.1.0",
           available: "0.2.0",
           channel: "latest",
@@ -2614,7 +2627,7 @@ describe("explicit publication helpers (#79)", () => {
     return { run, calls };
   };
   it("make-prerelease resolves main once and dispatches channel=next on main with that SHA", async () => {
-    const { makePrerelease } = await import("../scripts/dispatch.mjs");
+    const { makePrerelease } = await import("../scripts/dispatch.js");
     const f = fakeRunner({ main: A });
     makePrerelease({}, f.run);
     expect(f.calls).toEqual([
@@ -2624,7 +2637,7 @@ describe("explicit publication helpers (#79)", () => {
     ]);
   });
   it("release fast-forwards release, then dispatches channel=latest on release; never forces", async () => {
-    const { release } = await import("../scripts/dispatch.mjs");
+    const { release } = await import("../scripts/dispatch.js");
     const f = fakeRunner({ main: A, release: B });
     const lines = release({}, f.run);
     expect(f.calls.filter((c) => c.startsWith("git push") || c.startsWith("gh"))).toEqual([
@@ -2638,13 +2651,13 @@ describe("explicit publication helpers (#79)", () => {
     expect(already.calls.some((c) => c.startsWith("git push"))).toBe(false);
   });
   it("refuses to rewrite release history", async () => {
-    const { release } = await import("../scripts/dispatch.mjs");
+    const { release } = await import("../scripts/dispatch.js");
     const f = fakeRunner({ main: A, release: B, ancestor: (x) => x !== B });
     expect(() => release({}, f.run)).toThrow(/refusing to rewrite release history/);
     expect(f.calls.some((c) => c.startsWith("git push") || c.startsWith("gh"))).toBe(false);
   });
   it("reports a failed dispatch with a retry for the same SHA, and retries never re-resolve main", async () => {
-    const { release, makePrerelease } = await import("../scripts/dispatch.mjs");
+    const { release, makePrerelease } = await import("../scripts/dispatch.js");
     const f = fakeRunner({ main: A, release: B, dispatchFails: true });
     expect(() => release({}, f.run)).toThrow(
       new RegExp(`Promoted ${A}.*npm run release -- --sha ${A}`),
@@ -2660,7 +2673,7 @@ describe("explicit publication helpers (#79)", () => {
     expect(() => makePrerelease({ sha: A }, offMain.run)).toThrow(/not on origin\/main/);
   });
   it("validates arguments", async () => {
-    const { parseArgs } = await import("../scripts/dispatch.mjs");
+    const { parseArgs } = await import("../scripts/dispatch.js");
     expect(parseArgs([])).toEqual({});
     expect(parseArgs(["--help"])).toEqual({ help: true });
     expect(parseArgs(["--sha", A])).toEqual({ sha: A });
@@ -2965,6 +2978,70 @@ describe("pr status: bot instructions are not review requests", () => {
   });
 });
 
+describe("transferred issue inspection (#39, doc/design/diagnostics.md)", () => {
+  const rest = (status: number | null, body: any) => async () => ({ status, body });
+  it("distinguishes moved, pull request, missing, forbidden and unknown", async () => {
+    const { locateIssue } = await import("./github.js");
+    const moved = await locateIssue(
+      "o/old",
+      701,
+      rest(200, {
+        repository_url: "https://api.github.com/repos/o/new",
+        number: 2,
+        html_url: "https://github.com/o/new/issues/2",
+      }),
+    );
+    expect(moved).toMatchObject({
+      state: "moved",
+      url: "https://github.com/o/old/issues/701",
+      destination: { repository: "o/new", number: 2, url: "https://github.com/o/new/issues/2" },
+    });
+    const same = { repository_url: "https://api.github.com/repos/o/old", number: 5 };
+    expect((await locateIssue("o/old", 5, rest(200, { ...same, pull_request: {} }))).state).toBe(
+      "pull-request",
+    );
+    expect((await locateIssue("o/old", 5, rest(404, { status: "404" }))).state).toBe("missing");
+    expect((await locateIssue("o/old", 5, rest(403, { status: "403" }))).state).toBe("forbidden");
+    expect((await locateIssue("o/old", 5, rest(null, null))).state).toBe("unknown");
+    // Missing or forbidden never claims a transfer.
+    expect("destination" in (await locateIssue("o/old", 5, rest(404, {})))).toBe(false);
+  });
+  it("reports instead of failing, and follows a transfer only with --include-transferred", async () => {
+    const { IssueUnavailable } = await import("./github.js");
+    const diagnosis = {
+      repository: "o/old",
+      number: 701,
+      url: "https://github.com/o/old/issues/701",
+      state: "moved" as const,
+      destination: { repository: "o/new", number: 2, url: "https://github.com/o/new/issues/2" },
+      detail: "Transferred.",
+      next: "x",
+    };
+    const seen: string[] = [];
+    const runtime = {
+      currentRepository: async () => "o/old",
+      collect: async (repository: string, options: { issue?: number }) => {
+        seen.push(`${repository}#${options.issue}`);
+        if (repository === "o/old") throw new IssueUnavailable(diagnosis);
+        return snapshot([issue(2)], []);
+      },
+    } as any;
+    let out = "";
+    const write = async (x: string) => void (out = x);
+    expect(await main(["--repo", "o/old", "--issue", "701", "--json"], write, runtime)).toBe(2);
+    expect(JSON.parse(out)).toMatchObject({ kind: "issue-unavailable", state: "moved" });
+    expect(seen).toEqual(["o/old#701"]);
+    const code = await main(
+      ["--repo", "o/old", "--issue", "701", "--json", "--include-transferred"],
+      write,
+      runtime,
+    );
+    expect(code).toBe(0);
+    expect(seen).toEqual(["o/old#701", "o/old#701", "o/new#2"]);
+    expect(JSON.parse(out).transferredFrom).toMatchObject({ url: diagnosis.url });
+  });
+});
+
 describe("addressed attention for --agent (#3, doc/design/briefings.md)", () => {
   it("orders attention to the viewer first, then owned work, then pickup; never a claim", async () => {
     const { compactBriefing, compactText } = await import("./compact.js");
@@ -3012,5 +3089,67 @@ describe("addressed attention in the expanded briefing (#3)", () => {
     });
     const anonymous = briefing(snapshot([addressed], []), { limit: 100 }, new Date(time));
     expect(anonymous.actions.items.some((a) => a.rule === "addressed-attention")).toBe(false);
+  });
+});
+
+describe("TypeScript source boundary (#91, doc/design/typescript.md)", () => {
+  it("keeps maintained first-party code in src/ and doc/reports/examples/ in TypeScript", async () => {
+    const root = new URL("../", import.meta.url);
+    // Generated output and dependencies are runtime artifacts, not handwritten source.
+    // scripts/ may also hold JavaScript or shell helpers (owner decision on #91).
+    const skipped = new Set(["node_modules", "dist"]);
+    const found: string[] = [];
+    const walk = async (dir: string): Promise<void> => {
+      for (const entry of await readdir(new URL(dir, root), { withFileTypes: true })) {
+        const path = `${dir}${entry.name}`;
+        if (entry.isDirectory()) {
+          if (!skipped.has(entry.name)) await walk(`${path}/`);
+        } else if (/\.[cm]?js$/.test(entry.name)) found.push(path);
+      }
+    };
+    for (const dir of ["src/", "doc/reports/examples/"]) await walk(dir);
+    expect(found).toEqual([]);
+  });
+});
+
+/** Narrow a claim plan to the variant a test expects, failing loudly otherwise. */
+function accepted(plan: ClaimPlan): ClaimAccepted {
+  if (!plan.ok) throw new Error(`expected an accepted plan, got ${plan.error}`);
+  return plan;
+}
+function refused(plan: ClaimPlan): ClaimRefusal {
+  if (plan.ok) throw new Error("expected a refused plan");
+  return plan;
+}
+describe("transferred issue inspection when GraphQL fails (#39)", () => {
+  it("diagnoses a failed read through REST, keeping the error when REST is not authoritative", async () => {
+    const { collect } = await import("./github.js");
+    const failing: Query = async () => {
+      throw new Error("GitHub query failed.");
+    };
+    const forbidden = async (): Promise<IssueDiagnosis> => ({
+      repository: "o/x",
+      number: 3,
+      url: "u",
+      state: "forbidden",
+      detail: "denied",
+      next: "gh auth status",
+    });
+    await expect(collect("o/x", { issue: 3, locate: forbidden }, failing)).rejects.toMatchObject({
+      diagnosis: { state: "forbidden" },
+    });
+    const unknown = async (): Promise<IssueDiagnosis> => ({
+      repository: "o/x",
+      number: 3,
+      url: "u",
+      state: "unknown",
+      detail: "",
+      next: "",
+    });
+    await expect(collect("o/x", { issue: 3, locate: unknown }, failing)).rejects.toThrow(
+      "GitHub query failed.",
+    );
+    // Without --issue the original failure is unchanged.
+    await expect(collect("o/x", {}, failing)).rejects.toThrow("GitHub query failed.");
   });
 });

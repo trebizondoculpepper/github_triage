@@ -10,7 +10,155 @@
  * approval.
  */
 import { workflow } from "./briefing.js";
-import { ghQuery } from "./github.js";
+import { ghQuery, prop, selected } from "./github.js";
+import type { Query } from "./github.js";
+
+type Login = { login: string } | null;
+type PageInfo = { hasNextPage?: boolean; hasPreviousPage?: boolean };
+type CheckContext = {
+  __typename?: string;
+  name?: string;
+  context?: string;
+  status?: string | null;
+  conclusion?: string | null;
+  state?: string | null;
+  detailsUrl?: string | null;
+  targetUrl?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+};
+type ReviewNode = {
+  author: Login;
+  state: string;
+  submittedAt: string | null;
+  url: string;
+  commit: { oid: string } | null;
+};
+type ThreadComment = { author: Login; body?: string; createdAt: string | null; url: string };
+type ThreadNode = {
+  isResolved: boolean;
+  isOutdated?: boolean;
+  path?: string | null;
+  line?: number | null;
+  first?: { totalCount?: number; nodes: ThreadComment[] } | null;
+  latest?: { nodes: ThreadComment[] } | null;
+};
+type CommentNode = { author: Login; body: string | null; createdAt: string; url: string };
+type LinkedIssueNode = {
+  number: number;
+  url: string;
+  title: string;
+  state: string;
+  labels: { nodes: { name: string }[] };
+};
+/** The pull request as selected by `query` below. */
+export type PullRequestNode = {
+  number: number;
+  title: string;
+  url: string;
+  state: string;
+  isDraft?: boolean;
+  merged?: boolean;
+  mergeable: string;
+  mergeStateStatus: string;
+  reviewDecision?: string | null;
+  headRefOid: string;
+  headRefName: string;
+  baseRefName: string;
+  updatedAt: string;
+  commits: {
+    nodes: {
+      commit: {
+        oid?: string;
+        statusCheckRollup: {
+          state?: string;
+          contexts: { nodes: CheckContext[]; pageInfo: PageInfo };
+        } | null;
+      };
+    }[];
+  };
+  reviews: { nodes: ReviewNode[]; pageInfo?: PageInfo };
+  reviewThreads: { nodes: ThreadNode[]; pageInfo: PageInfo };
+  comments: { nodes: CommentNode[]; pageInfo?: PageInfo };
+  closingIssuesReferences: { nodes: LinkedIssueNode[]; pageInfo?: PageInfo };
+};
+
+export type CheckClass = "passed" | "pending" | "cancelled" | "failed" | "unknown";
+/** Codex's machine-readable review state, embedded in its summary comment. */
+export type CodexReviewState = {
+  status?: string;
+  commit_sha?: string;
+  has_unresolved_findings?: boolean;
+};
+type CodexMarker = { code_review?: CodexReviewState };
+export type Receipt = {
+  by: string;
+  at: string;
+  url: string;
+  summary: string;
+  codexState: CodexMarker | null;
+};
+export type PrStatusReport = {
+  schemaVersion: 1;
+  kind: "pr-status";
+  repository: string;
+  fetchedAt: string;
+  startedAt: string;
+  pullRequest: {
+    number: number;
+    title: string;
+    url: string;
+    state: string;
+    draft: boolean;
+    head: string;
+    branch: string;
+    base: string;
+    mergeable: string;
+    mergeState: string;
+    reviewDecision: string | null;
+    updatedAt: string;
+  };
+  checks: {
+    required: { name: string; class: CheckClass; outcome: string; url: string } | null;
+    counts: Record<string, number>;
+    problems: { name: string; class: CheckClass; outcome: string; url: string; note?: string }[];
+    omittedProblems: number;
+  };
+  reviews: {
+    reviewer: string;
+    state: string;
+    submittedAt: string | null;
+    reviewedCommit: string | null;
+    current: boolean;
+    url: string;
+  }[];
+  threads: {
+    unresolved: {
+      path: string | null;
+      line: number | null;
+      outdated: boolean;
+      finding: string;
+      by: string;
+      url: string;
+      replies: number;
+      lastSpeaker: string | null;
+      lastAt: string | null;
+    }[];
+    omitted: number;
+  };
+  receipts: Receipt[];
+  reviewRequest: { at: string; url: string; status: string } | null;
+  linkedIssues: {
+    number: number;
+    url: string;
+    title: string;
+    state: string;
+    owners: string[];
+  }[];
+  blockers: string[];
+  verdict: string;
+  completeness: { complete: boolean; warnings: string[] };
+};
 
 const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){number title url state isDraft merged mergeable mergeStateStatus reviewDecision headRefOid headRefName baseRefName updatedAt
 commits(last:1){nodes{commit{oid committedDate statusCheckRollup{state contexts(first:100){nodes{__typename ... on CheckRun{name status conclusion detailsUrl startedAt completedAt} ... on StatusContext{context state targetUrl}} pageInfo{hasNextPage}}}}}}
@@ -22,7 +170,7 @@ closingIssuesReferences(first:10){nodes{number url title state labels(first:50){
 /** Bounds keep the report small; omitted counts are always reported. */
 export const limits = { failures: 5, threads: 8, excerpt: 240 };
 
-const excerpt = (text) => {
+const excerpt = (text: string | null | undefined): string => {
   const flat = String(text ?? "")
     .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/<[^>]+>/g, "")
@@ -32,10 +180,11 @@ const excerpt = (text) => {
 };
 
 /** Classify one check context. Cancelled is incomplete verification, not a code defect. */
-export function classifyCheck(check) {
+export function classifyCheck(check: CheckContext): CheckClass {
   const status = check.status ?? null;
   const outcome = check.conclusion ?? check.state ?? null;
   if (status && status !== "COMPLETED" && !check.conclusion) return "pending";
+  if (outcome === null) return "unknown";
   if (["PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"].includes(outcome))
     return "pending";
   if (workflow.pass.includes(outcome)) return "passed";
@@ -44,18 +193,23 @@ export function classifyCheck(check) {
   return "unknown";
 }
 
-const isBot = (login) => /\[bot\]$|^coderabbitai$|^chatgpt-codex-connector$/.test(login ?? "");
+const isBot = (login: string | undefined): boolean =>
+  /\[bot\]$|^coderabbitai$|^chatgpt-codex-connector$/.test(login ?? "");
 const requestPattern = /@(codex|coderabbitai)\s+review\b/i;
 /** The account that answers each review request; other bots never count as an answer. */
-const reviewerFor = { codex: "chatgpt-codex-connector", coderabbitai: "coderabbitai" };
+const reviewerFor: Record<string, string> = {
+  codex: "chatgpt-codex-connector",
+  coderabbitai: "coderabbitai",
+};
 
 /**
  * Build the report from a fetched pull request. Pure; `now` is injected.
- * @param {string} repository
- * @param {any} pr
- * @param {{ now?: Date, startedAt?: string }} [options]
  */
-export function prStatus(repository, pr, { now = new Date(), startedAt } = {}) {
+export function prStatus(
+  repository: string,
+  pr: PullRequestNode,
+  { now = new Date(), startedAt }: { now?: Date; startedAt?: string } = {},
+): PrStatusReport {
   const head = pr.headRefOid;
   const rollup = pr.commits.nodes[0]?.commit.statusCheckRollup ?? null;
   const contexts = (rollup?.contexts.nodes ?? []).map((c) => ({
@@ -66,11 +220,11 @@ export function prStatus(repository, pr, { now = new Date(), startedAt } = {}) {
     noRunTime: c.__typename === "CheckRun" && !c.startedAt,
   }));
   const required = contexts.find((c) => c.name === workflow.verify) ?? null;
-  const byClass = (k) => contexts.filter((c) => c.class === k);
+  const byClass = (k: CheckClass) => contexts.filter((c) => c.class === k);
   const problems = [...byClass("failed"), ...byClass("cancelled")];
 
   // Reviews: latest per reviewer, with the commit reviewed against the current head.
-  const latestByReviewer = new Map();
+  const latestByReviewer = new Map<string, ReviewNode>();
   for (const r of pr.reviews.nodes) {
     const who = r.author?.login ?? "unknown";
     const prev = latestByReviewer.get(who);
@@ -110,14 +264,15 @@ export function prStatus(repository, pr, { now = new Date(), startedAt } = {}) {
   const receipts = comments
     .filter((c) => isBot(c.author?.login))
     .map((c) => ({
-      by: c.author.login,
+      by: c.author?.login ?? "unknown",
       at: c.createdAt,
       url: c.url,
       summary: excerpt(c.body).slice(0, 160),
-      codexState: (() => {
+      codexState: ((): CodexMarker | null => {
         const m = /codex-review-state:v1 (\{.*?\}) -->/.exec(c.body ?? "");
         try {
-          return m ? JSON.parse(m[1]) : null;
+          const parsed: unknown = m ? JSON.parse(m[1]) : null;
+          return selected<CodexMarker>(parsed);
         } catch {
           return null;
         }
@@ -126,7 +281,7 @@ export function prStatus(repository, pr, { now = new Date(), startedAt } = {}) {
   const codex =
     receipts
       .map((r) => r.codexState)
-      .filter(Boolean)
+      .filter((m): m is CodexMarker => m !== null)
       .at(-1)?.code_review ?? null;
   // Bots often update one summary comment in place, so a receipt's creation time does not show
   // whether a later request was answered. Codex's state marker records the commit it reviewed.
@@ -137,14 +292,14 @@ export function prStatus(repository, pr, { now = new Date(), startedAt } = {}) {
     null;
   const requested =
     reviewerFor[(requestPattern.exec(lastRequest?.body ?? "")?.[1] ?? "").toLowerCase()];
-  const answerer = (login) => (login ?? "").replace(/\[bot\]$/, "");
-  const newerReceipt = (at) =>
+  const answerer = (login: string | undefined): string => (login ?? "").replace(/\[bot\]$/, "");
+  const newerReceipt = (at: string): boolean =>
     receipts.some((r) => answerer(r.by) === requested && (r.at ?? "") > at && !r.codexState) ||
     // A formal review by the requested service also answers the request.
     pr.reviews.nodes.some(
       (r) => answerer(r.author?.login) === requested && (r.submittedAt ?? "") > at,
     );
-  const request = lastRequest
+  const request: PrStatusReport["reviewRequest"] = lastRequest
     ? {
         at: lastRequest.createdAt,
         url: lastRequest.url,
@@ -174,7 +329,7 @@ export function prStatus(repository, pr, { now = new Date(), startedAt } = {}) {
   }));
 
   /** Every current blocker, simultaneously; no single merge verdict. */
-  const blockers = [];
+  const blockers: string[] = [];
   const open = pr.state === "OPEN";
   if (!open) blockers.push(`pull request is ${pr.merged ? "merged" : pr.state.toLowerCase()}`);
   // Merge-readiness blockers only make sense for an open pull request.
@@ -231,7 +386,7 @@ export function prStatus(repository, pr, { now = new Date(), startedAt } = {}) {
   if (open && !blockers.length && pr.mergeStateStatus === "BLOCKED")
     blockers.push("GitHub reports merging is blocked (branch protection); inspect the rules");
 
-  const incomplete = [];
+  const incomplete: string[] = [];
   if (rollup?.contexts.pageInfo.hasNextPage) incomplete.push("more than 100 check contexts");
   if (pr.reviewThreads.pageInfo.hasNextPage) incomplete.push("more than 100 review threads");
   // Truncated evidence is reported, never silently treated as complete.
@@ -274,7 +429,10 @@ export function prStatus(repository, pr, { now = new Date(), startedAt } = {}) {
           }
         : null,
       counts: Object.fromEntries(
-        ["passed", "pending", "cancelled", "failed", "unknown"].map((k) => [k, byClass(k).length]),
+        (["passed", "pending", "cancelled", "failed", "unknown"] as const).map((k) => [
+          k,
+          byClass(k).length,
+        ]),
       ),
       problems: problems
         .slice(0, limits.failures)
@@ -304,17 +462,22 @@ export function prStatus(repository, pr, { now = new Date(), startedAt } = {}) {
 }
 
 /** Fetch live and report. */
-export async function pullRequestStatus(repository, number, q = ghQuery, now = () => new Date()) {
+export async function pullRequestStatus(
+  repository: string,
+  number: number,
+  q: Query = ghQuery,
+  now: () => Date = () => new Date(),
+): Promise<PrStatusReport> {
   const startedAt = now().toISOString();
   const [owner, name] = repository.split("/");
   const data = await q(query, { owner, name, number });
-  const pr = data.repository?.pullRequest;
+  const pr = selected<PullRequestNode>(prop(data, "repository", "pullRequest"));
   if (!pr) throw new Error(`Pull request #${number} is unavailable in ${repository}.`);
   return prStatus(repository, pr, { now: now(), startedAt });
 }
 
 /** Text rendering. */
-export function prStatusText(r) {
+export function prStatusText(r: PrStatusReport): string {
   const p = r.pullRequest;
   const lines = [
     `PR #${p.number} ${p.title} ${p.url}`,

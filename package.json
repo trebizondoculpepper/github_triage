@@ -21,21 +21,22 @@
     "access": "public"
   },
   "scripts": {
-    "triage": "node src/cli.js",
-    "build": "vp pack src/cli.js --format esm --out-dir dist",
-    "check": "vp check",
+    "triage": "tsx src/cli.ts",
+    "build": "vp pack src/cli.ts --format esm --out-dir dist",
+    "check": "vp check && tsc -p doc/reports/examples",
     "lint": "vp lint",
     "fmt": "vp fmt",
     "test": "vp test run",
     "prepare": "vp config --hooks --no-agent",
-    "smoke": "node scripts/smoke.mjs dist/cli.mjs",
+    "smoke": "tsx scripts/smoke.ts dist/cli.mjs",
     "prepack": "npm run build",
-    "package-test": "node scripts/package-test.mjs",
-    "release": "node scripts/release.mjs",
-    "make-prerelease": "node scripts/make-prerelease.mjs"
+    "package-test": "tsx scripts/package-test.ts",
+    "release": "tsx scripts/release.ts",
+    "make-prerelease": "tsx scripts/make-prerelease.ts"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
     "typescript": "~7.0.2",
     "vite": "npm:@voidzero-dev/vite-plus-core@1.5.0",
     "vite-plus": "1.5.0"

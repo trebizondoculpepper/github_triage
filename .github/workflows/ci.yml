@@ -41,9 +41,9 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: node --version
       - run: node dist/cli.mjs --help
-      - run: node src/cli.js --help
+      - run: npx tsx src/cli.ts --help
       - run: npm run smoke
-      - run: node scripts/smoke.mjs src/cli.js
+      - run: npx tsx scripts/smoke.ts src/cli.ts
       - run: npm run package-test
 
   # Single stable check name for branch protection and the triage tool's
