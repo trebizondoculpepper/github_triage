@@ -461,8 +461,10 @@ async function identityListing(
       settings: IDENTITY_KEYS.map((key) => identitySetting(record, key.key)),
       problems: record.problems,
     };
-  } catch (error) {
-    // Unreadable identity never breaks the repository listing.
+  } catch (caught) {
+    // Unreadable identity (malformed TOML or an expected filesystem failure such as EACCES)
+    // never breaks the repository listing; programming errors still propagate.
+    const error = filesystemRefusal(caught) ?? caught;
     if (!(error instanceof ConfigError)) throw error;
     return {
       resolved: false as const,

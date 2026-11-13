@@ -8218,6 +8218,19 @@ x = 1
     expect(t.json()).toMatchObject({ code: "repository-mismatch" });
   });
 
+  it("keeps repository settings listable when the identity file is unreadable", async () => {
+    const t = setup(sample);
+    const realRead = t.fs.readText;
+    t.fs.readText = async (path) => {
+      if (path === file) throw Object.assign(new Error("denied"), { code: "EACCES", path });
+      return realRead(path);
+    };
+    expect(await t.call("list", "--entry", "codex", "--json")).toBe(0);
+    const listed = t.json();
+    expect(listed.settings.length).toBeGreaterThan(0);
+    expect(listed.identity).toMatchObject({ resolved: false, error: { code: "filesystem" } });
+  });
+
   it("refuses malformed or tracked files without rewriting or echoing contents", async () => {
     const bad = setup('[agents.codex]\nname = "x"\ntoken = "leak-me\n');
     expect(await bad.call("get", "identity.name", "--entry", "codex", "--json")).toBe(1);
