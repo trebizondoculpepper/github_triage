@@ -788,6 +788,56 @@ describe("deliverables maintainer overrides", () => {
     expect(posted(state)).toHaveLength(1);
     expect(state.labels).toEqual(["status:incomplete"]);
   });
+  /** A reset whose record is followed, before its label step, by another writer's record. */
+  const interleavedReset = (intervene: DeliveryRecord, labels = ["status:awaiting-review"]) => {
+    const { rt, state } = github({
+      comments: [submitted()],
+      prs: [fakePr(5, { state: "CLOSED" })],
+      labels,
+    });
+    const run = rt.run;
+    let raced = false;
+    rt.run = async (args: string[]) => {
+      await run(args);
+      if (raced || args[1] !== "comment") return;
+      raced = true;
+      state.comments.push(comment(deliveryMarker(intervene), "writer", 9500));
+    };
+    return { rt, state };
+  };
+  it("a reset interleaved with a non-conflicting record finds its own record by opId and applies its labels", async () => {
+    const { rt, state } = interleavedReset(
+      rec("membership", { agent: "maint", membership: "open", opId: "other-op" }),
+    );
+    const result = await applyDeliverables(
+      repo,
+      request("reset", { agent: "maint", as: "ready" }),
+      rt,
+    );
+    expect(result.exitCode).toBe(0);
+    expect(posted(state).filter((r) => r?.op === "reset")).toHaveLength(1);
+    expect(state.labels).toEqual(["status:ready"]);
+    expect(result.ok && result.steps?.map((s) => s.step)).toEqual(["record", "labels"]);
+  });
+  it("a reset superseded by an interleaved responsibility record is refused, not re-posted or applied", async () => {
+    const { rt, state } = interleavedReset(
+      rec("reassign", { agent: "maint", to: "bob", login: "writer", opId: "other-op" }),
+    );
+    const result = await applyDeliverables(
+      repo,
+      request("reset", { agent: "maint", as: "ready" }),
+      rt,
+    );
+    expect(result.exitCode).toBe(2);
+    const refusal = refused(result, "DELIVERY_DIVERGED");
+    expect(refusal.prerequisite).toMatch(
+      /reset is recorded \(comment \d+\) but its labels were not applied[\s\S]*reassign \(comment 9500\)[\s\S]*no second reset/,
+    );
+    expect(refusal.recovery.length).toBeGreaterThan(0);
+    expect(posted(state).filter((r) => r?.op === "reset")).toHaveLength(1);
+    expect(state.writes.filter((w) => w[1] === "edit")).toHaveLength(0);
+    expect(state.labels).toEqual(["status:awaiting-review"]);
+  });
   it("DELIVERY_DIVERGED: a recorded reset whose labels were changed by others is not re-applied", async () => {
     const closed = fakePr(5, { state: "CLOSED" });
     const reset = rec("reset", {

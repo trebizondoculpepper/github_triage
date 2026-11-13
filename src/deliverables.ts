@@ -427,6 +427,13 @@ function intended(
     plan: op === "reset" ? resetPlan(r.as) : undefined,
   };
 }
+/** Ops that neither set nor end responsibility, so they leave a recorded reset's plan standing. */
+const resetNeutralOps: ReadonlySet<DeliveryOp> = new Set([
+  "membership",
+  "detach",
+  "retarget",
+  "void",
+]);
 /** Whether a folded record is the one this request would write (retry detection). */
 const sameRequest = (rec: DeliveryRecord, want: Partial<DeliveryRecord> & { op: DeliveryOp }) =>
   rec.op === want.op && defining(rec) === defining(want);
@@ -438,6 +445,7 @@ export async function planDeliverables(
   repository: string,
   request: DeliverablesRequest,
   rt: DeliverablesRuntime,
+  resume?: { opId: string },
 ): Promise<DeliverablesPlan> {
   const r = request;
   const { number, agent } = r;
@@ -559,9 +567,6 @@ export async function planDeliverables(
     (c): c is ClassifiedRecord & { status: "trusted" } => c.status === "trusted",
   );
   const lastApplied = fold.applied.at(-1);
-  const last = lastApplied
-    ? trustedRecords.find((c) => String(c.comment.databaseId) === lastApplied.comment)
-    : undefined;
 
   const holds = claims.includes(agent);
   const others = claims.filter((c) => c !== agent);
@@ -789,21 +794,67 @@ export async function planDeliverables(
     retry,
   });
 
-  if (last && sameRequest(last.record, intended(op, r, deliverables))) {
+  // Find this request's own record by identity, never by position: with `resume`, the record
+  // this invocation posted (its opId); otherwise the newest applied record that is this request.
+  // Records applied after it are judged against the contract before any later step proceeds.
+  const want = intended(op, r, deliverables);
+  const ownIndex = resume
+    ? fold.applied.findIndex((a) =>
+        trustedRecords.some(
+          (c) => String(c.comment.databaseId) === a.comment && c.record.opId === resume.opId,
+        ),
+      )
+    : fold.applied.findLastIndex((a) => {
+        const c = trustedRecords.find((t) => String(t.comment.databaseId) === a.comment);
+        return !!c && sameRequest(c.record, want);
+      });
+  const own = ownIndex >= 0 ? fold.applied[ownIndex] : undefined;
+  const ownRecord = own
+    ? trustedRecords.find((c) => String(c.comment.databaseId) === own.comment)?.record
+    : undefined;
+  const after = ownIndex >= 0 ? fold.applied.slice(ownIndex + 1) : [];
+  // The posted record did not fold (rejected or not found): post-write verification reports it.
+  if (resume && !own)
+    return noop(
+      `The record posted by this run (opId ${resume.opId}) is not applied; nothing more is written.`,
+    );
+
+  if (
+    own &&
+    ownRecord &&
+    (after.length === 0 ||
+      (op === "reset" && (resume || after.every((a) => resetNeutralOps.has(a.op)))))
+  ) {
     // The record step is done. Only reset has a later step: its recorded label plan.
-    if (op === "reset" && last.record.plan) {
-      const plan = last.record.plan;
+    if (op === "reset" && ownRecord.plan) {
+      const plan = ownRecord.plan;
+      const where = `A reset is recorded (comment ${own.comment})`;
+      const pending = `add ${plan.add.join(", ") || "nothing"}, remove ${plan.remove.join(", ") || "nothing"}`;
+      // Contract: reset ends all responsibility and leaves membership alone. A later record that
+      // sets or transfers responsibility (or another reset/complete) supersedes it, so its labels
+      // must not be applied silently. Membership, detach, retarget and void records do not touch
+      // responsibility, so the reset's plan still stands once its prerequisites are re-checked.
+      const conflicting = after.filter((a) => !resetNeutralOps.has(a.op));
+      if (conflicting.length || (after.length && fold.ticketResponsible))
+        return refuse(
+          "DELIVERY_DIVERGED",
+          facts,
+          `${where} but its labels were not applied (${pending}), and a later record intervened: ${(conflicting.length ? conflicting : after).map((a) => `${a.op} (comment ${a.comment}) by ${a.agent} (${a.login})`).join("; ")}${fold.ticketResponsible ? `; ${fold.ticketResponsible} is now ticket-responsible` : ""}. The reset is superseded, so no second reset is posted and its labels are not applied. Inspect the ticket; if a reset is still wanted, run it again so it is decided against the current records.`,
+          [inspect, cmd(`who ${number}`), retry],
+        );
+      const intervened = after.length
+        ? ` Later record(s) ${after.map((a) => `${a.op} (comment ${a.comment})`).join(", ")} do not change responsibility, so the reset still stands.`
+        : "";
       const added = plan.add.filter((l) => labels.includes(l));
       const removed = plan.remove.filter((l) => !labels.includes(l));
       const done = added.length === plan.add.length && removed.length === plan.remove.length;
-      if (done)
-        return noop(`Reset already recorded (comment ${lastApplied!.comment}) and applied.`);
+      if (done) return noop(`Reset already recorded (comment ${own.comment}) and applied.`);
       // One label write applies the whole plan, so a half-applied plan was changed by others.
       if (added.length || (removed.length && plan.add.length === 0))
         return refuse(
           "DELIVERY_DIVERGED",
           facts,
-          `A reset is recorded (comment ${lastApplied!.comment}) but the labels now contradict its plan (add ${plan.add.join(", ") || "nothing"}, remove ${plan.remove.join(", ") || "nothing"}); others' changes are never reverted.`,
+          `${where} but the labels now contradict its plan (${pending}); others' changes are never reverted.`,
           [inspect, cmd(`who ${number}`)],
         );
       // Finishing the plan is a write, so the reset's live prerequisites are checked again: a
@@ -812,7 +863,7 @@ export async function planDeliverables(
       if (blocked)
         return {
           ...blocked,
-          prerequisite: `A reset is recorded (comment ${lastApplied!.comment}) but its labels were not applied (add ${plan.add.join(", ") || "nothing"}, remove ${plan.remove.join(", ") || "nothing"}), and its prerequisites no longer hold: ${blocked.prerequisite} No further record is posted; resolve this, then re-run the same reset to apply the recorded labels.`,
+          prerequisite: `${where} but its labels were not applied (${pending}), and its prerequisites no longer hold: ${blocked.prerequisite}${intervened} No further record is posted; resolve this, then re-run the same reset to apply the recorded labels.`,
           recovery: blocked.recovery.includes(retry)
             ? blocked.recovery
             : [...blocked.recovery, retry],
@@ -820,15 +871,17 @@ export async function planDeliverables(
       return {
         ok: true,
         noop: false,
-        reason: `Reset already recorded (comment ${lastApplied!.comment}); applying its recorded label plan.`,
+        reason: `Reset already recorded (comment ${own.comment}); applying its recorded label plan.${intervened}`,
         facts,
         changes: labelStep(plan),
         notes,
         retry,
       };
     }
-    return noop(`Already recorded as comment ${lastApplied!.comment}; nothing to change.`);
+    return noop(`Already recorded as comment ${own.comment}; nothing to change.`);
   }
+  // Resuming a single-step record that is no longer last: nothing further to write here.
+  if (resume) return noop(`Already recorded as comment ${own!.comment}; nothing to change.`);
 
   switch (r.action) {
     case "attach": {
@@ -1128,9 +1181,13 @@ export async function applyDeliverables(
   let plan: DeliverablesPlan = initial;
   let fresh = !first;
   let later: DeliverablesRefusal | null = null;
+  let skipped: string | null = null;
   for (let i = 0; i < 4; i++) {
     // Re-read and re-fold before every write; never write on an earlier read.
-    if (!fresh) plan = await planDeliverables(repository, request, rt);
+    // Once this run's record is posted, later steps resume from that record (found by opId).
+    const resume = opId && steps.some((s) => s.step === "record" && s.status === "done");
+    if (!fresh)
+      plan = await planDeliverables(repository, request, rt, resume ? { opId } : undefined);
     fresh = false;
     const done = steps.some((s) => s.status === "done");
     if (!plan.ok) {
@@ -1142,7 +1199,10 @@ export async function applyDeliverables(
     const next = plan.changes[0];
     if (!next) break;
     // A record posted in this run is never posted again; the re-read below reports its fate.
-    if (next.step === "record" && steps.some((s) => s.step === "record")) break;
+    if (next.step === "record" && steps.some((s) => s.step === "record")) {
+      skipped = `A fresh plan proposed another record after this run's record was posted; nothing more was written. Re-run to see the current state.`;
+      break;
+    }
     const step: PlanStep = { ...next, status: "pending" };
     steps.push(step);
     try {
@@ -1156,7 +1216,7 @@ export async function applyDeliverables(
   }
   // Post-write verification: the record must fold as intended.
   let conflict: string | null = null;
-  let unverified: string | null = null;
+  let unverified: string | null = skipped;
   if (opId && steps.some((s) => s.status === "done")) {
     try {
       const read = await readIssue(repository, request.number, rt.query);
