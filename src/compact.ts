@@ -258,10 +258,16 @@ export function compactBriefing(
   // attention, PR follow-up, own work, eligible pickup) exists; explicit requests always see it.
   const higher = next.some((group) => tier(group) <= 4);
   const estimates = new Map(facts.estimation.entries.map((e) => [e.url, e]));
-  const { entries: _entries, queue, ...estimationFacts } = facts.estimation;
+  const { entries: _entries, queue, conflicts, ...estimationFacts } = facts.estimation;
   const shownQueue = queue?.items.slice(0, options.limit) ?? [];
+  const shownConflicts = conflicts.slice(0, options.limit);
   const estimation = {
     ...estimationFacts,
+    conflicts: {
+      total: conflicts.length,
+      omitted: conflicts.length - shownConflicts.length,
+      items: shownConflicts,
+    },
     offered: estimationFacts.requested || (!higher && !!queue?.total),
     queue: queue
       ? { total: queue.total, omitted: queue.total - shownQueue.length, items: shownQueue }

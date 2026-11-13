@@ -55,6 +55,14 @@ import { MAX_COMMENT_PAGES, parseProvenance, provenanceComment } from "./estimat
 import type { EstimateProvenance } from "./estimate.js";
 import { complexityConfigText, diagnoseComplexityConfig } from "./complexitydoctor.js";
 import {
+  classifyComplexityLabels,
+  collectLabelEstimationInput,
+  complexityLabelFindings,
+  complexityLabelName,
+  labelEstimationReport,
+} from "./complexitylabels.js";
+import { estimationText } from "./estimation.js";
+import {
   collect,
   declaredDependencies,
   ghQueryWith,
@@ -8306,5 +8314,141 @@ x = 1
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("label-backed complexity classification and prepared reader (#151)", () => {
+  const labelled = (number: number, labels: string[], truncated = false): Issue => ({
+    ...issue(number, labels),
+    labels: page(
+      labels.map((name) => ({ name })),
+      truncated,
+      truncated ? "c" : null,
+    ),
+  });
+  const marker = (size: "M" | "S", recordedAt = time) =>
+    provenanceComment({
+      schemaVersion: 1,
+      kind: "complexity-estimate",
+      fieldId: "",
+      size,
+      previous: null,
+      rationale: "contained capability",
+      assumptions: [],
+      references: [],
+      estimator: "ana",
+      revision: null,
+      guidanceVersion: complexityGuidance.guidanceVersion,
+      recordedAt,
+    });
+  const withComment = (item: Issue, body: string): Issue => ({
+    ...item,
+    comments: page([{ body, url: `${item.url}#c`, author: null, createdAt: time }]),
+  });
+  const available = { status: "available" as const, unavailable: null, findings: [] };
+  const options = { prs: [], limit: 10 };
+
+  it("names canonical labels with uppercase suffixes and matches case-insensitively", () => {
+    expect(complexityLabelName("XL")).toBe("complexity:XL");
+    expect(classifyComplexityLabels(labelled(1, ["Complexity:xl", "status:ready"]))).toMatchObject({
+      state: "estimated",
+      size: "XL",
+      labels: ["Complexity:xl"],
+    });
+    expect(classifyComplexityLabels(labelled(1, ["status:ready", "complexity-ish"]))).toMatchObject(
+      { state: "unestimated", size: null },
+    );
+  });
+
+  it("reports several or unrecognized size labels as conflicts without choosing a size", () => {
+    const many = classifyComplexityLabels(labelled(1, ["complexity:S", "complexity:XL"]));
+    expect(many).toMatchObject({ state: "conflicting", size: null, sizes: ["S", "XL"] });
+    const odd = classifyComplexityLabels(labelled(1, ["complexity:huge"]));
+    expect(odd).toMatchObject({
+      state: "conflicting",
+      size: null,
+      unrecognized: ["complexity:huge"],
+    });
+    // Two spellings of one size are still a single recognized size.
+    expect(classifyComplexityLabels(labelled(1, ["complexity:M", "complexity:m"]))).toMatchObject({
+      state: "estimated",
+      size: "M",
+    });
+  });
+
+  it("treats truncated label pages as unknown, never unestimated", () => {
+    expect(classifyComplexityLabels(labelled(1, ["status:ready"], true)).state).toBe("unknown");
+    expect(classifyComplexityLabels(labelled(1, ["complexity:M"], true)).state).toBe("unknown");
+    expect(
+      classifyComplexityLabels(labelled(1, ["complexity:M", "complexity:S"], true)).state,
+    ).toBe("conflicting");
+  });
+
+  it("queues unestimated and stale tickets including blocked ones; conflicts are inspection cases", () => {
+    const blocked: Issue = {
+      ...labelled(2, []),
+      issueDependenciesSummary: { blockedBy: 1, totalBlockedBy: 1, blocking: 0, totalBlocking: 0 },
+    };
+    const report = labelEstimationReport(
+      [
+        withComment(labelled(1, ["complexity:M"]), marker("M")),
+        blocked,
+        withComment(labelled(3, ["complexity:L", "status:ready"]), marker("S")),
+        labelled(4, ["complexity:S", "complexity:M"]),
+        labelled(5, ["status:ready"], true),
+      ],
+      available,
+      options,
+    );
+    expect(report.status).toBe("available");
+    expect(report.queue?.items.map((e) => [e.number, e.state, e.implementation])).toEqual([
+      [2, "unestimated", "ineligible"],
+      [3, "stale", "eligible"],
+    ]);
+    expect(report.queue?.items[1]?.reasons[0]).toContain("differs from recorded estimate S");
+    expect(report.conflicts.map((e) => [e.number, e.size])).toEqual([[4, null]]);
+    expect(report.unknown).toBe(1);
+    expect(report.entries.find((e) => e.number === 1)?.state).toBe("estimated");
+    expect(report.detail).toContain("1 with conflicting size evidence to inspect");
+    expect(estimationText(report).join("\n")).toContain("#4 Ticket 4 — inspect: conflicting sizes");
+  });
+
+  it("suppresses the queue when disabled and reads only configuration, never GitHub", async () => {
+    expect(
+      labelEstimationReport([labelled(1, [])], { ...available, status: "disabled" }, options),
+    ).toMatchObject({ status: "disabled", queue: null, conflicts: [] });
+    const root = "/repo";
+    const configPath = join(root, CONFIG_PATH);
+    const fs = (text: string | null): ConfigFileSystem => ({
+      readText: async (file) => (file === configPath ? text : null),
+      writeText: async () => undefined,
+      rename: async () => undefined,
+      remove: async () => undefined,
+      makeDirectory: async () => undefined,
+    });
+    const git: GitRunner = async (args) =>
+      args[0] === "rev-parse" ? `${root}\n` : `origin\thttps://github.com/${repo}.git (fetch)\n`;
+    expect((await collectLabelEstimationInput(repo, { fs: fs(null), git, cwd: root })).status).toBe(
+      "available",
+    );
+    expect(
+      (
+        await collectLabelEstimationInput(repo, {
+          fs: fs('{"schemaVersion":1,"complexity":{"enabled":false}}\n'),
+          git,
+          cwd: root,
+        })
+      ).status,
+    ).toBe("disabled");
+  });
+
+  it("gives Ticket Doctor conflict and incomplete findings, never for unestimated tickets", () => {
+    expect(complexityLabelFindings(labelled(1, []))).toEqual([]);
+    expect(complexityLabelFindings(labelled(1, ["complexity:XS", "complexity:XXL"]))).toMatchObject(
+      [{ kind: "complexity-label-conflict", certainty: "definite" }],
+    );
+    expect(complexityLabelFindings(labelled(1, [], true))).toMatchObject([
+      { kind: "complexity-labels-incomplete", certainty: "unknown" },
+    ]);
   });
 });
