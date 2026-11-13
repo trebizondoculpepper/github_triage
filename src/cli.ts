@@ -5,7 +5,7 @@ import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { collect, currentRepository, ghQuery } from "./github.js";
+import { collect, currentRepository, ghQuery, IssueUnavailable } from "./github.js";
 import {
   applyDependencyChange,
   dependencyChangeText,
@@ -70,7 +70,9 @@ Read-only LLM action briefing. Requires authenticated gh and Node 20+.
   ticket-doctor [--stale-hours N] [--limit N]  Read-only consistency scan of all open tickets
   --repo owner/name     Repository (default: current gh checkout)
   --json                Versioned structured output (from a checkout: npm run --silent triage)
-  --issue N             Include full issue body/history, even if closed
+  --issue N             Include full issue body/history, even if closed; diagnoses
+                        transferred, missing or forbidden issues instead of failing
+  --include-transferred With --issue: follow a transfer to the destination's intake
   --since ISO           Include changed issues/PRs in all states since timestamp
   --checkpoint PATH     Read last successful window; advance only after complete live output
   --cache PATH          Save full successful snapshot atomically
@@ -241,6 +243,7 @@ export function argumentsFor(args: string[]) {
       checkpoint: { type: "string" },
       cache: { type: "string" },
       offline: { type: "boolean" },
+      "include-transferred": { type: "boolean" },
       limit: { type: "string" },
       help: { type: "boolean" },
     },
@@ -508,10 +511,43 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
     const previous = options.checkpoint
       ? await checkpointSince(options.checkpoint, repository)
       : undefined;
-    snapshot = await runtime.collect(repository, {
-      issue: options.issue,
-      since: options.since ?? previous,
-    });
+    try {
+      snapshot = await runtime.collect(repository, {
+        issue: options.issue,
+        since: options.since ?? previous,
+      });
+    } catch (error) {
+      if (!(error instanceof IssueUnavailable)) throw error;
+      const d = error.diagnosis;
+      // Transferred-out work is excluded by default; only an explicit opt-in follows it.
+      if (d.state === "moved" && options["include-transferred"]) {
+        const rest = args.filter(
+          (a, i) =>
+            !["--repo", "--issue", "--cache", "--checkpoint"].includes(a) &&
+            !["--repo", "--issue", "--cache", "--checkpoint"].includes(args[i - 1] ?? "") &&
+            !/^--(repo|issue|cache|checkpoint)=/.test(a),
+        );
+        // Keep the origin identity visible: JSON gains transferredFrom, text a leading notice.
+        const followed = async (text: string) =>
+          output(
+            options.json
+              ? JSON.stringify({ ...JSON.parse(text), transferredFrom: d }, null, 2) + "\n"
+              : `Followed transfer: ${d.url} -> ${String(d.destination.url)} (--include-transferred)\n${text}`,
+          );
+        return run(
+          [...rest, "--repo", d.destination.repository, "--issue", String(d.destination.number)],
+          followed,
+          runtime,
+        );
+      }
+      const report = { schemaVersion: 1, kind: "issue-unavailable", ...d };
+      await output(
+        options.json
+          ? JSON.stringify(report, null, 2) + "\n"
+          : `Issue #${d.number} in ${d.repository}: ${d.state.toUpperCase()}\n${d.detail}\n${d.state === "moved" ? `Destination: ${String(d.destination.url)} (use --include-transferred to read it)\n` : ""}Next: ${d.next}\n`,
+      );
+      return 2;
+    }
     if (options.cache) await atomicJson(options.cache, snapshot);
   }
   if (options.issue && !snapshot.issues.some((issue) => issue.number === options.issue))

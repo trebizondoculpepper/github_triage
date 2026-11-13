@@ -80,6 +80,118 @@ export function graphqlAnswer(text: unknown): JsonObject | null {
     return null;
   }
 }
+export interface RestAnswer {
+  status: number | null;
+  body: unknown;
+}
+export type Rest = (path: string) => Promise<RestAnswer>;
+
+/** Read-only REST GET through gh (which follows GitHub's transfer redirects). */
+export const ghRest: Rest = async (path) => {
+  try {
+    const { stdout } = await execute("gh", ["api", path], { timeout: 30_000 });
+    return { status: 200, body: JSON.parse(stdout) as unknown };
+  } catch (error) {
+    try {
+      const out = prop(error, "stdout");
+      const body: unknown = JSON.parse(typeof out === "string" ? out : "");
+      return { status: Number(prop(body, "status")) || null, body };
+    } catch {
+      return { status: null, body: null };
+    }
+  }
+};
+
+interface LocationBase {
+  repository: string;
+  number: number;
+  url: string;
+  detail: string;
+  next: string;
+}
+/** Why an issue number is unavailable, discriminated on `state`. */
+export type IssueDiagnosis =
+  | (LocationBase & {
+      state: "moved";
+      destination: { repository: string; number: unknown; url: unknown };
+    })
+  | (LocationBase & { state: "pull-request" | "missing" | "forbidden" | "unknown" });
+
+/**
+ * Why an issue number is unavailable (#39, doc/design/diagnostics.md): moved by transfer
+ * (authoritative only when GitHub resolves it to another repository), a pull request,
+ * missing, forbidden, or unknown. A missing or forbidden answer never implies a transfer.
+ */
+export async function locateIssue(
+  repository: string,
+  number: number,
+  rest: Rest = ghRest,
+): Promise<IssueDiagnosis> {
+  const url = `https://github.com/${repository}/issues/${number}`;
+  const { status, body } = await rest(`repos/${repository}/issues/${number}`);
+  const base = { repository, number, url };
+  const inspect = `gh api repos/${repository}/issues/${number}`;
+  const repositoryUrl = prop(body, "repository_url");
+  if (status === 200 && repositoryUrl) {
+    const destination = String(repositoryUrl).replace(/^.*\/repos\//, "");
+    const destNumber = prop(body, "number");
+    const htmlUrl = prop(body, "html_url");
+    if (destination.toLowerCase() !== repository.toLowerCase())
+      return {
+        ...base,
+        state: "moved",
+        destination: { repository: destination, number: destNumber, url: htmlUrl },
+        detail: `Transferred to ${String(htmlUrl)}. It is not this project's work, and the destination's ownership is not assumed.`,
+        next: `npm run --silent triage -- --repo ${destination} --issue ${String(destNumber)} --json`,
+      };
+    if (prop(body, "pull_request"))
+      return {
+        ...base,
+        state: "pull-request",
+        detail: `#${number} is a pull request.`,
+        next: `gh pr view ${number} --repo ${repository}`,
+      };
+    return {
+      ...base,
+      state: "unknown",
+      detail: "REST found the issue but GraphQL did not; retry.",
+      next: inspect,
+    };
+  }
+  if (status === 404)
+    return {
+      ...base,
+      state: "missing",
+      detail:
+        "Not found (deleted, never existed, or not visible to this account); not treated as a transfer.",
+      next: inspect,
+    };
+  if (status === 403 || status === 401)
+    return {
+      ...base,
+      state: "forbidden",
+      detail: "Access denied; check gh auth status and repository access.",
+      next: "gh auth status",
+    };
+  if (status === 410)
+    return { ...base, state: "missing", detail: "Deleted (HTTP 410).", next: inspect };
+  return {
+    ...base,
+    state: "unknown",
+    detail: "GitHub gave no authoritative answer.",
+    next: inspect,
+  };
+}
+
+/** Thrown when `--issue N` cannot be read; carries the location diagnosis. */
+export class IssueUnavailable extends Error {
+  readonly diagnosis: IssueDiagnosis;
+  constructor(diagnosis: IssueDiagnosis) {
+    super(`Issue #${diagnosis.number} is unavailable: ${diagnosis.state}. ${diagnosis.detail}`);
+    this.diagnosis = diagnosis;
+  }
+}
+
 export async function currentRepository(): Promise<string> {
   try {
     const { stdout } = await execute(
@@ -175,6 +287,8 @@ export function declaredDependencyContexts(body: string, repository: string): De
 export interface CollectOptions {
   since?: string;
   issue?: number;
+  /** Injected issue-location diagnosis (production: `locateIssue`). */
+  locate?: (repository: string, number: number) => Promise<IssueDiagnosis>;
 }
 export async function collect(
   repository: string,
@@ -215,16 +329,27 @@ export async function collect(
       ? nodes.filter((node) => Date.parse(node.updatedAt) >= Date.parse(cutoff))
       : nodes;
   };
+  const locate = options.locate ?? locateIssue;
+  /**
+   * For --issue N, a failed GraphQL read gets the read-only REST diagnosis. The failure itself
+   * is never transfer evidence: only REST's own answer decides, and "unknown" keeps the error.
+   */
+  const diagnoseFailure = async (error: unknown): Promise<never> => {
+    if (!options.issue) throw error;
+    const diagnosis = await locate(repository, options.issue);
+    if (diagnosis.state === "unknown") throw error;
+    throw new IssueUnavailable(diagnosis);
+  };
   const [issues, pullRequests] = await Promise.all([
     collection<Issue>("issues", `${common} stateReason ${nativeFields}`, ",states:OPEN"),
     collection<PullRequest>("pullRequests", prFields, ",states:OPEN"),
-  ]);
+  ]).catch(diagnoseFailure);
   const issueSource = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){${common} stateReason ${nativeFields}}}}`;
   if (options.issue && !issues.some((issue) => issue.number === options.issue)) {
     const detail = selected<Issue>(
-      prop(await request(issueSource, { number: options.issue }), "issue"),
+      prop(await request(issueSource, { number: options.issue }).catch(diagnoseFailure), "issue"),
     );
-    if (!detail) throw new Error(`Issue #${options.issue} is unavailable.`);
+    if (!detail) throw new IssueUnavailable(await locate(repository, options.issue));
     issues.push(detail);
   }
   // All comments are available for semantic reconciliation, even if the briefing shows excerpts.
