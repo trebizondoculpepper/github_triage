@@ -2,52 +2,85 @@
 import { nativeFields, completeNative } from "./dependencies.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import type { Comment, Issue, Page, PullRequest, Reference, Snapshot } from "./types.js";
 
 const execute = promisify(execFile);
 
-/** @typedef {(query: string, variables: Record<string, string | number>) => Promise<Record<string, unknown>>} Query */
-/** @type {Query} */
-export const ghQuery = async (query, variables) => {
+/** An untrusted JSON object (GitHub responses, cached files). */
+export type JsonObject = { [key: string]: unknown };
+export type QueryVariables = Record<string, string | number>;
+/** Injected read-only GraphQL boundary: resolves to the response's `data` object. */
+export type Query = (query: string, variables: QueryVariables) => Promise<JsonObject>;
+
+export const isRecord = (value: unknown): value is JsonObject =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** Follow a path through untrusted JSON; undefined as soon as a step is not an object. */
+export function prop(value: unknown, ...path: string[]): unknown {
+  let at = value;
+  for (const key of path) {
+    if (!isRecord(at)) return undefined;
+    at = at[key];
+  }
+  return at;
+}
+
+/**
+ * The single assertion boundary for GraphQL nodes. Their shape is fixed by this project's own
+ * selection sets and GitHub's schema-validated response, so after checking that an object (or
+ * connection) is present, its fields are trusted to match the selection rather than
+ * re-validated field by field. Missing evidence is still detected by the callers.
+ */
+function trusted<T>(value: object): T {
+  // Justified escape: see above; GraphQL guarantees the selected field shapes.
+  return value as T;
+}
+/** A selected GraphQL object, or null when the response has none. */
+export function selected<T>(value: unknown): T | null {
+  return isRecord(value) ? trusted<T>(value) : null;
+}
+
+export const ghQuery: Query = async (query, variables) => {
   const args = ["api", "graphql", "-f", `query=${query}`];
   for (const [key, value] of Object.entries(variables)) args.push("-F", `${key}=${value}`);
-  let stdout;
+  let stdout: string;
   try {
     ({ stdout } = await execute("gh", args, { maxBuffer: 32 * 1024 * 1024, timeout: 60_000 }));
   } catch (error) {
     // gh exits non-zero on any GraphQL error but still prints the response. A response whose
     // only errors are NOT_FOUND is a valid answer ("no such issue"): callers see null fields.
-    const answer = graphqlAnswer(error?.stdout);
+    const answer = graphqlAnswer(prop(error, "stdout"));
     if (answer) return answer;
     // Do not echo subprocess arguments, stderr, credentials or private API response bodies.
     throw new Error(
       "GitHub query failed. Check gh auth status, repository access and API rate limits.",
     );
   }
-  const parsed = JSON.parse(stdout);
-  if (parsed.errors?.length && !graphqlAnswer(stdout))
+  const parsed: unknown = JSON.parse(stdout);
+  const errors = prop(parsed, "errors");
+  if (Array.isArray(errors) && errors.length && !graphqlAnswer(stdout))
     throw new Error("GitHub returned incomplete query data; no fresh report saved.");
-  if (!parsed.data)
+  const data = prop(parsed, "data");
+  if (!isRecord(data))
     throw new Error("GitHub returned incomplete query data; no fresh report saved.");
-  return parsed.data;
+  return data;
 };
-/**
- * Data from a GraphQL response whose errors are all NOT_FOUND, else null.
- * @param {unknown} text
- * @returns {Record<string, unknown> | null}
- */
-export function graphqlAnswer(text) {
+/** Data from a GraphQL response whose errors are all NOT_FOUND, else null. */
+export function graphqlAnswer(text: unknown): JsonObject | null {
   try {
-    const parsed = JSON.parse(typeof text === "string" ? text : "");
+    const parsed: unknown = JSON.parse(typeof text === "string" ? text : "");
+    const errors = prop(parsed, "errors");
+    const data = prop(parsed, "data");
     const notFoundOnly =
-      Array.isArray(parsed.errors) &&
-      parsed.errors.length > 0 &&
-      parsed.errors.every((e) => e?.type === "NOT_FOUND");
-    return notFoundOnly && parsed.data ? parsed.data : null;
+      Array.isArray(errors) &&
+      errors.length > 0 &&
+      errors.every((e) => prop(e, "type") === "NOT_FOUND");
+    return notFoundOnly && isRecord(data) ? data : null;
   } catch {
     return null;
   }
 }
-export async function currentRepository() {
+export async function currentRepository(): Promise<string> {
   try {
     const { stdout } = await execute(
       "gh",
@@ -71,45 +104,42 @@ const prFields = `${common} headRefOid headRefName baseRefName isDraft mergeable
  commits(last:1){nodes{commit{statusCheckRollup{state contexts(first:100){nodes{__typename ... on CheckRun{name status conclusion detailsUrl} ... on StatusContext{context state targetUrl}} ${info}}}}}}`;
 
 /** Cursor pagination also detects a broken/repeating cursor instead of spinning forever. */
-/**
- * @template T
- * @param {(cursor?: string) => Promise<import("./types.js").Page<T>>} fetch
- * @param {(page: T[]) => boolean} [stop]
- * @returns {Promise<T[]>}
- */
-export async function pages(fetch, stop = () => false) {
-  const result = [];
-  const seen = new Set();
-  let cursor;
+export async function pages<T>(
+  fetch: (cursor?: string) => Promise<unknown>,
+  stop: (page: T[]) => boolean = () => false,
+): Promise<T[]> {
+  const result: T[] = [];
+  const seen = new Set<string>();
+  let cursor: string | undefined;
   for (;;) {
     const page = await fetch(cursor);
-    if (!page || !Array.isArray(page.nodes) || !page.pageInfo)
+    const nodes = prop(page, "nodes");
+    const pageInfo = prop(page, "pageInfo");
+    if (!Array.isArray(nodes) || !isRecord(pageInfo))
       throw new Error("Malformed GitHub connection.");
-    result.push(...page.nodes);
-    if (stop(page.nodes) || !page.pageInfo.hasNextPage) return result;
-    const next = page.pageInfo.endCursor;
-    if (!next || seen.has(next)) throw new Error("GitHub pagination did not advance.");
+    const batch = trusted<T[]>(nodes);
+    result.push(...batch);
+    if (stop(batch) || !pageInfo.hasNextPage) return result;
+    const next = pageInfo.endCursor;
+    if (typeof next !== "string" || !next || seen.has(next))
+      throw new Error("GitHub pagination did not advance.");
     seen.add(next);
     cursor = next;
   }
 }
 
 /** Only explicitly declared prerequisites, never every #mention in the body. */
-/** @param {string} body @param {string} repository @returns {import("./types.js").Reference[]} */
-export function declaredDependencies(body, repository) {
+export function declaredDependencies(body: string, repository: string): Reference[] {
   return declaredDependencyContexts(body, repository).map(({ repository, number, url }) => ({
     repository,
     number,
     url,
   }));
 }
-/**
- * As declaredDependencies, with the declaring text kept for migration review.
- * @param {string} body @param {string} repository
- * @returns {(import("./types.js").Reference & { context: string })[]}
- */
-export function declaredDependencyContexts(body, repository) {
-  const refs = new Map();
+export type DeclaredReference = Reference & { context: string };
+/** As declaredDependencies, with the declaring text kept for migration review. */
+export function declaredDependencyContexts(body: string, repository: string): DeclaredReference[] {
+  const refs = new Map<string, DeclaredReference>();
   let section = false;
   for (const original of body.split("\n")) {
     const line = original.replaceAll("**", "");
@@ -128,7 +158,7 @@ export function declaredDependencyContexts(body, repository) {
         sentence,
       );
       const text = declaration?.[1] ?? (section && /^\s*[-*]\s/.test(sentence) ? sentence : "");
-      const add = (repo, number, url) =>
+      const add = (repo: string, number: number, url: string) =>
         refs.set(`${repo}#${number}`, { repository: repo, number, url, context: sentence.trim() });
       for (const match of text.matchAll(
         /https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/(?:issues|pull)\/(\d+)/g,
@@ -142,36 +172,43 @@ export function declaredDependencyContexts(body, repository) {
   return [...refs.values()];
 }
 
-/**
- * @param {string} repository
- * @param {{ since?: string, issue?: number }} [options]
- * @param {Query} [query]
- * @param {() => Date} [now]
- * @returns {Promise<import("./types.js").Snapshot>}
- */
-export async function collect(repository, options = {}, query = ghQuery, now = () => new Date()) {
+export interface CollectOptions {
+  since?: string;
+  issue?: number;
+}
+export async function collect(
+  repository: string,
+  options: CollectOptions = {},
+  query: Query = ghQuery,
+  now: () => Date = () => new Date(),
+): Promise<Snapshot> {
   const originalQuery = query;
   let requestCount = 0;
-  query = (...args) => {
+  query = (...args: Parameters<Query>) => {
     requestCount++;
     return originalQuery(...args);
   };
   const [owner, name] = repository.split("/");
   const vars = { owner: owner, name: name };
-  const warnings = [];
+  const warnings: string[] = [];
   const startedAt = now().toISOString();
-  let rateLimit = null;
-  const request = async (source, variables = {}) => {
+  let rateLimit: Snapshot["rateLimit"] = null;
+  const request = async (source: string, variables: QueryVariables = {}): Promise<unknown> => {
     const data = await query(source, { ...vars, ...variables });
-    rateLimit = data.rateLimit ?? rateLimit;
+    rateLimit = selected<NonNullable<Snapshot["rateLimit"]>>(data.rateLimit) ?? rateLimit;
     const repo = data.repository;
     if (!repo) throw new Error(`Repository unavailable: ${repository}`);
     return repo;
   };
-  const collection = async (field, fields, states, cutoff) => {
+  const collection = async <T extends { updatedAt: string }>(
+    field: string,
+    fields: string,
+    states: string,
+    cutoff?: string,
+  ): Promise<T[]> => {
     const source = `query($owner:String!,$name:String!,$cursor:String){repository(owner:$owner,name:$name){${field}(first:50,after:$cursor,orderBy:{field:UPDATED_AT,direction:DESC}${states}){nodes{${fields}} ${info}}} rateLimit{remaining resetAt}}`;
-    const nodes = await pages(
-      async (cursor) => (await request(source, cursor ? { cursor } : {}))[field],
+    const nodes = await pages<T>(
+      async (cursor) => prop(await request(source, cursor ? { cursor } : {}), field),
       (batch) => !!cutoff && batch.some((node) => Date.parse(node.updatedAt) < Date.parse(cutoff)),
     );
     return cutoff
@@ -179,12 +216,14 @@ export async function collect(repository, options = {}, query = ghQuery, now = (
       : nodes;
   };
   const [issues, pullRequests] = await Promise.all([
-    collection("issues", `${common} stateReason ${nativeFields}`, ",states:OPEN"),
-    collection("pullRequests", prFields, ",states:OPEN"),
+    collection<Issue>("issues", `${common} stateReason ${nativeFields}`, ",states:OPEN"),
+    collection<PullRequest>("pullRequests", prFields, ",states:OPEN"),
   ]);
   const issueSource = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){${common} stateReason ${nativeFields}}}}`;
   if (options.issue && !issues.some((issue) => issue.number === options.issue)) {
-    const detail = (await request(issueSource, { number: options.issue })).issue;
+    const detail = selected<Issue>(
+      prop(await request(issueSource, { number: options.issue }), "issue"),
+    );
     if (!detail) throw new Error(`Issue #${options.issue} is unavailable.`);
     issues.push(detail);
   }
@@ -193,10 +232,13 @@ export async function collect(repository, options = {}, query = ghQuery, now = (
     if (item.comments.pageInfo.hasNextPage) {
       const source = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){... on Issue{comments(first:100,after:$cursor){nodes{${comment}} ${info}}} ... on PullRequest{comments(first:100,after:$cursor){nodes{${comment}} ${info}}}}}`;
       const initial = item.comments;
-      item.comments.nodes = await pages(async (cursor) => {
+      item.comments.nodes = await pages<Comment>(async (cursor) => {
         if (!cursor) return initial;
-        const node = (await request(source, { number: item.number, cursor })).issueOrPullRequest;
-        return node.comments;
+        const node = prop(
+          await request(source, { number: item.number, cursor }),
+          "issueOrPullRequest",
+        );
+        return prop(node, "comments");
       });
       item.comments.pageInfo = { hasNextPage: false, endCursor: null };
     }
@@ -204,7 +246,7 @@ export async function collect(repository, options = {}, query = ghQuery, now = (
       warnings.push(`${item.url}: labels exceed 100; label analysis incomplete.`);
   });
   for (const pr of pullRequests) {
-    const nested = [
+    const nested: [string, Page<unknown> | undefined][] = [
       ["closing references", pr.closingIssuesReferences],
       ["review threads", pr.reviewThreads],
       ["reviews", pr.reviews],
@@ -214,10 +256,11 @@ export async function collect(repository, options = {}, query = ghQuery, now = (
       if (connection?.pageInfo.hasNextPage)
         warnings.push(`${pr.url}: ${label} exceed 100; review/merge evidence incomplete.`);
   }
-  await concurrentMap(issues, (item) => completeNative(item, repository, query));
+  // The same issue objects, now typed with their completed native evidence.
+  const native = await concurrentMap(issues, (item) => completeNative(item, repository, query));
   const dependencies = [
     ...new Map(
-      issues
+      native
         .flatMap((item) => item.blockedBy.nodes)
         .map((item) => [
           item.url,
@@ -225,18 +268,23 @@ export async function collect(repository, options = {}, query = ghQuery, now = (
         ]),
     ).values(),
   ];
-  let changed = [];
+  let changed: Snapshot["changed"] = [];
   if (options.since) {
     const values = await Promise.all([
-      collection(
+      collection<Issue>(
         "issues",
         `${common} stateReason ${nativeFields}`,
         ",states:[OPEN,CLOSED]",
         options.since,
       ),
-      collection("pullRequests", prFields, ",states:[OPEN,CLOSED,MERGED]", options.since),
+      collection<PullRequest>(
+        "pullRequests",
+        prFields,
+        ",states:[OPEN,CLOSED,MERGED]",
+        options.since,
+      ),
     ]);
-    changed = values.flat().map(({ number, title, url, state, updatedAt }) => ({
+    changed = [...values[0], ...values[1]].map(({ number, title, url, state, updatedAt }) => ({
       number,
       title,
       url,
@@ -261,8 +309,12 @@ export async function collect(repository, options = {}, query = ghQuery, now = (
 }
 
 /** Bounded independent reads; results retain input order. */
-export async function concurrentMap(items, handler, concurrency = 4) {
-  const results = Array.from({ length: items.length });
+export async function concurrentMap<T, R>(
+  items: readonly T[],
+  handler: (item: T, index: number) => Promise<R> | R,
+  concurrency = 4,
+): Promise<R[]> {
+  const results: R[] = [];
   let next = 0;
   await Promise.all(
     Array.from({ length: Math.min(concurrency, items.length) }, async () => {

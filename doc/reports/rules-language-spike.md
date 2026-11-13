@@ -1,6 +1,6 @@
 # Rules language feasibility spike (#74)
 
-Spike completed 2026-11-13, following the plan in [rules-language-engines.md](rules-language-engines.md) (#73). No runtime code, package dependency, configuration or live workflow changed. The spike lives in [examples/rules-spike/](examples/rules-spike/); DataScript is installed only for the run (`npm install --ignore-scripts --no-save datascript@1.8.1`, then `node doc/reports/examples/rules-spike/run.mjs`).
+Spike completed 2026-11-13, following the plan in [rules-language-engines.md](rules-language-engines.md) (#73). No runtime code, package dependency, configuration or live workflow changed. The spike lives in [examples/rules-spike/](examples/rules-spike/); DataScript is installed only for the run (`npm install --ignore-scripts --no-save datascript@1.8.1`, then `npx tsx doc/reports/examples/rules-spike/run.ts`; the examples became TypeScript in #91).
 
 ## Recommendation
 

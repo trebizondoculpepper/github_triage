@@ -8,23 +8,38 @@
  * - `latest` (explicit release-branch promotion): 0.1.0 first, then advance minor, reset patch.
  * - A commit that is already published on the requested channel is reported, never republished.
  *
- * Usage: node scripts/release-version.mjs next|latest <commit-sha> [package-name]
+ * Usage: npx tsx scripts/release-version.ts next|latest <commit-sha> [package-name]
  * Prints JSON: { version, alreadyPublished, distTag }.
- *        node scripts/release-version.mjs following <prerelease>   (prints the next prerelease)
+ *        npx tsx scripts/release-version.ts following <prerelease>   (prints the next prerelease)
  */
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-/** @param {string} v */
-export function parse(v) {
+export interface ParsedVersion {
+  major: number;
+  minor: number;
+  patch: number;
+  next: number | null;
+}
+export interface Publication {
+  version: string;
+  gitHead?: string;
+}
+export type Channel = "next" | "latest";
+export interface VersionChoice {
+  version: string | null;
+  alreadyPublished: string | null;
+  distTag: string;
+}
+
+export function parse(v: string): ParsedVersion | null {
   const m = /^(\d+)\.(\d+)\.(\d+)(?:-next\.(\d+))?$/.exec(v);
   return m
     ? { major: +m[1], minor: +m[2], patch: +m[3], next: m[4] === undefined ? null : +m[4] }
     : null;
 }
-/** @param {ReturnType<typeof parse>} a @param {ReturnType<typeof parse>} b */
-export function compare(a, b) {
+export function compare(a: ParsedVersion, b: ParsedVersion): number {
   return (
     a.major - b.major ||
     a.minor - b.minor ||
@@ -35,12 +50,19 @@ export function compare(a, b) {
   );
 }
 
-/**
- * @param {{ channel: "next" | "latest", sha: string, published: { version: string, gitHead?: string }[] }} input
- * @returns {{ version: string | null, alreadyPublished: string | null, distTag: string }}
- */
-export function chooseVersion({ channel, sha, published }) {
-  const known = published.map((p) => ({ ...p, parsed: parse(p.version) })).filter((p) => p.parsed);
+export function chooseVersion({
+  channel,
+  sha,
+  published,
+}: {
+  channel: Channel;
+  sha: string;
+  published: Publication[];
+}): VersionChoice {
+  const known = published.flatMap((p) => {
+    const parsed = parse(p.version);
+    return parsed ? [{ ...p, parsed }] : [];
+  });
   const sameCommit = known.find(
     (p) =>
       p.gitHead === sha && (channel === "latest" ? p.parsed.next === null : p.parsed.next !== null),
@@ -55,7 +77,7 @@ export function chooseVersion({ channel, sha, published }) {
     const version = stable ? `${stable.major}.${stable.minor + 1}.0` : "0.1.0";
     return { version, alreadyPublished: null, distTag: "latest" };
   }
-  const base = stable ?? { major: 0, minor: 0, patch: 0, next: null };
+  const base: ParsedVersion = stable ?? { major: 0, minor: 0, patch: 0, next: null };
   // Prereleases on the current stable line (same major.minor, above the stable patch).
   const line = known
     .map((p) => p.parsed)
@@ -76,34 +98,45 @@ export function chooseVersion({ channel, sha, published }) {
  * read view lagged behind an earlier publication (#57). Only `next` advances this way: an
  * official version is never bumped past a conflict, because the conflict most likely means
  * the same release is already published.
- * @param {string} version
  */
-export function followingPrerelease(version) {
+export function followingPrerelease(version: string): string {
   const p = parse(version);
   if (!p || p.next === null) throw new Error(`Not a -next prerelease: ${version}`);
   return `${p.major}.${p.minor}.${p.patch + 1}-next.1`;
 }
 
 /** Read publication history (version and source commit) from the public registry. */
-export async function registryHistory(name, fetchImpl = fetch) {
+export async function registryHistory(
+  name: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<Publication[]> {
   const response = await fetchImpl(`https://registry.npmjs.org/${name.replace("/", "%2f")}`);
   if (response.status === 404) return [];
   if (!response.ok) throw new Error(`npm registry returned ${response.status} for ${name}.`);
-  const doc = await response.json();
-  return Object.values(doc.versions ?? {}).map((v) => ({ version: v.version, gitHead: v.gitHead }));
+  const doc: unknown = await response.json();
+  const versions = isRecord(doc) && isRecord(doc.versions) ? doc.versions : {};
+  return Object.values(versions).map((v) => ({
+    version: String(isRecord(v) ? v.version : undefined),
+    gitHead: isRecord(v) && typeof v.gitHead === "string" ? v.gitHead : undefined,
+  }));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const [channel, sha, nameArg] = process.argv.slice(2);
   if (channel === "following") {
-    process.stdout.write(followingPrerelease(sha) + "\n");
+    process.stdout.write(followingPrerelease(sha ?? "") + "\n");
     process.exit(0);
   }
-  if (!["next", "latest"].includes(channel) || !/^[0-9a-f]{40}$/.test(sha ?? "")) {
-    console.error("Usage: release-version.mjs next|latest <40-hex commit sha> [package-name]");
+  if ((channel !== "next" && channel !== "latest") || !/^[0-9a-f]{40}$/.test(sha ?? "")) {
+    console.error("Usage: release-version.ts next|latest <40-hex commit sha> [package-name]");
     process.exit(1);
   }
-  const name = nameArg ?? JSON.parse(await readFile("package.json", "utf8")).name;
-  const result = chooseVersion({ channel, sha, published: await registryHistory(name) });
+  const manifest: unknown = JSON.parse(await readFile("package.json", "utf8"));
+  const name = nameArg ?? String(isRecord(manifest) ? manifest.name : undefined);
+  const result = chooseVersion({ channel, sha: sha ?? "", published: await registryHistory(name) });
   process.stdout.write(JSON.stringify(result) + "\n");
 }

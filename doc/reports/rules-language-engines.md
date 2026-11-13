@@ -35,15 +35,11 @@ None of the inspected candidates establishes every requested feature out of the 
 
 ## Working DataScript example
 
-The repository contains an **isolated research example**, `doc/reports/examples/rules-engine-evaluation.mjs`; it is not imported by runtime code. Reproduce without adding project dependencies:
+The repository contains an **isolated research example**, `doc/reports/examples/rules-engine-evaluation.ts` (originally `.mjs`; converted to TypeScript in #91, see [the TypeScript contract](../design/typescript.md)); it is not imported by runtime code. Reproduce from this checkout without adding project dependencies:
 
 ```sh
-mkdir /tmp/triage-rule-example
-cd /tmp/triage-rule-example
-npm init -y
-npm install --ignore-scripts datascript@1.8.1
-# Copy doc/reports/examples/rules-engine-evaluation.mjs here from this repository.
-node rules-engine-evaluation.mjs
+npm install --ignore-scripts --no-save datascript@1.8.1
+npx tsx doc/reports/examples/rules-engine-evaluation.ts
 ```
 
 Its essential query is:

@@ -1,16 +1,17 @@
 /**
  * Rules spike (#74) harness. Run from the repository root after
  *   npm install --ignore-scripts --no-save datascript@1.8.1
- * with: node doc/reports/examples/rules-spike/run.mjs
+ * with: npx tsx doc/reports/examples/rules-spike/run.ts
  * Asserts both evaluators agree on every scenario, prints the compiled English and
  * the conflict diagnostics, then measures both evaluators on synthetic data.
  */
 import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
 import ds from "datascript";
-import { RULES, englishGuide, checkRules, evaluateJs, evaluateDataScript } from "./rules.mjs";
+import { RULES, englishGuide, checkRules, evaluateJs, evaluateDataScript } from "./rules.js";
+import type { Agent, Evaluation, Modality, Rule, Ticket } from "./rules.js";
 
-const t = (number, o = {}) => ({
+const t = (number: number, o: Partial<Ticket> = {}): Ticket => ({
   number,
   createdAt: `2026-11-${String(10 + (number % 9)).padStart(2, "0")}T00:00:00Z`,
   labels: ["status:ready"],
@@ -23,11 +24,16 @@ const t = (number, o = {}) => ({
   unblocks: 0,
   ...o,
 });
-const me = { name: "ana", platform: "macos" };
+const me: Agent = { name: "ana", platform: "macos" };
 
 /** The dozen decision scenarios: [name, tickets, agent, expected { pickup, must, mustNot, inspect }]. */
-/** @type {[string, any[], { name: string, platform: string | null }, Record<string, any>][]} */
-const scenarios = [
+interface Expected {
+  pickup: number[];
+  must: string[];
+  mustNot: string[];
+  inspect: string[];
+}
+const scenarios: [string, Ticket[], Agent, Partial<Expected>][] = [
   ["plain ready ticket is eligible", [t(1)], me, { pickup: [1] }],
   [
     "incomplete evidence is not eligible, inspect instead",
@@ -115,7 +121,7 @@ const scenarios = [
   ],
 ];
 
-const project = (r, modality) =>
+const project = (r: Evaluation, modality: Modality): string[] =>
   r.decisions
     .filter((d) => d.modality === modality)
     .map((d) => `${d.ticket}:${d.action}`)
@@ -123,19 +129,22 @@ const project = (r, modality) =>
 for (const [name, tickets, agent, want] of scenarios) {
   const js = evaluateJs(tickets, agent);
   const dl = evaluateDataScript(ds, tickets, agent);
-  const norm = (r) => ({
+  const norm = (r: Evaluation): Expected => ({
     pickup: r.pickupOrder,
     must: project(r, "must"),
     mustNot: project(r, "must_not"),
     inspect: project(r, "inspect"),
   });
   assert.deepEqual(norm(dl), norm(js), `evaluators disagree: ${name}`);
-  for (const k of Object.keys(want))
+  for (const k of ["pickup", "must", "mustNot", "inspect"] as const) {
+    const expected = want[k];
+    if (expected === undefined) continue;
     assert.deepEqual(
       norm(js)[k],
-      k === "pickup" ? want[k] : [...want[k]].sort((a, b) => String(a).localeCompare(String(b))),
+      k === "pickup" ? expected : [...expected].sort((a, b) => String(a).localeCompare(String(b))),
       `${name}: ${k}`,
     );
+  }
 }
 console.log(`${scenarios.length} scenarios: JS and DataScript agree and match expectations.\n`);
 
@@ -144,6 +153,7 @@ const blocked = evaluateJs(
   [t(11, { openBlockers: 1, labels: ["status:ready"] })],
   me,
 ).decisions.find((d) => d.action === "pick_up");
+assert.ok(blocked);
 assert.deepEqual(
   [blocked.modality, blocked.because, blocked.overrides],
   ["must_not", ["R5"], ["R9"]],
@@ -154,7 +164,7 @@ console.log("Explanation example:", JSON.stringify(claimedReady), "\n");
 console.log(englishGuide(), "\n");
 
 assert.deepEqual(checkRules(), []);
-const conflicting = [
+const conflicting: Rule[] = [
   ...RULES,
   {
     id: "X1",
@@ -199,9 +209,9 @@ const many = Array.from({ length: 500 }, (_, i) =>
     unblocks: i % 4,
   }),
 );
-const time = (f, n = 50) => {
+const time = (f: () => unknown, n = 50): string => {
   for (let i = 0; i < 5; i++) f();
-  const xs = [];
+  const xs: number[] = [];
   for (let i = 0; i < n; i++) {
     const s = performance.now();
     f();

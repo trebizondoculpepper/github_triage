@@ -21,6 +21,42 @@ import { checkForUpdate, installedVersion, optOutEnv, updateAdvisory } from "./u
 import { defaultStaleHours, teamText, teamView } from "./team.js";
 import { migrationPlanText, planMigration } from "./migration.js";
 import { briefing, textReport } from "./briefing.js";
+import type { GhRun } from "./dependencies.js";
+import type { Query } from "./github.js";
+import type { Snapshot } from "./types.js";
+
+/** Parsed `deps` arguments: help, a migration plan, a native change, or a read. */
+export type DepsArguments =
+  | { help: true; repo?: undefined }
+  | { help?: undefined; migrate: "plan"; file: string; repo?: string; json?: boolean }
+  | {
+      help?: undefined;
+      action: "add" | "remove";
+      number: number;
+      on: number[];
+      note: string;
+      dryRun: boolean;
+      repo?: string;
+      json?: boolean;
+    }
+  | { help?: undefined; number: number; repo?: string; json?: boolean; tree?: boolean };
+
+/** Injected services for `main`; tests replace the GitHub-facing ones. */
+export interface Runtime {
+  collect: typeof collect;
+  currentRepository: typeof currentRepository;
+  dependencyReport?: typeof dependencyReport;
+  planDependencyChange?: typeof planDependencyChange;
+  ghRun?: GhRun;
+  planMigration?: typeof planMigration;
+  migrationRuntime?: Parameters<typeof planMigration>[1];
+  query?: Query;
+  now?: () => Date;
+  updateCheck?: typeof checkForUpdate;
+  stderr?: (text: string) => void;
+}
+
+type Output = (text: string) => Promise<void>;
 
 export const help = `Usage: github-triage [options]
        (from a source checkout: npm run triage -- [options])
@@ -71,11 +107,7 @@ labels map to native dependencies. Record edges with deps add; automatic apply i
 Exit: 0 all done; 2 partly done (refused/skipped/failed items listed); 1 nothing done or
 invalid arguments/API failure.
 `;
-/**
- * @param {string[]} args
- * @returns {{ action?: "add" | "remove", number?: number, on?: number[], note?: string, dryRun?: boolean, repo?: string, json?: boolean, tree?: boolean, help?: boolean }}
- */
-export function depsArgumentsFor(args) {
+export function depsArgumentsFor(args: string[]): DepsArguments {
   const { values, positionals } = parseArgs({
     args,
     allowPositionals: true,
@@ -93,7 +125,7 @@ export function depsArgumentsFor(args) {
   if (values.help) return { help: true };
   if (values.repo && !/^[\w.-]+\/[\w.-]+$/.test(values.repo))
     throw new Error("--repo must be owner/name.");
-  const number = (text) =>
+  const number = (text: string | undefined): number | null =>
     /^[1-9]\d*$/.test(text ?? "") && Number.isSafeInteger(Number(text)) ? Number(text) : null;
   if (positionals[0] === "migrate") {
     const usage =
@@ -107,14 +139,21 @@ export function depsArgumentsFor(args) {
   if (positionals[0] === "add" || positionals[0] === "remove") {
     const usage = `Usage: deps ${positionals[0]} N --on M [--on K] --note WHY [--dry-run] [--json] [--repo owner/name]`;
     const target = number(positionals[1]);
-    const on = (values.on ?? []).map(number);
-    if (positionals.length !== 2 || !target || !on.length || on.includes(null) || values.tree)
+    const parsed = (values.on ?? []).map(number);
+    const on = parsed.filter((n): n is number => n !== null);
+    if (
+      positionals.length !== 2 ||
+      !target ||
+      !on.length ||
+      on.length !== parsed.length ||
+      values.tree
+    )
       throw new Error(usage);
     if (!values.note?.trim()) throw new Error(`--note WHY is required. ${usage}`);
     return {
       action: positionals[0],
       number: target,
-      on: /** @type {number[]} */ (on),
+      on,
       note: values.note.trim(),
       dryRun: !!values["dry-run"],
       repo: values.repo,
@@ -129,20 +168,23 @@ export function depsArgumentsFor(args) {
     !Number.isSafeInteger(Number(positionals[0]))
   )
     throw new Error("Usage: deps N [--tree] [--json] [--repo owner/name]");
-  return { ...values, number: Number(positionals[0]) };
+  return {
+    repo: values.repo,
+    json: values.json,
+    tree: values.tree,
+    number: Number(positionals[0]),
+  };
 }
 /** Dry runs report the exit code the real run would give if every apply succeeded. */
-const plannedExit = (changes) => {
+const plannedExit = (changes: { status: string }[]): number => {
   const applying = changes.some((c) => c.status === "apply");
   const refused = changes.some((c) => c.status === "refused");
   return !applying ? (refused ? 1 : 0) : refused ? 2 : 0;
 };
 /**
  * Arguments for `claim` and `needs-human` (doc/design/workflow.md).
- * @param {"claim" | "needs-human"} command
- * @param {string[]} args
  */
-export function workflowArgumentsFor(command, args) {
+export function workflowArgumentsFor(command: "claim" | "needs-human", args: string[]) {
   const { values, positionals } = parseArgs({
     args,
     allowPositionals: true,
@@ -185,7 +227,7 @@ export function workflowArgumentsFor(command, args) {
   if (values.branch || values.platform) throw new Error(usage);
   return { ...common, designer: values.designer, why: values.why.trim(), questions };
 }
-export function argumentsFor(args) {
+export function argumentsFor(args: string[]) {
   const { values } = parseArgs({
     args,
     options: {
@@ -205,7 +247,7 @@ export function argumentsFor(args) {
   });
   if (values.repo && !/^[\w.-]+\/[\w.-]+$/.test(values.repo))
     throw new Error("--repo must be owner/name.");
-  const positive = (text, option) => {
+  const positive = (text: string, option: string): number => {
     if (!/^[1-9]\d*$/.test(text) || !Number.isSafeInteger(Number(text)))
       throw new Error(`${option} must be a positive integer.`);
     return Number(text);
@@ -228,56 +270,69 @@ export function argumentsFor(args) {
     since: values.since ? new Date(values.since).toISOString() : undefined,
   };
 }
-export async function atomicJson(path, value) {
+export async function atomicJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(resolve(path)), { recursive: true });
   const temporary = `${path}.${process.pid}.tmp`;
   await writeFile(temporary, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 });
   await rename(temporary, path);
 }
-export async function cachedSnapshot(path, repository) {
-  const data = JSON.parse(await readFile(path, "utf8"));
-  if (
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+
+/**
+ * Structural check of a cached snapshot. Only the envelope is validated (as before the
+ * TypeScript migration); the guard is the single narrowly accepted trust point for cache files.
+ */
+function isSnapshotEnvelope(data: unknown, repository: string | undefined): data is Snapshot {
+  return !(
+    !isRecord(data) ||
     data.schemaVersion !== 1 ||
     typeof data.repository !== "string" ||
     (repository && data.repository !== repository) ||
-    !Number.isFinite(Date.parse(data.fetchedAt)) ||
-    !Number.isFinite(Date.parse(data.startedAt)) ||
+    !Number.isFinite(Date.parse(String(data.fetchedAt))) ||
+    !Number.isFinite(Date.parse(String(data.startedAt))) ||
     ![data.issues, data.pullRequests, data.dependencies, data.changed, data.warnings].every(
       Array.isArray,
     )
-  )
+  );
+}
+export async function cachedSnapshot(
+  path: string,
+  repository: string | undefined,
+): Promise<Snapshot> {
+  const data: unknown = JSON.parse(await readFile(path, "utf8"));
+  if (!isSnapshotEnvelope(data, repository))
     throw new Error("Cache schema/repository is invalid or unsupported.");
   return data;
 }
-export async function checkpointSince(path, repository) {
+export async function checkpointSince(
+  path: string,
+  repository: string,
+): Promise<string | undefined> {
   try {
-    const data = JSON.parse(await readFile(path, "utf8"));
+    const data: unknown = JSON.parse(await readFile(path, "utf8"));
     if (
+      !isRecord(data) ||
       data.schemaVersion !== 1 ||
       data.repository !== repository ||
+      typeof data.through !== "string" ||
       !Number.isFinite(Date.parse(data.through))
     )
       throw new Error("Checkpoint schema/repository is invalid.");
     return data.through;
   } catch (error) {
-    if (error.code === "ENOENT") return undefined;
+    if (isRecord(error) && error.code === "ENOENT") return undefined;
     throw error;
   }
 }
-/**
- * @param {string[]} args
- * @param {(text: string) => Promise<void>} [output]
- * @param {{collect: typeof collect, currentRepository: typeof currentRepository, dependencyReport?: typeof dependencyReport, planDependencyChange?: typeof planDependencyChange, ghRun?: import("./dependencies.js").GhRun, planMigration?: typeof planMigration, migrationRuntime?: Record<string, any>, query?: import("./github.js").Query, now?: () => Date, updateCheck?: typeof checkForUpdate, stderr?: (text: string) => void}} [runtime]
- * @returns {Promise<number>}
- */
 export async function main(
-  args,
-  output = (text) =>
-    new Promise((resolve, reject) =>
+  args: string[],
+  output: Output = (text) =>
+    new Promise<void>((resolve, reject) =>
       process.stdout.write(text, (error) => (error ? reject(error) : resolve())),
     ),
-  runtime = { collect, currentRepository, dependencyReport },
-) {
+  runtime: Runtime = { collect, currentRepository, dependencyReport },
+): Promise<number> {
   // Version check (#51): runs alongside the command, bounded by a short timeout, and reports
   // only on stderr so JSON on stdout stays valid. --offline and opt-outs mean no network.
   const optOut = args.includes("--no-update-check") || !!process.env[optOutEnv];
@@ -290,7 +345,7 @@ export async function main(
       rest.includes("--json")
         ? JSON.stringify({ schemaVersion: 1, version: installed.version, check: result }, null, 2) +
             "\n"
-        : `github-triage ${installed.version ?? "(unknown version)"}\nUpdate check: ${result.status}${result.reason ? ` — ${result.reason}` : ""}${result.available ? ` (npm ${result.channel}: ${result.available})` : ""}\n`,
+        : `github-triage ${installed.version ?? "(unknown version)"}\nUpdate check: ${result.status}${"reason" in result && result.reason ? ` — ${result.reason}` : ""}${"available" in result && result.available ? ` (npm ${result.channel}: ${result.available})` : ""}\n`,
     );
     return 0;
   }
@@ -304,13 +359,15 @@ export async function main(
   try {
     return await run(rest, output, runtime);
   } finally {
-    const advisory = updateAdvisory((await pending) ?? { status: "unknown" });
+    const advisory = updateAdvisory(
+      (await pending) ?? { status: "unknown", reason: "", installed: null, channel: "" },
+    );
     if (advisory) (runtime.stderr ?? ((t) => process.stderr.write(t)))(`${advisory}\n`);
   }
 }
 
 /** The command itself; `main` adds the version check around it. */
-async function run(args, output, runtime) {
+async function run(args: string[], output: Output, runtime: Runtime): Promise<number> {
   if (args[0] === "ticket-doctor") {
     const { values } = parseArgs({
       args: args.slice(1),
@@ -334,7 +391,7 @@ async function run(args, output, runtime) {
       throw new Error("--limit must be a positive integer.");
     if (values.offline && !values.cache) throw new Error("--offline requires --cache PATH.");
     const snapshot = values.offline
-      ? await cachedSnapshot(values.cache, values.repo)
+      ? await cachedSnapshot(values.cache ?? "", values.repo)
       : await runtime.collect(values.repo ?? (await runtime.currentRepository()), {});
     if (!values.offline && values.cache) await atomicJson(values.cache, snapshot);
     const report = ticketDoctor(snapshot, {
@@ -352,9 +409,9 @@ async function run(args, output, runtime) {
     const query = runtime.query ?? ghQuery;
     // Read live immediately before changing; never act on a cached snapshot.
     const plan =
-      args[0] === "claim"
-        ? await planClaim(repository, values, query)
-        : await planNeedsHuman(repository, values, query);
+      "questions" in values
+        ? await planNeedsHuman(repository, values, query)
+        : await planClaim(repository, values, query);
     const result =
       values.dryRun || !plan.ok
         ? { ...plan, exitCode: plan.ok ? 0 : 1 }
@@ -385,7 +442,7 @@ async function run(args, output, runtime) {
       throw new Error("--stale-hours must be a positive number.");
     if (values.offline && !values.cache) throw new Error("--offline requires --cache PATH.");
     const snapshot = values.offline
-      ? await cachedSnapshot(values.cache, values.repo)
+      ? await cachedSnapshot(values.cache ?? "", values.repo)
       : await runtime.collect(values.repo ?? (await runtime.currentRepository()), {});
     if (!values.offline && values.cache) await atomicJson(values.cache, snapshot);
     const view = teamView(snapshot, {
@@ -404,7 +461,7 @@ async function run(args, output, runtime) {
     }
     const repository = values.repo ?? (await runtime.currentRepository());
     if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error("--repo must be owner/name.");
-    if (values.migrate === "plan") {
+    if ("migrate" in values) {
       const plan = await (runtime.planMigration ?? planMigration)(
         repository,
         runtime.migrationRuntime,
@@ -413,7 +470,7 @@ async function run(args, output, runtime) {
       await output(values.json ? JSON.stringify(plan, null, 2) + "\n" : migrationPlanText(plan));
       return 0;
     }
-    if (values.action) {
+    if ("action" in values) {
       // Read live immediately before changing; never act on a cached snapshot.
       const plan = await (runtime.planDependencyChange ?? planDependencyChange)(repository, {
         action: values.action,
@@ -444,8 +501,8 @@ async function run(args, output, runtime) {
     await output(help);
     return 0;
   }
-  let snapshot;
-  if (options.offline) snapshot = await cachedSnapshot(options.cache, options.repo);
+  let snapshot: Snapshot;
+  if (options.offline) snapshot = await cachedSnapshot(options.cache ?? "", options.repo);
   else {
     const repository = options.repo ?? (await runtime.currentRepository());
     const previous = options.checkpoint
@@ -468,7 +525,8 @@ async function run(args, output, runtime) {
           limit: Math.max(snapshot.issues.length + snapshot.pullRequests.length, 1) * 20,
         },
   );
-  const report = options.full ? expanded : compactBriefing(snapshot, options, expanded);
+  const compact = options.full ? null : compactBriefing(snapshot, options, expanded);
+  const report = compact ?? expanded;
   const checkpoint = options.checkpoint
     ? {
         previousWindow: snapshot.since,
@@ -485,8 +543,7 @@ async function run(args, output, runtime) {
   await output(
     options.json
       ? JSON.stringify({ ...report, checkpoint }, null, 2) + "\n"
-      : (options.full ? textReport(expanded) : compactText(report, options.maxChars)) +
-          checkpointText,
+      : (compact ? compactText(compact, options.maxChars) : textReport(expanded)) + checkpointText,
   );
   if (!options.offline && options.checkpoint && report.completeness.complete)
     // Start time deliberately overlaps windows: updates arriving during collection are not lost.
@@ -500,10 +557,8 @@ async function run(args, output, runtime) {
 /**
  * True when this module is the process entry point. npm installs bins as
  * symlinks (or shims), so compare real paths rather than the raw argv path.
- * @param {string | undefined} entry
- * @returns {boolean}
  */
-function isEntryPoint(entry) {
+function isEntryPoint(entry: string | undefined): boolean {
   if (!entry) return false;
   try {
     return realpathSync(resolve(entry)) === realpathSync(fileURLToPath(import.meta.url));
@@ -515,7 +570,7 @@ if (isEntryPoint(process.argv[1])) {
   try {
     process.exitCode = await main(process.argv.slice(2));
   } catch (error) {
-    console.error(`triage: ${error.message}`);
+    console.error(`triage: ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
   }
 }

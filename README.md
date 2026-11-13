@@ -25,7 +25,7 @@ npm run triage -- team --repo owner/repository    # each agent's claims, linked 
 Without `--repo`, `gh repo view` resolves the repository from the **current working directory**. From this checkout that means `github_triage`, not `poker_blocks`. To inspect a different checkout while keeping its current-directory resolution:
 
 ```sh
-node /path/to/github_triage/src/cli.js --json
+/path/to/github_triage/node_modules/.bin/tsx /path/to/github_triage/src/cli.ts --json
 ```
 
 The briefing and `deps N` are read-only. They do not claim, label, merge or close tickets. Suggestions, closed dependencies and question candidates require human/agent inspection; they are not approval. `deps add`, `deps remove`, `claim` and `needs-human` are the only commands that change GitHub. Each reads live state first, refuses with a stable error ID and recovery commands when a prerequisite fails, posts one explanatory comment, and supports `--dry-run`. `deps add`/`remove` edit native blocked-by relationships ([dependency design](doc/issue-dependencies.md)); `claim N --agent NAME` takes one eligible ticket (one active claim per agent, never another agent's); `needs-human N --agent NAME --designer NAME --why ... --question ...` records questions for a designer and marks the ticket decision-needed ([workflow contract](doc/design/workflow.md)). `deps migrate --plan` writes a read-only report of how `Depends on` text and `blocked:work` labels map to native dependencies; automatic apply is deferred (#48). Releasing and handoff (`release`, #62) are specified but not implemented yet.

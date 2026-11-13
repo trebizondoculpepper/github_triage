@@ -6,24 +6,25 @@
  * validated `deps add` / `deps remove` commands or deliberate manual edits.
  */
 import { workflow } from "./briefing.js";
-import { collect, declaredDependencyContexts, ghQuery } from "./github.js";
+import { collect, declaredDependencyContexts, ghQuery, prop, selected } from "./github.js";
+import type { Query } from "./github.js";
+import { nativeKnown } from "./dependencies.js";
 
 /** Wording that must never become a blocker without review. */
 export const hedged = /\b(?:optional(?:ly)?|coordinat\w*|nice[- ]to[- ]have|ideally|after)\b/i;
-const sameRepo = (a, b) => a.toLowerCase() === b.toLowerCase();
+const sameRepo = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 const reference = /#\d+\b|\/(?:issues|pull)\/\d+\b/;
-const clauses = (context) => context.split(/[;,]|\s+\u2014\s+/);
-const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const clauses = (context: string): string[] => context.split(/[;,]|\s+\u2014\s+/);
+const escape = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /**
  * The clause of a declaring sentence that names a reference, so hedging elsewhere in the
  * sentence ("Depends on #1; coordinate #2") does not taint a firm blocker. A reference is
  * matched in its own form: a local one as a bare `#N` (or its URL), an external one only by
  * its URL. A clause holding nothing but references ("optionally #2, #3") continues the
  * clause before it, so it keeps that clause's qualifier.
- * @param {string} context
- * @param {number | { number: number, url?: string, local?: boolean }} ref
  */
-export function clauseFor(context, ref) {
+export type Mention = number | { number: number; url?: string; local?: boolean };
+export function clauseFor(context: string, ref: Mention): string {
   const { number, url, local = true } = typeof ref === "number" ? { number: ref } : ref;
   const forms = [
     ...(local ? [`(?<![\\w/])#${number}\\b`] : []),
@@ -34,7 +35,7 @@ export function clauseFor(context, ref) {
   let at = parts.findIndex((part) => mention.test(part));
   if (at < 0) return context;
   const end = at;
-  const onlyReferences = (part) =>
+  const onlyReferences = (part: string): boolean =>
     !part
       .replace(/https:\/\/github\.com\/[^\s)\]]+|#\d+\b/g, "")
       .replace(/\b(?:and|or)\b/gi, "")
@@ -47,9 +48,8 @@ export function clauseFor(context, ref) {
  * A hedge that qualifies the whole list ("Depends on #1, #2 and #3 (all optional)",
  * "Depends on #1, #2, ideally") rather than one reference: a hedged clause or parenthetical
  * that names no reference itself, or "all/both/each/either ... optional".
- * @param {string} context
  */
-export function listWideHedge(context) {
+export function listWideHedge(context: string): boolean {
   // A qualifier before the first reference governs the list it introduces ("Optional: #2, #3").
   const first = context.search(reference);
   if (first > 0 && hedged.test(context.slice(0, first))) return true;
@@ -61,43 +61,119 @@ export function listWideHedge(context) {
     context,
   );
 }
-const isHedged = (context, ref) => listWideHedge(context) || hedged.test(clauseFor(context, ref));
+const isHedged = (context: string, ref: Mention): boolean =>
+  listWideHedge(context) || hedged.test(clauseFor(context, ref));
 
 /** Resolve a referenced number to an issue, a pull request, or null (missing). */
-async function resolveReference(repository, number, query) {
+type Resolved =
+  | { __typename: "Issue"; number: number; url: string; state: string; stateReason: string | null }
+  | {
+      __typename: "PullRequest";
+      number: number;
+      url: string;
+      state: string;
+      merged: boolean;
+      closingIssuesReferences?: {
+        nodes: {
+          number: number;
+          url: string;
+          state: string;
+          repository: { nameWithOwner: string };
+        }[];
+        pageInfo?: { hasNextPage: boolean };
+      } | null;
+    };
+async function resolveReference(
+  repository: string,
+  number: number,
+  query: Query,
+): Promise<Resolved | null> {
   const [owner, name] = repository.split("/");
   const data = await query(
     `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on Issue{number url state stateReason} ... on PullRequest{number url state merged closingIssuesReferences(first:100){nodes{number url state repository{nameWithOwner}} pageInfo{hasNextPage}}}}}}`,
     { owner, name, number },
   );
-  return data.repository?.issueOrPullRequest ?? null;
+  return selected<Resolved>(prop(data, "repository", "issueOrPullRequest"));
 }
 
-/**
- * Build the reviewable plan from fresh live reads. Changes nothing.
- * @param {string} repository
- * @param {{ query?: import("./github.js").Query, collect?: typeof collect, now?: () => Date }} [runtime]
- */
-export async function planMigration(repository, runtime = {}) {
+export type RowStatus = "apply" | "review" | "satisfied";
+export interface MigrationEdge {
+  blocker: number;
+  url: string;
+  state: string | null;
+  source: string;
+  context: string;
+  crossRepository?: boolean;
+  status: RowStatus;
+  reason: string;
+}
+export interface LabelChange {
+  remove: string[];
+  add: string[];
+  status: "apply" | "review";
+  reason: string;
+}
+export interface MigrationTicket {
+  number: number;
+  url: string;
+  title: string;
+  updatedAt: string;
+  edges: MigrationEdge[];
+  labels: LabelChange | null;
+}
+export interface MigrationPlan {
+  schemaVersion: 1;
+  kind: "dependency-migration-plan";
+  repository: string;
+  createdAt: string;
+  guidance: string;
+  warnings: string[];
+  summary: { tickets: number; apply: number; review: number; satisfied: number };
+  tickets: MigrationTicket[];
+}
+export interface MigrationRuntime {
+  query?: Query;
+  collect?: typeof collect;
+  now?: () => Date;
+}
+/** Build the reviewable plan from fresh live reads. Changes nothing. */
+export async function planMigration(
+  repository: string,
+  runtime: MigrationRuntime = {},
+): Promise<MigrationPlan> {
   const query = runtime.query ?? ghQuery;
   const now = runtime.now ?? (() => new Date());
   const snapshot = await (runtime.collect ?? collect)(repository, {}, query, now);
-  const cache = new Map();
-  const resolve = (n) => {
-    if (!cache.has(n)) cache.set(n, resolveReference(repository, n, query));
-    return cache.get(n);
+  const cache = new Map<number, Promise<Resolved | null>>();
+  const resolve = (n: number): Promise<Resolved | null> => {
+    let resolved = cache.get(n);
+    if (!resolved) {
+      resolved = resolveReference(repository, n, query);
+      cache.set(n, resolved);
+    }
+    return resolved;
   };
-  const tickets = [];
+  const tickets: MigrationTicket[] = [];
   for (const issue of [...snapshot.issues].sort((a, b) => a.number - b.number)) {
     if (issue.state !== "OPEN") continue;
+    // A collected snapshot always carries native evidence (collect refuses otherwise).
+    if (!nativeKnown(issue))
+      throw new Error(`Native dependency evidence missing for ${issue.url}.`);
     const tags = issue.labels.nodes.map((l) => l.name);
     const native = new Set(
       issue.blockedBy.nodes
         .filter((n) => sameRepo(n.repository.nameWithOwner, repository))
         .map((n) => n.number),
     );
-    const edges = [];
-    const propose = (blocker, url, state, source, context, mention = blocker) => {
+    const edges: MigrationEdge[] = [];
+    const propose = (
+      blocker: number,
+      url: string,
+      state: string,
+      source: string,
+      context: string,
+      mention: Mention = blocker,
+    ): void => {
       if (blocker === issue.number)
         edges.push({
           blocker,
@@ -126,7 +202,7 @@ export async function planMigration(repository, runtime = {}) {
         });
     };
     for (const ref of declaredDependencyContexts(issue.body ?? "", repository)) {
-      const base = {
+      const base: Pick<MigrationEdge, "blocker" | "url" | "state" | "source" | "context"> = {
         blocker: ref.number,
         url: ref.url,
         state: null,
@@ -205,7 +281,7 @@ export async function planMigration(repository, runtime = {}) {
           reason: `PR #${target.number} closes no issue.`,
         });
     }
-    let labels = null;
+    let labels: LabelChange | null = null;
     if (issue.labels.pageInfo?.hasNextPage) {
       // blocked:work or another blocked:* reason may be on a later page: report the ticket
       // for review rather than infer anything from a partial list, or silently omit it.
@@ -277,15 +353,14 @@ export async function planMigration(repository, runtime = {}) {
   };
 }
 
-/** @param {Awaited<ReturnType<typeof planMigration>>} plan */
-export function migrationPlanText(plan) {
+export function migrationPlanText(plan: MigrationPlan): string {
   const lines = [
     `Dependency migration plan: ${plan.repository} (${plan.createdAt})`,
     `${plan.summary.tickets} tickets; ${plan.summary.apply} rows to apply, ${plan.summary.review} to review, ${plan.summary.satisfied} already satisfied.`,
     plan.guidance,
     ...(plan.warnings ?? []).map((w) => `INCOMPLETE: ${w}`),
   ];
-  for (const group of ["apply", "review"]) {
+  for (const group of ["apply", "review"] as const) {
     lines.push(`\n${group.toUpperCase()}`);
     for (const t of plan.tickets) {
       for (const e of t.edges.filter((e) => e.status === group))
