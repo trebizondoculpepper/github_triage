@@ -5,7 +5,7 @@ import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { collect, currentRepository } from "./github.js";
+import { collect, currentRepository, ghQuery } from "./github.js";
 import {
   applyDependencyChange,
   dependencyChangeText,
@@ -16,6 +16,7 @@ import {
 } from "./dependencies.js";
 import { compactBriefing, compactText } from "./compact.js";
 import { doctorStaleHours, ticketDoctor, ticketDoctorText } from "./ticketdoctor.js";
+import { applyPlan, claimText, planClaim, planNeedsHuman } from "./claims.js";
 import { checkForUpdate, installedVersion, optOutEnv, updateAdvisory } from "./updates.js";
 import { defaultStaleHours, teamText, teamView } from "./team.js";
 import { migrationPlanText, planMigration } from "./migration.js";
@@ -26,6 +27,9 @@ export const help = `Usage: github-triage [options]
 Read-only LLM action briefing. Requires authenticated gh and Node 20+.
   deps N [--tree]       Read native upstream/downstream dependencies (deps --help)
   deps add|remove N --on M --note WHY [--dry-run]  Change native dependencies
+  claim N --agent NAME [--branch B] [--platform P] [--dry-run]  Claim an eligible ticket
+  needs-human N --agent NAME --designer NAME --why TEXT --question TEXT... [--dry-run]
+                        Record questions for a designer and mark the ticket decision-needed
   team [--stale-hours N]  Read-only: each agent's claims, linked PRs, activity and warnings
   ticket-doctor [--stale-hours N] [--limit N]  Read-only consistency scan of all open tickets
   --repo owner/name     Repository (default: current gh checkout)
@@ -133,6 +137,54 @@ const plannedExit = (changes) => {
   const refused = changes.some((c) => c.status === "refused");
   return !applying ? (refused ? 1 : 0) : refused ? 2 : 0;
 };
+/**
+ * Arguments for `claim` and `needs-human` (doc/design/workflow.md).
+ * @param {"claim" | "needs-human"} command
+ * @param {string[]} args
+ */
+export function workflowArgumentsFor(command, args) {
+  const { values, positionals } = parseArgs({
+    args,
+    allowPositionals: true,
+    options: {
+      repo: { type: "string" },
+      json: { type: "boolean" },
+      "dry-run": { type: "boolean" },
+      agent: { type: "string" },
+      branch: { type: "string" },
+      platform: { type: "string" },
+      designer: { type: "string" },
+      why: { type: "string" },
+      question: { type: "string", multiple: true },
+    },
+  });
+  const usage =
+    command === "claim"
+      ? "Usage: github-triage claim N --agent NAME [--branch BRANCH] [--platform P] [--dry-run] [--json]"
+      : "Usage: github-triage needs-human N --agent NAME --designer NAME --why TEXT --question TEXT [--question TEXT...] [--dry-run] [--json]";
+  const number =
+    positionals.length === 1 && /^[1-9]\d*$/.test(positionals[0]) ? Number(positionals[0]) : null;
+  const name = /^[A-Za-z0-9][\w.-]*$/;
+  if (!number || !values.agent || !name.test(values.agent)) throw new Error(usage);
+  if (values.repo && !/^[\w.-]+\/[\w.-]+$/.test(values.repo))
+    throw new Error("--repo must be owner/name.");
+  const common = {
+    number,
+    agent: values.agent,
+    repo: values.repo,
+    json: values.json,
+    dryRun: !!values["dry-run"],
+  };
+  if (command === "claim") {
+    if (values.designer || values.why || values.question) throw new Error(usage);
+    return { ...common, branch: values.branch, platform: values.platform };
+  }
+  const questions = (values.question ?? []).map((q) => q.trim()).filter(Boolean);
+  if (!values.designer || !name.test(values.designer) || !values.why?.trim() || !questions.length)
+    throw new Error(usage);
+  if (values.branch || values.platform) throw new Error(usage);
+  return { ...common, designer: values.designer, why: values.why.trim(), questions };
+}
 export function argumentsFor(args) {
   const { values } = parseArgs({
     args,
@@ -215,7 +267,7 @@ export async function checkpointSince(path, repository) {
 /**
  * @param {string[]} args
  * @param {(text: string) => Promise<void>} [output]
- * @param {{collect: typeof collect, currentRepository: typeof currentRepository, dependencyReport?: typeof dependencyReport, planDependencyChange?: typeof planDependencyChange, ghRun?: import("./dependencies.js").GhRun, planMigration?: typeof planMigration, migrationRuntime?: Record<string, any>, now?: () => Date, updateCheck?: typeof checkForUpdate, stderr?: (text: string) => void}} [runtime]
+ * @param {{collect: typeof collect, currentRepository: typeof currentRepository, dependencyReport?: typeof dependencyReport, planDependencyChange?: typeof planDependencyChange, ghRun?: import("./dependencies.js").GhRun, planMigration?: typeof planMigration, migrationRuntime?: Record<string, any>, query?: import("./github.js").Query, now?: () => Date, updateCheck?: typeof checkForUpdate, stderr?: (text: string) => void}} [runtime]
  * @returns {Promise<number>}
  */
 export async function main(
@@ -293,6 +345,26 @@ async function run(args, output, runtime) {
     });
     await output(values.json ? JSON.stringify(report, null, 2) + "\n" : ticketDoctorText(report));
     return report.completeness.complete ? 0 : 2;
+  }
+  if (args[0] === "claim" || args[0] === "needs-human") {
+    const values = workflowArgumentsFor(args[0], args.slice(1));
+    const repository = values.repo ?? (await runtime.currentRepository());
+    const query = runtime.query ?? ghQuery;
+    // Read live immediately before changing; never act on a cached snapshot.
+    const plan =
+      args[0] === "claim"
+        ? await planClaim(repository, values, query)
+        : await planNeedsHuman(repository, values, query);
+    const result =
+      values.dryRun || !plan.ok
+        ? { ...plan, exitCode: plan.ok ? 0 : 1 }
+        : await applyPlan(repository, plan, { run: runtime.ghRun ?? ghRun, query });
+    await output(
+      values.json
+        ? JSON.stringify({ schemaVersion: 1, ...result }, null, 2) + "\n"
+        : claimText(result, values.dryRun),
+    );
+    return result.exitCode;
   }
   if (args[0] === "team") {
     const { values } = parseArgs({

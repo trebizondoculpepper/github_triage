@@ -28,7 +28,7 @@ Without `--repo`, `gh repo view` resolves the repository from the **current work
 node /path/to/github_triage/src/cli.js --json
 ```
 
-The briefing and `deps N` are read-only. They do not claim, label, merge or close tickets. Suggestions, closed dependencies and question candidates require human/agent inspection; they are not approval. `deps add` and `deps remove` are the only commands that change GitHub: they edit native blocked-by relationships after live validation, post one explanatory comment, and support `--dry-run` ([dependency design](doc/issue-dependencies.md)). `deps migrate --plan` writes a read-only report of how `Depends on` text and `blocked:work` labels map to native dependencies; automatic apply is deferred (#48). Claiming and flagging are specified separately and not implemented yet.
+The briefing and `deps N` are read-only. They do not claim, label, merge or close tickets. Suggestions, closed dependencies and question candidates require human/agent inspection; they are not approval. `deps add`, `deps remove`, `claim` and `needs-human` are the only commands that change GitHub. Each reads live state first, refuses with a stable error ID and recovery commands when a prerequisite fails, posts one explanatory comment, and supports `--dry-run`. `deps add`/`remove` edit native blocked-by relationships ([dependency design](doc/issue-dependencies.md)); `claim N --agent NAME` takes one eligible ticket (one active claim per agent, never another agent's); `needs-human N --agent NAME --designer NAME --why ... --question ...` records questions for a designer and marks the ticket decision-needed ([workflow contract](doc/design/workflow.md)). `deps migrate --plan` writes a read-only report of how `Depends on` text and `blocked:work` labels map to native dependencies; automatic apply is deferred (#48). Releasing and handoff (`release`, #62) are specified but not implemented yet.
 
 ## Install once, use across projects
 
@@ -41,6 +41,8 @@ github-triage --repo owner/repository
 ```
 
 Use `@next` to opt into development prereleases, or `@VERSION` to pin a release. One executable serves multiple checkouts; project identity/configuration stays project-specific. The first registry publications are prereleases; see the [release contract](doc/npm-releases.md) for channels and official-release policy. Running the source checkout remains useful for development.
+
+The owner-approved release policy is explicit `npm run prerelease` for `next` and `npm run release` for `latest`; main builds should verify only. This change is pending implementation in #79: the current publishing workflow still automatically publishes prereleases on main pushes. See the [release contract](doc/npm-releases.md) before requesting or changing publication.
 
 See the [usage guide](doc/usage.md) for ticket intake, dependencies, catch-up, cache/offline behavior and exit codes. The [design handoff](doc/design/README.md) describes planned role, workflow, doctor, MCP and update features; it does not claim those commands already exist.
 
