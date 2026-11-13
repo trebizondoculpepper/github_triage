@@ -5126,6 +5126,15 @@ describe("estimation queue and briefing visibility (#122)", () => {
     expect(text.indexOf("ESTIMATION (requested)")).toBeLessThan(text.indexOf("NEXT STEPS"));
     expect(text).toContain("unestimated [unestimated]; implementation ineligible");
     expect(text).toContain("acquires no claim");
+    let full = "";
+    await main(["--estimate", "--full"], async (t) => void (full = t), {
+      collect: async () => snapshot([issue(1), blocked()], []),
+      currentRepository: async () => repo,
+      now: () => new Date(time),
+      estimation: { fs: config(mapped), git, cwd: root, api },
+    });
+    expect(full.indexOf("ESTIMATION (requested)")).toBeGreaterThan(0);
+    expect(full.indexOf("ESTIMATION (requested)")).toBeLessThan(full.indexOf("NEXT ACTIONS"));
     let plain = "";
     await main([], async (t) => void (plain = t), {
       collect: async () => snapshot([issue(1), blocked()], []),

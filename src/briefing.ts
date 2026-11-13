@@ -702,6 +702,9 @@ export function textReport(report: Briefing): string {
     lines.push(`\n${title}`, ...rows.map((row) => `- ${row}`));
     if (omitted) lines.push(`- ${omitted} more omitted; increase --limit or use --issue N.`);
   };
+  // An explicit --estimate request puts estimation before all other work, as in compact output.
+  if (report.estimation.requested)
+    section("ESTIMATION (requested)", estimationText(report.estimation));
   section(
     "NEXT ACTIONS",
     report.actions.items.map(
@@ -710,8 +713,6 @@ export function textReport(report: Briefing): string {
     ),
     report.actions.omitted,
   );
-  if (report.estimation.requested)
-    section("ESTIMATION (requested)", estimationText(report.estimation));
   section(
     "READY / UNCLAIMED",
     report.ready.items.map((item) => `#${item.number} ${item.title}\n  ${item.url}`),
