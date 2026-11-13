@@ -1,5 +1,5 @@
 /** Compact presentation of the registered findings; contract #698. */
-import { owners, excerpt } from "./briefing.js";
+import { isParked, owners, excerpt } from "./briefing.js";
 import { unblocks } from "./dependencies.js";
 import type { Briefing, BriefingOptions, Bounded, CheckOutcome } from "./briefing.js";
 import { estimateLine } from "./estimation.js";
@@ -176,7 +176,7 @@ export function compactBriefing(
       const item = byUrl.get(target);
       if (isAddressed(item)) return true;
       return (
-        !item?.labels.nodes.some(({ name }) => name === "status:parked") &&
+        !(item && isParked(item)) &&
         findings.some((f) => !["context", "hygiene"].includes(ruleMetadata.get(f.rule) ?? "")) &&
         (!options.agent ||
           !owners(defined(item)).length ||
@@ -216,11 +216,7 @@ export function compactBriefing(
       .filter((item) => owners(item).length && (!options.agent || linkedMine(item)))
       .map((item) => item.url),
   );
-  sections.deferred = bound(
-    snapshot.issues
-      .filter((item) => item.labels.nodes.some(({ name }) => name === "status:parked"))
-      .map((item) => item.url),
-  );
+  sections.deferred = bound(snapshot.issues.filter(isParked).map((item) => item.url));
   // A registered role (#1) reshapes presentation of the same facts; without one, unchanged.
   const role: RoleView | null = options.role
     ? roleView(options.role, {

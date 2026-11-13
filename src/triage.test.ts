@@ -5282,6 +5282,75 @@ describe("role-shaped briefings (#1, doc/design/briefings.md)", () => {
     expect(section(r, "decision-needed").total).toBe(0);
     expect(r.actions).toMatchObject({ total: 8, omitted: 3 });
   });
+  it("keeps PRs with only verification or merge-state findings visible but not actionable", async () => {
+    const unverified = { ...pr(), closingIssuesReferences: page([]) };
+    unverified.commits.nodes[0]!.commit.statusCheckRollup!.contexts.nodes[0]!.name = "unrelated";
+    const behind = {
+      ...pr(),
+      number: 5,
+      url: `https://github.com/${repo}/pull/5`,
+      closingIssuesReferences: page([]),
+      mergeStateStatus: "BEHIND",
+    };
+    const data = snapshot([issue(1)], [unverified, behind]);
+    const r = await compact(data, { limit: 10, agent: "reader", role: "implementer" });
+    const waiting = section(r, "pr-waiting");
+    expect(numbers(waiting.items)).toEqual([4, 5]);
+    expect(waiting.background).toBe(true);
+    expect(waiting.items[0]!.reason).toMatch(/verify not proven/);
+    expect(waiting.items[1]!.reason).toMatch(/Merge state: BEHIND/);
+    expect(numbers(section(r, "pr-follow-up").items)).toEqual([]);
+    expect(numbers(r.role!.next)).not.toContain(4);
+    // No PR in the non-role compact output silently vanishes from a role view.
+    const plain = await compact(data, { limit: 10, agent: "reader" });
+    const plainPrs = new Set(
+      [...plain.actions.items, ...Object.values(plain.sections).flatMap((s) => s.items)].filter(
+        (url) => url.includes("/pull/"),
+      ),
+    );
+    expect(plainPrs.size).toBe(2);
+    for (const role of ["implementer", "designer"]) {
+      const view = await compact(data, { limit: 10, agent: "reader", role });
+      const shown = new Set(view.role!.sections.flatMap((s) => s.items.map((row) => row.url)));
+      for (const url of plainPrs) expect(shown.has(url), `${role} ${url}`).toBe(true);
+    }
+  });
+  it("designer new design work excludes tickets with an open closing PR", async () => {
+    const covered = issue(70, ["status:needs-design"]);
+    const fresh = issue(71, ["status:needs-design"]);
+    const docsPr = {
+      ...pr(),
+      number: 72,
+      url: `https://github.com/${repo}/pull/72`,
+      closingIssuesReferences: page([{ number: 70, url: covered.url }]),
+    };
+    const r = await compact(snapshot([covered, fresh], [docsPr as PullRequest]), {
+      limit: 10,
+      agent: "reader",
+      role: "designer",
+    });
+    expect(numbers(section(r, "design-pickup").items)).toEqual([71]);
+    expect(numbers(section(r, "design-review").items)).toEqual([72]);
+  });
+  it("implementer active work excludes parked items unless addressed", async () => {
+    const parked = issue(80, ["agent:reader", "status:parked"]);
+    const active = issue(81, ["agent:reader"]);
+    const r = await compact(snapshot([parked, active], []), {
+      limit: 10,
+      agent: "reader",
+      role: "implementer",
+    });
+    expect(numbers(section(r, "own-work").items)).toEqual([81]);
+    expect(numbers(r.role!.next)).not.toContain(80);
+    const addressed = issue(80, ["agent:reader", "status:parked", "attention:reader"]);
+    const a = await compact(snapshot([addressed, active], []), {
+      limit: 10,
+      agent: "reader",
+      role: "implementer",
+    });
+    expect(numbers(r.role!.next)).not.toContain(80);
+    expect(numbers(a.role!.next)).toContain(80);
+  });
   it("renders the role in text and rejects unknown roles", async () => {
     const { compactText } = await import("./compact.js");
     const r = await compact(snapshot([issue(60)], []), { limit: 5, role: "implementer" });

@@ -8,9 +8,9 @@
  * dependencies); they never collect their own evidence. A new role is a new registry entry.
  * Every section keeps directed attention visible, explains each row and reports omissions.
  */
-import { owners } from "./briefing.js";
+import { isParked, owners } from "./briefing.js";
 import type { Bounded, Briefing } from "./briefing.js";
-import { immediateUnlocks } from "./ranking.js";
+import { immediateUnlocks, openClosingPrs } from "./ranking.js";
 import type { Action, Issue, PullRequest, Snapshot } from "./types.js";
 
 /** One row of a role section: the subject and why it is here, in this position. */
@@ -132,9 +132,26 @@ sectionSelectors.set("pr-follow-up", (context) =>
       reason: `${mine ? "Your PR" : "Review opportunity"}: ${finding.reason}`,
     })),
 );
+// Open PRs with findings that are not actionable follow-up (pending CI, verification needed,
+// merge state): inspect or wait, never a next step, but never silently dropped.
+sectionSelectors.set("pr-waiting", (context) =>
+  openPrs(context)
+    .flatMap((pr) => {
+      const findings = (context.findings.get(pr.url) ?? []).filter(
+        (f) => !followUpRules.includes(f.rule),
+      );
+      return findings.length ? [{ pr, findings, mine: context.linkedMine(pr) }] : [];
+    })
+    .sort((a, b) => Number(b.mine) - Number(a.mine) || byNumber(a.pr, b.pr))
+    .map(({ pr, findings, mine }) => ({
+      url: pr.url,
+      reason: `${mine ? "Your PR" : "Open PR"}, waiting or inspect only: ${findings.map((f) => f.reason).join(" ")}`,
+    })),
+);
 sectionSelectors.set("own-work", (context) =>
   openIssues(context)
-    .filter(context.isMine)
+    // Same policy as the compact action filter: parked work is not a next step unless addressed.
+    .filter((item) => context.isMine(item) && (!isParked(item) || context.isAddressed(item)))
     .sort(byNumber)
     .map((item) => ({ url: item.url, reason: "Owned by you; continue before claiming more." })),
 );
@@ -191,7 +208,9 @@ sectionSelectors.set("design-pickup", (context) => {
       (item) =>
         labelsOf(item).includes(designPolicy.pendingDesign) &&
         !owners(item).length &&
-        !labelsOf(item).includes(designPolicy.decisionNeeded),
+        !labelsOf(item).includes(designPolicy.decisionNeeded) &&
+        // An open closing PR is represented by DESIGN REVIEW, as pickup eligibility excludes it.
+        !openClosingPrs(item, prs).length,
     )
     .map((item) => ({
       item,
@@ -236,6 +255,12 @@ export const roleRegistry = new Map<string, RolePolicy>([
         { section: "addressed", title: "ADDRESSED TO YOU", budget: 10 },
         { section: "pr-follow-up", title: "PR FOLLOW-UP", budget: 5 },
         { section: "own-work", title: "YOUR ACTIVE WORK", budget: 5 },
+        {
+          section: "pr-waiting",
+          title: "PRS WAITING (inspect; not actionable)",
+          budget: 5,
+          background: true,
+        },
         { section: "pickup", title: "PICKUP", budget: 5 },
         { section: "unblock-candidates", title: "UNBLOCK CANDIDATES", budget: 5 },
         { section: "stale-claims", title: "STALE CLAIMS (inspect; never auto-release)", budget: 3 },
