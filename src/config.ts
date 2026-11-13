@@ -84,7 +84,8 @@ export type ConfigErrorCode =
   | "invalid-value"
   | "conflict"
   | "repository-mismatch"
-  | "not-a-repository";
+  | "not-a-repository"
+  | "filesystem";
 
 /** A refusal with exact recovery guidance. The file is left untouched. */
 export class ConfigError extends Error {
