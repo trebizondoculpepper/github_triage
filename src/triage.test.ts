@@ -3113,6 +3113,19 @@ describe("Ticket Doctor v1 (#66, doc/design/diagnostics.md)", () => {
         }
       }
     expect(ticketDoctorText(r)).toContain("judgment required; alternatives:");
+    // Text output carries every step's description and preconditions, not just its command.
+    const text = ticketDoctorText(r);
+    for (const t of r.tickets)
+      for (const f of t.findings)
+        for (const s of f.plan.steps) {
+          expect(text).toContain(s.description);
+          for (const pre of s.preconditions) expect(text).toContain(`only if: ${pre}`);
+        }
+    expect(
+      r.tickets.some((t) =>
+        t.findings.some((f) => f.plan.steps.some((s) => s.preconditions.length)),
+      ),
+    ).toBe(true);
   });
   it("v2 (#67): alternatives for semantic choices, one suggestion for definite mechanics", () => {
     const r = report();

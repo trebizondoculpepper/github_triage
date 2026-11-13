@@ -692,7 +692,10 @@ export function ticketDoctorText(r: TicketDoctorReport): string {
       if (f.plan.judgment) lines.push("    judgment required; alternatives:");
       for (const s of f.plan.steps) {
         const label = `${s.kind}${s.choice ? ` ${s.choice}` : ""}${s.runBy ? ` [${s.runBy}]` : ""}`;
-        lines.push(`    ${label}: ${s.command}`);
+        lines.push(`    ${label}: ${s.description}`);
+        // Preconditions are not enforced by the command itself, so text users must see them.
+        for (const pre of s.preconditions) lines.push(`      only if: ${pre}`);
+        lines.push(`      $ ${s.command}`);
       }
     }
   }
