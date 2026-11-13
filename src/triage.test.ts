@@ -25,6 +25,7 @@ import {
 import { briefing, dependencyDone, textReport } from "./briefing.js";
 import { collect, declaredDependencies, graphqlAnswer, pages, type Query } from "./github.js";
 import { clauseFor, hedged, listWideHedge, planMigration } from "./migration.js";
+import { teamText, teamView } from "./team.js";
 import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
 
 const repo = "example/project";
@@ -1380,6 +1381,122 @@ describe("help names the installed command (#53)", () => {
     for (const text of [main_, deps]) {
       expect(text).toMatch(/^Usage: github-triage /);
       expect(text.split("\n").filter((l) => /^\s*npm run triage/.test(l))).toEqual([]);
+    }
+  });
+});
+
+describe("team view (#41, doc/design/diagnostics.md)", () => {
+  const at = (hoursAgo: number) => new Date(Date.parse(time) - hoursAgo * 3_600_000).toISOString();
+  const ticket = (
+    n: number,
+    labels: string[],
+    hoursAgo = 1,
+    extra: Partial<Issue> = {},
+  ): Issue => ({
+    ...issue(n, labels),
+    updatedAt: at(hoursAgo),
+    ...extra,
+  });
+  const build = () => {
+    const prFor1 = pr();
+    prFor1.number = 40;
+    prFor1.url = `https://github.com/${repo}/pull/40`;
+    prFor1.updatedAt = at(0.5);
+    prFor1.closingIssuesReferences = page([{ number: 1, url: issue(1).url }]);
+    prFor1.reviewThreads = page([
+      { isResolved: false, isOutdated: false, comments: page([]) },
+    ] as never);
+    return snapshot(
+      [
+        ticket(1, ["agent:ana"], 1),
+        ticket(2, ["agent:ana", "status:ready"], 100),
+        ticket(3, ["agent:bo", "agent:ana", "meta"], 2, { title: "Umbrella: everything" }),
+        ticket(4, ["agent:cy", "status:needs-design"], 3),
+        // Comment text is not a claim; only labels are.
+        ticket(5, ["status:ready"], 1, {
+          comments: page([
+            {
+              body: "Picked up by dee",
+              url: "u",
+              author: { login: "x" },
+              createdAt: at(1),
+              updatedAt: at(1),
+            },
+          ]),
+        } as Partial<Issue>),
+      ],
+      [prFor1],
+    );
+  };
+  it("groups claims by agent with linked PR state and latest activity, from labels only", () => {
+    const view = teamView(build(), { now: new Date(time) });
+    expect(view.agents.map((a) => a.agent)).toEqual(["ana", "bo", "cy"]);
+    const ana = view.agents[0];
+    expect(ana.claims.map((c) => c.number)).toEqual([1, 2, 3]);
+    expect(ana.claims[0].pullRequests[0]).toMatchObject({
+      number: 40,
+      verify: "SUCCESS",
+      unresolvedThreads: 1,
+    });
+    expect(ana.claims[0].latestActivity!.source).toBe("PR #40 updated");
+    expect(view.agents.flatMap((a) => a.claims).some((c) => c.number === 5)).toBe(false);
+    expect(view.presence).toMatch(/^unknown/);
+  });
+  it("separates definite violations from candidates", () => {
+    const view = teamView(build(), { now: new Date(time) });
+    const ana = view.agents.find((a) => a.agent === "ana")!;
+    expect(ana.warnings.filter((w) => w.certainty === "definite").map((w) => w.kind)).toEqual([
+      "multiple-claims",
+    ]);
+    expect(view.conflicts).toEqual([{ number: 3, url: issue(3).url, agents: ["bo", "ana"] }]);
+    const details = ana.warnings
+      .filter((w) => w.certainty === "candidate")
+      .map((w) => `#${w.ticket} ${w.detail}`);
+    expect(
+      details.some((d) => d.startsWith("#2 stale candidate: no evidenced activity for 100h")),
+    ).toBe(true);
+    expect(details).toContain("#2 claimed but still labelled status:ready");
+    expect(details.some((d) => d.startsWith("#3 umbrella candidate"))).toBe(true);
+    const cy = view.agents.find((a) => a.agent === "cy")!;
+    expect(cy.warnings.map((w) => w.detail)).toEqual(["claimed while status:needs-design"]);
+    expect(
+      teamView(build(), { now: new Date(time), staleHours: 200 }).agents[0].warnings.some((w) =>
+        /stale/.test(w.detail),
+      ),
+    ).toBe(false);
+    const text = teamText(view);
+    expect(text).toContain("WARNING: 3 active claims");
+    expect(text).toContain("CONFLICT: also claimed by bo");
+  });
+  it("runs offline from a cache and validates its options", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "triage-team-"));
+    try {
+      const cache = join(dir, "cache.json");
+      await atomicJson(cache, build());
+      let out = "";
+      const runtime = {
+        collect: async () => {
+          throw new Error("no live collection");
+        },
+        currentRepository: async () => repo,
+        now: () => new Date(time),
+      };
+      expect(
+        await main(
+          ["team", "--offline", "--cache", cache, "--json"],
+          async (t) => void (out = t),
+          runtime,
+        ),
+      ).toBe(0);
+      expect(JSON.parse(out)).toMatchObject({ kind: "team-view", schemaVersion: 1 });
+      for (const bad of [
+        ["team", "--stale-hours", "0"],
+        ["team", "--stale-hours", "x"],
+        ["team", "--offline"],
+      ])
+        await expect(main(bad, async () => {}, runtime)).rejects.toThrow();
+    } finally {
+      await rm(dir, { recursive: true });
     }
   });
 });
