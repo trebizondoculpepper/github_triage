@@ -14,10 +14,10 @@ import { ghQuery } from "./github.js";
 
 const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){number title url state isDraft merged mergeable mergeStateStatus reviewDecision headRefOid headRefName baseRefName updatedAt
 commits(last:1){nodes{commit{oid committedDate statusCheckRollup{state contexts(first:100){nodes{__typename ... on CheckRun{name status conclusion detailsUrl startedAt completedAt} ... on StatusContext{context state targetUrl}} pageInfo{hasNextPage}}}}}}
-reviews(last:50){nodes{author{login} state submittedAt url commit{oid}}}
-reviewThreads(first:100){nodes{isResolved isOutdated path line comments(first:30){totalCount nodes{author{login} body createdAt url}}} pageInfo{hasNextPage}}
-comments(last:100){nodes{author{login} body createdAt url}}
-closingIssuesReferences(first:10){nodes{number url title state labels(first:50){nodes{name}}}}}}}`;
+reviews(last:50){nodes{author{login} state submittedAt url commit{oid}} pageInfo{hasPreviousPage}}
+reviewThreads(first:100){nodes{isResolved isOutdated path line first:comments(first:1){totalCount nodes{author{login} body createdAt url}} latest:comments(last:1){nodes{author{login} createdAt url}}} pageInfo{hasNextPage}}
+comments(last:100){nodes{author{login} body createdAt url} pageInfo{hasPreviousPage}}
+closingIssuesReferences(first:10){nodes{number url title state labels(first:50){nodes{name}}} pageInfo{hasNextPage}}}}}`;
 
 /** Bounds keep the report small; omitted counts are always reported. */
 export const limits = { failures: 5, threads: 8, excerpt: 240 };
@@ -45,7 +45,9 @@ export function classifyCheck(check) {
 }
 
 const isBot = (login) => /\[bot\]$|^coderabbitai$|^chatgpt-codex-connector$/.test(login ?? "");
-const requestPattern = /@(?:codex|coderabbitai)\s+review\b/i;
+const requestPattern = /@(codex|coderabbitai)\s+review\b/i;
+/** The account that answers each review request; other bots never count as an answer. */
+const reviewerFor = { codex: "chatgpt-codex-connector", coderabbitai: "coderabbitai" };
 
 /**
  * Build the report from a fetched pull request. Pure; `now` is injected.
@@ -86,16 +88,18 @@ export function prStatus(repository, pr, { now = new Date(), startedAt } = {}) {
   // Threads: unresolved first-comment findings, with later replies and who spoke last.
   const unresolved = pr.reviewThreads.nodes.filter((t) => !t.isResolved);
   const threads = unresolved.map((t) => {
-    const comments = t.comments.nodes;
-    const last = comments.at(-1);
+    // The finding is the thread's first comment; the last speaker is its latest comment, read
+    // separately so a long thread is never cut off before its newest reply.
+    const opening = t.first?.nodes[0];
+    const last = t.latest?.nodes[0] ?? opening;
     return {
       path: t.path ?? null,
       line: t.line ?? null,
       outdated: !!t.isOutdated,
-      finding: excerpt(comments[0]?.body),
-      by: comments[0]?.author?.login ?? "unknown",
-      url: comments[0]?.url ?? pr.url,
-      replies: Math.max(0, (t.comments.totalCount ?? comments.length) - 1),
+      finding: excerpt(opening?.body),
+      by: opening?.author?.login ?? "unknown",
+      url: opening?.url ?? pr.url,
+      replies: Math.max(0, (t.first?.totalCount ?? 1) - 1),
       lastSpeaker: last?.author?.login ?? null,
       lastAt: last?.createdAt ?? null,
     };
@@ -127,7 +131,11 @@ export function prStatus(repository, pr, { now = new Date(), startedAt } = {}) {
   // Bots often update one summary comment in place, so a receipt's creation time does not show
   // whether a later request was answered. Codex's state marker records the commit it reviewed.
   const lastRequest = comments.filter((c) => requestPattern.test(c.body ?? "")).at(-1) ?? null;
-  const newerReceipt = (at) => receipts.some((r) => (r.at ?? "") > at && !r.codexState);
+  const requested =
+    reviewerFor[(requestPattern.exec(lastRequest?.body ?? "")?.[1] ?? "").toLowerCase()];
+  const answerer = (login) => (login ?? "").replace(/\[bot\]$/, "");
+  const newerReceipt = (at) =>
+    receipts.some((r) => answerer(r.by) === requested && (r.at ?? "") > at && !r.codexState);
   const request = lastRequest
     ? {
         at: lastRequest.createdAt,
@@ -195,6 +203,15 @@ export function prStatus(repository, pr, { now = new Date(), startedAt } = {}) {
   const incomplete = [];
   if (rollup?.contexts.pageInfo.hasNextPage) incomplete.push("more than 100 check contexts");
   if (pr.reviewThreads.pageInfo.hasNextPage) incomplete.push("more than 100 review threads");
+  // Truncated evidence is reported, never silently treated as complete.
+  if (pr.comments.pageInfo?.hasPreviousPage)
+    incomplete.push(
+      "more than 100 comments; older comments (and earlier review receipts) not read",
+    );
+  if (pr.reviews.pageInfo?.hasPreviousPage)
+    incomplete.push("more than 50 reviews; older reviews not read");
+  if (pr.closingIssuesReferences.pageInfo?.hasNextPage)
+    incomplete.push("more than 10 linked issues; ownership of the rest not read");
 
   return {
     schemaVersion: 1,

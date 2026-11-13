@@ -1588,7 +1588,7 @@ describe("pr status: why is a PR not progressing (#59)", () => {
             isOutdated: false,
             path: "src/a.js",
             line: 3,
-            comments: {
+            first: {
               totalCount: 2,
               nodes: [
                 {
@@ -1597,8 +1597,10 @@ describe("pr status: why is a PR not progressing (#59)", () => {
                   createdAt: time,
                   url: "https://t/1",
                 },
-                { author: { login: "kavya" }, body: "Fixed", createdAt: time, url: "https://t/2" },
               ],
+            },
+            latest: {
+              nodes: [{ author: { login: "kavya" }, createdAt: time, url: "https://t/2" }],
             },
           },
         ],
@@ -1839,5 +1841,91 @@ describe("version check (#51, doc/design/updates.md)", () => {
     } finally {
       await rm(dir, { recursive: true });
     }
+  });
+});
+
+describe("pr status: truncation and requested-reviewer matching", () => {
+  const head = "a".repeat(40);
+  const base = (o: Record<string, any> = {}) => ({
+    number: 12,
+    title: "Fix",
+    url: `https://github.com/${repo}/pull/12`,
+    state: "OPEN",
+    isDraft: false,
+    merged: false,
+    mergeable: "MERGEABLE",
+    mergeStateStatus: "CLEAN",
+    reviewDecision: null,
+    headRefOid: head,
+    headRefName: "fix",
+    baseRefName: "main",
+    updatedAt: time,
+    commits: {
+      nodes: [
+        {
+          commit: {
+            oid: head,
+            statusCheckRollup: {
+              contexts: {
+                nodes: [
+                  {
+                    __typename: "CheckRun",
+                    name: "verify",
+                    status: "COMPLETED",
+                    conclusion: "SUCCESS",
+                    startedAt: time,
+                  },
+                ],
+                pageInfo: { hasNextPage: false },
+              },
+            },
+          },
+        },
+      ],
+    },
+    reviews: { nodes: [], pageInfo: { hasPreviousPage: !!o.moreReviews } },
+    reviewThreads: { nodes: [], pageInfo: { hasNextPage: false } },
+    comments: { nodes: o.comments ?? [], pageInfo: { hasPreviousPage: !!o.moreComments } },
+    closingIssuesReferences: { nodes: [], pageInfo: { hasNextPage: !!o.moreIssues } },
+  });
+  it("reports truncated comments, reviews and linked issues as incomplete", async () => {
+    const { prStatus } = await import("./prstatus.js");
+    expect(prStatus(repo, base()).completeness.complete).toBe(true);
+    const r = prStatus(repo, base({ moreComments: true, moreReviews: true, moreIssues: true }));
+    expect(r.completeness.complete).toBe(false);
+    expect(r.completeness.warnings).toHaveLength(3);
+  });
+  it("counts only the requested service as answering a review request", async () => {
+    const { prStatus } = await import("./prstatus.js");
+    const request = {
+      author: { login: "kavya" },
+      body: "@codex review",
+      createdAt: "2026-11-12T10:00:00Z",
+      url: "u1",
+    };
+    const codecov = {
+      author: { login: "codecov[bot]" },
+      body: "Coverage 90%",
+      createdAt: "2026-11-12T11:00:00Z",
+      url: "u2",
+    };
+    const unrelated = prStatus(repo, base({ comments: [request, codecov] }));
+    expect(unrelated.reviewRequest!.status).toBe("no reaction yet");
+    expect(unrelated.blockers).toContain("a review was requested and has had no reaction");
+    const rabbit = {
+      author: { login: "kavya" },
+      body: "@coderabbitai review",
+      createdAt: "2026-11-12T10:00:00Z",
+      url: "u3",
+    };
+    const answer = {
+      author: { login: "coderabbitai" },
+      body: "Review complete",
+      createdAt: "2026-11-12T11:00:00Z",
+      url: "u4",
+    };
+    expect(prStatus(repo, base({ comments: [rabbit, answer] })).reviewRequest!.status).toBe(
+      "a reviewer has posted since the request",
+    );
   });
 });
