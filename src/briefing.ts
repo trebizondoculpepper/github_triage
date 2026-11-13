@@ -6,6 +6,7 @@ import {
   pickable,
   unblocks,
 } from "./dependencies.js";
+import type { Action, Dependency, Issue, PullRequest, Snapshot } from "./types.js";
 
 export const workflow = {
   readiness: ["status:ready", "status:needs-design", "status:blocked", "status:parked"],
@@ -44,32 +45,34 @@ export const workflow = {
   mergeable: ["MERGEABLE"],
   currentMergeStates: ["CLEAN", "HAS_HOOKS", "UNSTABLE"],
 };
-/** @param {import("./types.js").Issue} issue */
-const labels = (issue) => issue.labels.nodes.map(({ name }) => name);
-export const owners = (issue) =>
+/** The labelled part of an issue or pull request. */
+export type Labelled = Pick<Issue, "labels">;
+const labels = (issue: Labelled): string[] => issue.labels.nodes.map(({ name }) => name);
+export const owners = (issue: Labelled): string[] =>
   labels(issue).filter((label) => label.startsWith(workflow.ownerPrefix));
-const active = (issue) => workflow.openStates.includes(issue.state);
-/** @param {import("./types.js").Dependency} dependency */
-export const dependencyDone = (dependency) =>
+const active = (issue: Issue): boolean => workflow.openStates.includes(issue.state);
+/** Open dependants this item is the last open blocker for; 0 for an unknown item. */
+const unblocksOf = (item: Issue | undefined): number => (item ? unblocks(item) : 0);
+export const dependencyDone = (dependency: Dependency): boolean =>
   dependency.available &&
   workflow.completedReasons.includes(dependency.stateReason ?? dependency.state ?? "");
-const clip = (text, size = 280) =>
+const clip = (text: string, size = 280): string =>
   text.length > size ? `${text.slice(0, size)}… [truncated]` : text;
-const clean = (text) =>
+const clean = (text: string): string =>
   text.replace(/\p{Cc}/gu, (character) =>
     character === "\n" || character === "\t" ? character : "",
   );
-export const excerpt = (text, size = 280) => clip(clean(text).replace(/\s+/g, " ").trim(), size);
-/** @type {(rule: string, item: import("./types.js").Issue, priority: number, reason: string, next: string, uncertainty?: import("./types.js").Action["uncertainty"], evidence?: string[]) => import("./types.js").Action} */
+export const excerpt = (text: string, size = 280): string =>
+  clip(clean(text).replace(/\s+/g, " ").trim(), size);
 const action = (
-  rule,
-  item,
-  priority,
-  reason,
-  next,
-  uncertainty = "factual",
-  evidence = [item.url],
-) => ({
+  rule: string,
+  item: Issue,
+  priority: number,
+  reason: string,
+  next: string,
+  uncertainty: Action["uncertainty"] = "factual",
+  evidence: string[] = [item.url],
+): Action => ({
   rule,
   priority,
   target: item.url,
@@ -80,14 +83,21 @@ const action = (
   uncertainty,
 });
 
-/** @type {Map<string, (context: { snapshot: import("./types.js").Snapshot, issues: import("./types.js").Issue[], prs: import("./types.js").PullRequest[], viewer?: string }) => import("./types.js").Action[]>} */
-export const analysisRules = new Map();
+/** What every registered analysis rule receives. */
+export interface RuleContext {
+  snapshot: Snapshot;
+  issues: Issue[];
+  prs: PullRequest[];
+  viewer?: string;
+}
+export type AnalysisRule = (context: RuleContext) => Action[];
+export const analysisRules = new Map<string, AnalysisRule>();
 analysisRules.set("ownership-and-labels", ({ issues }) =>
   issues.flatMap((issue) => {
     const own = owners(issue);
     const tags = labels(issue);
     const states = tags.filter((tag) => workflow.readiness.includes(tag));
-    const findings = [];
+    const findings: Action[] = [];
     if (own.length > 1)
       findings.push(
         action(
@@ -124,14 +134,13 @@ analysisRules.set("ownership-and-labels", ({ issues }) =>
 /**
  * Pickup urgency band: 0 high, 1 unspecified, 2 low. Both labels conflict and count as
  * unspecified until corrected (doc/design/briefings.md, default impact mode).
- * @param {{ labels: { nodes: { name: string }[] } }} issue
  */
-export function urgencyBand(issue) {
+export function urgencyBand(issue: Labelled): 0 | 1 | 2 {
   const high = labels(issue).includes(workflow.urgency.high);
   const low = labels(issue).includes(workflow.urgency.low);
   return high && low ? 1 : high ? 0 : low ? 2 : 1;
 }
-const urgencyNote = (issue) => {
+const urgencyNote = (issue: Labelled): string => {
   const high = labels(issue).includes(workflow.urgency.high);
   const low = labels(issue).includes(workflow.urgency.low);
   if (high && low)
@@ -175,9 +184,9 @@ analysisRules.set("ready-work", ({ issues }) =>
 );
 analysisRules.set("native-dependencies", ({ snapshot, issues }) =>
   issues.flatMap((issue) => {
-    const findings = [];
+    const findings: Action[] = [];
     const tags = labels(issue);
-    const add = (rule, reason, next, priority = 65) =>
+    const add = (rule: string, reason: string, next: string, priority = 65): number =>
       findings.push(
         action(rule, issue, priority, reason, next, "candidate", [
           issue.url,
@@ -256,7 +265,7 @@ analysisRules.set("addressed-attention", ({ issues, prs, viewer }) =>
 );
 analysisRules.set("attention", ({ issues }) =>
   issues.flatMap((issue) => {
-    const findings = [];
+    const findings: Action[] = [];
     const attention = labels(issue).filter((label) => workflow.attention.includes(label));
     if (attention.length && !labels(issue).includes(workflow.parked))
       findings.push(
@@ -280,7 +289,7 @@ analysisRules.set("attention", ({ issues }) =>
           "question-candidate",
           issue,
           35,
-          excerpt(candidates.at(-1).body),
+          excerpt(candidates[candidates.length - 1].body),
           "Inspect this candidate and subsequent replies; it may already be answered or historical.",
           "candidate",
           candidates.map((comment) => comment.url),
@@ -289,8 +298,13 @@ analysisRules.set("attention", ({ issues }) =>
     return findings;
   }),
 );
-/** @param {import("./types.js").PullRequest} pr */
-export function prChecks(pr) {
+/** A pull request check reduced to its name, outcome and evidence link. */
+export interface CheckOutcome {
+  name: string;
+  outcome: string;
+  url: string;
+}
+export function prChecks(pr: PullRequest): CheckOutcome[] {
   const contexts = pr.commits.nodes[0]?.commit.statusCheckRollup?.contexts.nodes ?? [];
   return contexts.map((check) => ({
     name: check.name ?? check.context ?? "unnamed",
@@ -308,7 +322,7 @@ analysisRules.set("pull-requests", ({ snapshot, prs }) =>
         ![...workflow.pass, ...workflow.failure, ...workflow.unfinished].includes(check.outcome),
     );
     const unresolved = pr.reviewThreads.nodes.filter((thread) => !thread.isResolved);
-    const findings = [];
+    const findings: Action[] = [];
     if (failed.length)
       findings.push(
         action(
@@ -409,12 +423,19 @@ analysisRules.set("pull-requests", ({ snapshot, prs }) =>
   }),
 );
 
-/**
- * @param {import("./types.js").Snapshot} snapshot
- * @param {{limit: number, offline?: boolean, issue?: number, agent?: string}} options
- * @param {Date} [now]
- */
-export function briefing(snapshot, options, now = new Date()) {
+export interface BriefingOptions {
+  limit: number;
+  offline?: boolean;
+  issue?: number;
+  agent?: string;
+}
+/** A bounded list: the first `limit` items plus how many were left out. */
+export interface Bounded<T> {
+  total: number;
+  omitted: number;
+  items: T[];
+}
+export function briefing(snapshot: Snapshot, options: BriefingOptions, now: Date = new Date()) {
   const issues = snapshot.issues.filter(active);
   const prs = snapshot.pullRequests.filter(active);
   const actions = [...analysisRules.values()]
@@ -422,13 +443,16 @@ export function briefing(snapshot, options, now = new Date()) {
     .sort(
       (a, b) =>
         b.priority - a.priority ||
-        unblocks(issues.find((i) => i.url === b.target) ?? {}) -
-          unblocks(issues.find((i) => i.url === a.target) ?? {}) ||
+        unblocksOf(issues.find((i) => i.url === b.target)) -
+          unblocksOf(issues.find((i) => i.url === a.target)) ||
         a.target.localeCompare(b.target) ||
         a.rule.localeCompare(b.rule),
     );
-  /** @param {import("./types.js").Issue} issue */
-  const context = (issue) => ({
+  const latestComment = (issue: Issue) => {
+    const latest = issue.comments.nodes.at(-1);
+    return latest ? { url: latest.url, excerpt: excerpt(latest.body, 420) } : null;
+  };
+  const context = (issue: Issue) => ({
     number: issue.number,
     title: issue.title,
     url: issue.url,
@@ -438,12 +462,7 @@ export function briefing(snapshot, options, now = new Date()) {
     updatedAt: issue.updatedAt,
     bodyExcerpt: excerpt(issue.body, 420),
     commentCount: issue.comments.nodes.length,
-    latestComment: issue.comments.nodes.at(-1)
-      ? {
-          url: issue.comments.nodes.at(-1).url,
-          excerpt: excerpt(issue.comments.nodes.at(-1).body, 420),
-        }
-      : null,
+    latestComment: latestComment(issue),
     documentation: [
       ...new Set(
         (issue.body.match(/(?:https:\/\/[^\s)\]]+|\b(?:doc\/[^\s)\]]+|AGENTS\.md))/g) ?? [])
@@ -453,8 +472,7 @@ export function briefing(snapshot, options, now = new Date()) {
     ],
     detailCommand: `npm run --silent triage -- --repo ${snapshot.repository} --issue ${issue.number} --json`,
   });
-  /** @template T @param {T[]} items */
-  const limit = (items) => ({
+  const limit = <T>(items: T[]): Bounded<T> => ({
     total: items.length,
     omitted: Math.max(0, items.length - options.limit),
     items: items.slice(0, options.limit),
@@ -470,7 +488,7 @@ export function briefing(snapshot, options, now = new Date()) {
       .map((issue) => `${issue.url}: native dependency evidence missing; readiness unknown.`),
   ];
   return {
-    schemaVersion: 1,
+    schemaVersion: 1 as const,
     repository: snapshot.repository,
     freshness: {
       startedAt: snapshot.startedAt,
@@ -549,14 +567,14 @@ export function briefing(snapshot, options, now = new Date()) {
   };
 }
 
-/** @param {ReturnType<typeof briefing>} report */
-export function textReport(report) {
+export type Briefing = ReturnType<typeof briefing>;
+export function textReport(report: Briefing): string {
   const lines = [
     `GitHub action briefing: ${report.repository}`,
     `Fetched ${report.freshness.fetchedAt}${report.freshness.offline ? ` — OFFLINE CACHE (${report.freshness.ageSeconds}s old), live verification unavailable` : " — LIVE fetch window"}`,
     report.guidance,
   ];
-  const section = (title, rows, omitted = 0) => {
+  const section = (title: string, rows: string[], omitted = 0): void => {
     lines.push(`\n${title}`, ...rows.map((row) => `- ${row}`));
     if (omitted) lines.push(`- ${omitted} more omitted; increase --limit or use --issue N.`);
   };

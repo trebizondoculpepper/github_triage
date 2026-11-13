@@ -2,6 +2,10 @@
 
 Research #78, 2026-11-13. **Protocol ready; empirical results pending.** No model trials or paid calls have been run. This document does not establish that reasons improve adherence. It specifies a reproducible experiment before anyone spends a model budget.
 
+## Owner-approved stage separation
+
+Follow [the proportionate-research instructions](../design/research-stages.md). Initial plausibility/preparation is capped at roughly one hour of agent time and can use a capable agent. The original narrow proof of concept has a plausibility bar; this later study of feasibility/practicality/adherence must not block it. Repetitive trials should be handed to a cheaper agent after plausibility review. A possible $20 experiment cap is for later agreement, not approval to spend now. Counts below are evaluation proposals, not an initial-stage acceptance requirement.
+
 ## Question and hypotheses
 
 Does adding reasons to otherwise identical workflow rules improve observable agent behavior? The primary contrast is A (rules) versus B (same rules plus reasons). Hypotheses: B reduces violations or improves recovery; alternatively it has no benefit, adds cost, or encourages invented exceptions. These are competing hypotheses, not conclusions.

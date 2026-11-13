@@ -9,18 +9,34 @@
  * evaluator, and checks the rule set for contradictions.
  */
 
+import type { DataScript, Datom } from "datascript";
+
 /** Ticket labels and evidence the facts are computed from (one viewer agent). */
-const has = (t, label) => t.labels.includes(label);
+export interface Ticket {
+  number: number;
+  createdAt: string;
+  labels: string[];
+  owners: string[];
+  openBlockers: number | null;
+  labelsComplete: boolean;
+  openPrs: number[];
+  platforms: string[];
+  attention: string[];
+  unblocks: number;
+}
+export interface Agent {
+  name: string;
+  platform: string | null;
+}
+export interface Fact {
+  js: (t: Ticket, a: Agent) => boolean;
+  edn: string;
+  en: string;
+}
 
-/**
- * @typedef {{ number: number, createdAt: string, labels: string[], owners: string[],
- *   openBlockers: number | null, labelsComplete: boolean, openPrs: number[],
- *   platforms: string[], attention: string[], unblocks: number }} Ticket
- * @typedef {{ name: string, platform: string | null }} Agent
- */
+const has = (t: Ticket, label: string): boolean => t.labels.includes(label);
 
-/** @type {Record<string, { js: (t: Ticket, a: Agent) => boolean, edn: string, en: string }>} */
-export const FACTS = {
+export const FACTS: Record<string, Fact | undefined> = {
   addressed: {
     js: (t, a) => t.attention.includes(a.name),
     edn: '[?t "attention" ?a]',
@@ -78,15 +94,51 @@ export const FACTS = {
   },
 };
 
-/**
- * @typedef {{ fact: string, not?: boolean }} Condition
- * @typedef {{ id: string, modality: "must" | "may" | "must_not" | "inspect", action: string,
- *   when: Condition[], reason: string }} Rule
- */
+export interface Condition {
+  fact: string;
+  not?: boolean;
+}
+export type Modality = "must" | "may" | "must_not" | "inspect";
+export type Action = keyof typeof actionEn;
+export interface Rule {
+  id: string;
+  modality: Modality;
+  action: Action;
+  when: Condition[];
+  reason: string;
+}
+export interface Diagnostic {
+  kind: "unknown-fact" | "never-applies" | "contradiction";
+  rules: string[];
+  detail: string;
+}
+interface Hit {
+  ticket: number;
+  action: Action;
+  modality: Modality;
+  rule: string;
+}
+export interface Decision {
+  ticket: number;
+  action: Action;
+  modality: Modality;
+  because: string[];
+  overrides: string[];
+}
+export interface Evaluation {
+  decisions: Decision[];
+  pickupOrder: number[];
+}
+
+/** A fact the rule set names; checkRules reports unknown names, evaluators require them. */
+function fact(name: string): Fact {
+  const found = FACTS[name];
+  if (!found) throw new Error(`unknown fact ${name}`);
+  return found;
+}
 
 /** The current agreed workflow (a slice), as data. */
-/** @type {Rule[]} */
-export const RULES = [
+export const RULES: Rule[] = [
   {
     id: "R1",
     modality: "must",
@@ -172,14 +224,20 @@ export const RULES = [
 ];
 
 /** Pickup order among permitted pick_up actions (the "order" clause), as data. */
-export const ORDER = [
+type OrderKey = "unblocks" | "incomplete" | "createdAt" | "number";
+export const ORDER: { key: OrderKey; direction: "asc" | "desc"; en: string }[] = [
   { key: "unblocks", direction: "desc", en: "most dependants unblocked first" },
   { key: "incomplete", direction: "desc", en: "incomplete work before unstarted" },
   { key: "createdAt", direction: "asc", en: "oldest first" },
   { key: "number", direction: "asc", en: "then by number" },
 ];
 
-const modalEn = { must: "You must", may: "You may", must_not: "You must not", inspect: "Inspect:" };
+const modalEn: Record<Modality, string> = {
+  must: "You must",
+  may: "You may",
+  must_not: "You must not",
+  inspect: "Inspect:",
+};
 const actionEn = {
   respond: "respond to the ticket",
   follow_up: "follow up the pull request",
@@ -190,17 +248,17 @@ const actionEn = {
 };
 
 /** Compile one rule to English from the same record and fact table. */
-export function english(rule) {
-  const conds = rule.when.map((c) => (c.not ? `not (${FACTS[c.fact].en})` : FACTS[c.fact].en));
+export function english(rule: Rule): string {
+  const conds = rule.when.map((c) => (c.not ? `not (${fact(c.fact).en})` : fact(c.fact).en));
   return `${rule.id}: ${modalEn[rule.modality]} ${actionEn[rule.action]} when ${conds.join(" and ")}. ${rule.reason}`;
 }
-export const englishGuide = (rules = RULES) =>
+export const englishGuide = (rules: Rule[] = RULES): string =>
   [...rules.map(english), `Order for pick_up: ${ORDER.map((o) => o.en).join(", ")}.`].join("\n");
 
 /** Static checks: unknown facts, self-contradictory rules, and contradictory rule pairs. */
-export function checkRules(rules = RULES) {
-  const diagnostics = [];
-  const key = (r) =>
+export function checkRules(rules: Rule[] = RULES): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const key = (r: Rule): string =>
     r.when
       .map((c) => `${c.not ? "!" : ""}${c.fact}`)
       .sort()
@@ -236,13 +294,13 @@ export function checkRules(rules = RULES) {
 }
 
 /** Combine rule hits per (ticket, action): must_not wins over may/must, and the override is shown. */
-function decide(hits) {
-  const byKey = new Map();
+function decide(hits: Hit[]): Decision[] {
+  const byKey = new Map<string, Hit[]>();
   for (const h of hits) {
     const k = `${h.ticket}:${h.action}`;
     byKey.set(k, [...(byKey.get(k) ?? []), h]);
   }
-  const decisions = [];
+  const decisions: Decision[] = [];
   for (const [, group] of byKey) {
     const forbid = group.filter((h) => h.modality === "must_not");
     const others = group.filter((h) => h.modality !== "must_not");
@@ -255,7 +313,7 @@ function decide(hits) {
         overrides: others.map((h) => h.rule),
       });
     else
-      for (const m of ["must", "may", "inspect"]) {
+      for (const m of ["must", "may", "inspect"] as const) {
         const hit = others.filter((h) => h.modality === m);
         if (hit.length) {
           decisions.push({
@@ -273,16 +331,22 @@ function decide(hits) {
 }
 
 /** Order permitted pick_up decisions with the ORDER clause. */
-function order(decisions, tickets) {
+function order(decisions: Decision[], tickets: Ticket[]): number[] {
   const byNumber = new Map(tickets.map((t) => [t.number, t]));
-  const value = (t, key) => (key === "incomplete" ? Number(has(t, "status:incomplete")) : t[key]);
+  const ticket = (n: number): Ticket => {
+    const found = byNumber.get(n);
+    if (!found) throw new Error(`no ticket ${n}`);
+    return found;
+  };
+  const value = (t: Ticket, key: OrderKey): string | number =>
+    key === "incomplete" ? Number(has(t, "status:incomplete")) : t[key];
   const pick = decisions
     .filter((d) => d.action === "pick_up" && d.modality === "may")
     .sort((x, y) => {
       for (const o of ORDER) {
-        const a = value(byNumber.get(x.ticket), o.key);
-        const b = value(byNumber.get(y.ticket), o.key);
-        const c = typeof a === "string" ? a.localeCompare(b) : a - b;
+        const a = value(ticket(x.ticket), o.key);
+        const b = value(ticket(y.ticket), o.key);
+        const c = typeof a === "string" ? a.localeCompare(String(b)) : a - Number(b);
         if (c) return o.direction === "asc" ? c : -c;
       }
       return 0;
@@ -291,24 +355,24 @@ function order(decisions, tickets) {
 }
 
 /** Plain registered-JS evaluator compiled from the rule records. */
-export function evaluateJs(tickets, agent, rules = RULES) {
-  const hits = [];
+export function evaluateJs(tickets: Ticket[], agent: Agent, rules: Rule[] = RULES): Evaluation {
+  const hits: Hit[] = [];
   for (const t of tickets)
     for (const r of rules)
-      if (r.when.every((c) => FACTS[c.fact].js(t, agent) !== !!c.not))
+      if (r.when.every((c) => fact(c.fact).js(t, agent) !== !!c.not))
         hits.push({ ticket: t.number, action: r.action, modality: r.modality, rule: r.id });
   const decisions = decide(hits);
   return { decisions, pickupOrder: order(decisions, tickets) };
 }
 
 /** Datoms for DataScript: one entity per ticket plus the viewer agent entity. */
-function datoms(tickets, agent) {
-  const out = [];
+function datoms(tickets: Ticket[], agent: Agent) {
+  const out: Datom[] = [];
   let id = 1;
   const agentId = id++;
   out.push([agentId, "name", agent.name]);
   if (agent.platform) out.push([agentId, "agent-platform", agent.platform]);
-  const entity = new Map();
+  const entity = new Map<number, number>();
   for (const t of tickets) {
     const e = id++;
     entity.set(e, t.number);
@@ -328,7 +392,12 @@ function datoms(tickets, agent) {
  * DataScript evaluator compiled from the same rule records and fact clauses. Each rule becomes
  * one query; ?a is the viewer's name and ?ae the viewer entity (for its platform).
  */
-export function evaluateDataScript(ds, tickets, agent, rules = RULES) {
+export function evaluateDataScript(
+  ds: DataScript,
+  tickets: Ticket[],
+  agent: Agent,
+  rules: Rule[] = RULES,
+): Evaluation {
   const { out, agentId, entity } = datoms(tickets, agent);
   // Array-backed attributes must be cardinality-many, or DataScript keeps only the last value.
   const many = { ":db/cardinality": ":db.cardinality/many" };
@@ -344,12 +413,17 @@ export function evaluateDataScript(ds, tickets, agent, rules = RULES) {
     out.map(([e, a, v]) => [":db/add", e, a, v]),
   );
   const db = ds.db(conn);
-  const hits = [];
+  const hits: Hit[] = [];
   for (const r of rules) {
-    const clauses = r.when.map((c) => (c.not ? `(not ${FACTS[c.fact].edn})` : FACTS[c.fact].edn));
+    const clauses = r.when.map((c) => (c.not ? `(not ${fact(c.fact).edn})` : fact(c.fact).edn));
     const query = `[:find ?t :in $ ?a ?ae :where [?t "number" _] ${clauses.join(" ")}]`;
     for (const [e] of ds.q(query, db, agent.name, agentId))
-      hits.push({ ticket: entity.get(e), action: r.action, modality: r.modality, rule: r.id });
+      hits.push({
+        ticket: entity.get(Number(e)) ?? Number.NaN,
+        action: r.action,
+        modality: r.modality,
+        rule: r.id,
+      });
   }
   const decisions = decide(hits);
   return { decisions, pickupOrder: order(decisions, tickets) };
