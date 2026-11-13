@@ -238,6 +238,16 @@ export async function cachedCheckForUpdate({
           };
     } else {
       state.lastAttempt = new Date(t).toISOString();
+      // Record the attempt before contacting npm: if it cannot be remembered, the daily throttle
+      // cannot hold, so the optional lookup is skipped rather than repeated on every run.
+      try {
+        await writeCache(fs, file, {
+          schemaVersion: cacheSchemaVersion,
+          channels: { ...cache.channels, [channel]: state },
+        });
+      } catch {
+        return unavailable("update cache not writable; check skipped");
+      }
       result = await checkForUpdate({ ...options, installed, fetchImpl, timeoutMs });
       // Only a successful lookup is remembered as evidence; a failure only throttles retries.
       if (result.status === "newer" || result.status === "current") {

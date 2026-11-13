@@ -2585,16 +2585,24 @@ describe("daily cached version check (#65, doc/design/updates.md)", () => {
           })
         ).status,
       ).toBe("unknown");
-      // Renaming fails after the lock is held: the lookup is reported but not announced.
+      // Renaming fails after the lock is held: the attempt cannot be remembered, so the daily
+      // throttle cannot hold and npm is never contacted, however often the CLI runs.
       const noRename = { ...nodeFs, rename: async () => Promise.reject(denied) };
-      const result = await cachedCheckForUpdate({
-        cacheDir,
-        fs: noRename as never,
-        installed: installed("0.1.0"),
-        fetchImpl: reg.fetchImpl,
-        now: () => t0,
-      });
-      expect(result).toMatchObject({ status: "newer", notify: false });
+      const before = reg.calls.length;
+      for (let i = 0; i < 3; i++) {
+        const result = await cachedCheckForUpdate({
+          cacheDir,
+          fs: noRename as never,
+          installed: installed("0.1.0"),
+          fetchImpl: reg.fetchImpl,
+          now: () => t0,
+        });
+        expect(result).toMatchObject({
+          status: "unknown",
+          reason: expect.stringMatching(/not writable/),
+        });
+      }
+      expect(reg.calls.length).toBe(before);
       expect(await readdir(cacheDir)).toEqual([]);
     });
   });
