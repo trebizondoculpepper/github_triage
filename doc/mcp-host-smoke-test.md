@@ -52,7 +52,8 @@ In the host, without relying on a paid model turn where the host offers a direct
 3. Call `triage_issue` with a known open issue number, then with a nonexistent number (expect an incomplete result with a diagnosis, not an error dump).
 4. Call `triage_dependencies` with an issue that has native blockers, then with `tree: true`.
 5. Call `triage_briefing` with an invalid `repo` such as `bad` (expect an argument validation error, no stack trace, no local paths).
-6. Cancel a call mid-flight if the host supports it; confirm no `gh` process is left running (`ps aux | grep '[g]h api'`).
+6. Identity: with no `--agent` and no tool `agent`, call `triage_briefing` and record `selection.agent`, `selection.identitySource`, `selection.entry` and `selection.identityDiagnostic`. With a root `agent-inbox.toml` entry for this host (for Ori, `[agents."ori.SERVER"]` where SERVER is the configured server key; for Claude Code, `[agents.claude]`), expect that entry's `name` with source `client` (Ori) or `environment`. Then pass `agent` explicitly and expect source `tool`. Confirm `agent-inbox.toml` is unchanged afterwards (`git status --ignored` and its modification time): the server never writes identity. Without a matching entry, expect `unresolved` with an unfocused read and a diagnostic, not an error.
+7. Cancel a call mid-flight if the host supports it; confirm no `gh` process is left running (`ps aux | grep '[g]h api'`).
 
 ## 5. Record
 
@@ -60,6 +61,7 @@ Post on #25:
 
 - Date (UTC), commit SHA, package version, Node version, OS.
 - Host name and version; the protocol version it negotiated if the host shows it.
+- The identity source and diagnostic observed in step 4.6 (entry keys and names only; no paths).
 - For each call: pass/fail, whether the host displayed `content` text, `structuredContent`, or both, and whether structured content appeared to reach the model.
 - Host-visible token usage for a briefing and an issue intake, if the host reports it (this is the measurement doc/reports/mcp-cli-comparison.md could only approximate).
 - Anything that failed or that the host did not support, stated as a limitation rather than inferred compatibility.

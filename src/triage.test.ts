@@ -5952,15 +5952,17 @@ describe("read-only MCP adapter (#25)", async () => {
       client.callTool({ name: "triage_briefing", arguments: { repo: "o/b", agent: "zed" } }),
       client.callTool({ name: "triage_briefing", arguments: {} }),
     ]);
-    expect(structured(a).selection).toEqual({
+    expect(structured(a).selection).toMatchObject({
       repository: "o/a",
       agent: "boot",
       identitySource: "startup",
+      identityDiagnostic: null,
     });
-    expect(structured(b).selection).toEqual({
+    expect(structured(b).selection).toMatchObject({
       repository: "o/b",
       agent: "zed",
       identitySource: "tool",
+      identityDiagnostic: null,
     });
     expect(structured(c).selection.repository).toBe("start/default");
     expect(runtime.seen.sort()).toEqual(["o/a#-@-", "o/b#-@-", "start/default#-@-"]);
@@ -5977,6 +5979,220 @@ describe("read-only MCP adapter (#25)", async () => {
     expect(dirs).toEqual(["/work/project"]);
     expect(text(result)).toMatch(/Identity: unresolved; this is an unfocused read/);
     await client.close();
+  });
+
+  describe("read-only identity from the project's agent-inbox.toml", () => {
+    const root = "/work/project";
+    const identityFile = join(root, "agent-inbox.toml");
+    const toml = [
+      "[agents.claude]",
+      'name = "file_claude"',
+      'triage_role = "implementer"',
+      "",
+      "[agents.codex]",
+      'name = "file_codex"',
+      'role = "agent"',
+      "",
+      '[agents."ori.github-triage"]',
+      'name = "file_ori"',
+      'triage_role = "designer"',
+      "",
+      '[agents."ori.review"]',
+      'name = "file_ori_review"',
+      "",
+    ].join("\n");
+    const identityRuntime = (
+      contents: string | null | Error = toml,
+      env: Record<string, string> = {},
+    ) => {
+      const writes: string[] = [];
+      const fs = {
+        readText: async (path: string) => {
+          if (contents instanceof Error) throw contents;
+          return path === identityFile ? contents : null;
+        },
+        writeText: async (path: string) => void writes.push(path),
+        rename: async (_from: string, to: string) => void writes.push(to),
+        appendText: async (path: string) => void writes.push(path),
+        remove: async (path: string) => void writes.push(path),
+        makeDirectory: async (path: string) => void writes.push(path),
+      };
+      const git = async (args: readonly string[]) =>
+        args[0] === "rev-parse" ? `${root}\n` : `origin\thttps://github.com/${repo}.git (fetch)\n`;
+      return { runtime: fake({ fs, git, env }), writes };
+    };
+    const connectAs = async (runtime: Runtime, options: Options, clientName = "test") => {
+      const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+      await createServer(options, runtime).connect(serverSide);
+      const client = new Client({ name: clientName, version: "9.9.9" });
+      await client.connect(clientSide);
+      return client;
+    };
+    const briefingSelection = async (client: Awaited<ReturnType<typeof connectAs>>, args = {}) =>
+      structured(await client.callTool({ name: "triage_briefing", arguments: args }));
+
+    it("applies tool, startup, entry, harness, client and environment precedence", async () => {
+      const { runtime, writes } = identityRuntime(toml, { CLAUDECODE: "1" });
+      const base = { project: root };
+      const cases: [Options, string, Record<string, string>, object][] = [
+        [
+          { ...base, agent: "boot", entry: "codex" },
+          "ori-github-triage",
+          { agent: "zed" },
+          { agent: "zed", identitySource: "tool" },
+        ],
+        [
+          { ...base, agent: "boot", entry: "codex" },
+          "ori-github-triage",
+          {},
+          { agent: "boot", identitySource: "startup", entry: null },
+        ],
+        [
+          { ...base, entry: "codex" },
+          "ori-github-triage",
+          {},
+          { agent: "file_codex", identitySource: "entry", entry: "codex", triageRole: null },
+        ],
+        [
+          { ...base, harness: "codex" },
+          "ori-github-triage",
+          {},
+          { agent: "file_codex", identitySource: "harness", entry: "codex" },
+        ],
+        [
+          base,
+          "ori-github-triage",
+          {},
+          {
+            agent: "file_ori",
+            identitySource: "client",
+            entry: "ori.github-triage",
+            triageRole: "designer",
+          },
+        ],
+        [
+          base,
+          "ori-review",
+          {},
+          { agent: "file_ori_review", identitySource: "client", entry: "ori.review" },
+        ],
+        [
+          base,
+          "claude-code",
+          {},
+          {
+            agent: "file_claude",
+            identitySource: "environment",
+            entry: "claude",
+            triageRole: "implementer",
+          },
+        ],
+      ];
+      for (const [options, clientName, args, expected] of cases) {
+        const client = await connectAs(runtime, options, clientName);
+        const selected = await briefingSelection(client, args);
+        expect(selected.selection, JSON.stringify([options, clientName, args])).toMatchObject({
+          ...expected,
+          identityDiagnostic: null,
+        });
+        expect(selected.status).toBe("complete");
+        await client.close();
+      }
+      expect(writes).toEqual([]);
+    });
+
+    it("focuses the read exactly as the CLI does for the same name", async () => {
+      const { runtime } = identityRuntime();
+      const client = await connectAs(runtime, { project: root, repo }, "ori-github-triage");
+      const brief = await briefingSelection(client);
+      expect(brief.selection.agent).toBe("file_ori");
+      let out = "";
+      await main(
+        ["--repo", repo, "--agent", "file_ori", "--json", "--no-update-check"],
+        async (t) => void (out = t),
+        runtime,
+      );
+      const { checkpoint: _, ...cli } = JSON.parse(out);
+      expect(brief.result).toEqual(redactPaths(cli, [process.cwd()]));
+      await client.close();
+    });
+
+    it("reads unfocused with a diagnostic when identity is missing, ambiguous or unreadable", async () => {
+      const cases: [ReturnType<typeof identityRuntime>, Options, string, RegExp][] = [
+        [
+          identityRuntime(toml, { ORI_SESSION_ID: "s" }),
+          { project: root },
+          "test",
+          /one entry per configured server/,
+        ],
+        [
+          identityRuntime(toml, { CLAUDECODE: "1", CODEX_THREAD_ID: "t" }),
+          { project: root },
+          "test",
+          /several harnesses/,
+        ],
+        [
+          identityRuntime(toml),
+          { project: root, harness: "ori" },
+          "test",
+          /Candidate entries: ori.github-triage, ori.review/,
+        ],
+        [identityRuntime(toml), { project: root }, "test", /No supported harness/],
+        [
+          identityRuntime(toml),
+          { project: root, entry: "missing" },
+          "test",
+          /no \[agents.missing\] entry/,
+        ],
+        [identityRuntime(null), { project: root, entry: "codex" }, "test", /no agent-inbox.toml/],
+        [
+          identityRuntime("[agents\nbroken"),
+          { project: root, entry: "codex" },
+          "test",
+          /not valid for identity use/,
+        ],
+        [
+          identityRuntime(new Error("EACCES /home/secret/agent-inbox.toml")),
+          { project: root, entry: "codex" },
+          "test",
+          /could not be read/,
+        ],
+        [
+          identityRuntime(toml, { CLAUDECODE: "1" }),
+          {},
+          "ori-github-triage",
+          /no local project is configured/,
+        ],
+      ];
+      for (const [{ runtime, writes }, options, clientName, diagnostic] of cases) {
+        const client = await connectAs(runtime, options, clientName);
+        const result = await client.callTool({ name: "triage_briefing", arguments: { repo } });
+        const selected = structured(result);
+        expect(selected.status, String(diagnostic)).toBe("complete");
+        expect(selected.selection).toMatchObject({ agent: null, identitySource: "unresolved" });
+        expect(selected.selection.identityDiagnostic).toMatch(diagnostic);
+        expect(text(result)).toMatch(/Identity: unresolved; this is an unfocused read/);
+        expect(JSON.stringify(result)).not.toMatch(/secret|EACCES|\/work\/project/);
+        expect(writes).toEqual([]);
+        await client.close();
+      }
+    });
+
+    it("does not use a project's identity for a different repository", async () => {
+      const { runtime } = identityRuntime();
+      const client = await connectAs(runtime, { project: root, entry: "codex" });
+      const selected = await briefingSelection(client, { repo: "other/repo" });
+      expect(selected.selection).toMatchObject({ agent: null, identitySource: "unresolved" });
+      expect(selected.selection.identityDiagnostic).toMatch(/not other\/repo/);
+      await client.close();
+    });
+
+    it("rejects invalid or conflicting startup entry selection", () => {
+      expect(() => mcpArguments(["--entry", "__proto__"])).toThrow();
+      expect(() => mcpArguments(["--harness", "cursor"])).toThrow();
+      expect(() => mcpArguments(["--entry", "codex", "--harness", "codex"])).toThrow(/either/);
+      expect(mcpArguments(["--entry", "ori.review"])).toMatchObject({ entry: "ori.review" });
+    });
   });
 
   it("returns sanitized errors, never raw failure text", async () => {
@@ -6201,7 +6417,7 @@ describe("read-only MCP adapter (#25)", async () => {
     });
     expect(() => mcpArguments(["--repo", "bad"])).toThrow();
     expect(() => mcpArguments(["--agent", "-x"])).toThrow();
-    expect(() => mcpArguments(["--harness", "ori"])).toThrow();
+    expect(() => mcpArguments(["--harness", "cursor"])).toThrow();
   });
 });
 
