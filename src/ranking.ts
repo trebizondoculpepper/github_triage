@@ -220,10 +220,15 @@ export function immediateUnlocks(
       unknown.push(`dependant ${name} lacks native dependency evidence`);
       return [];
     }
-    return dependant.issueDependenciesSummary.blockedBy === 1 &&
-      otherwiseEligible(dependant, context).status === "eligible"
-      ? [dependant]
-      : [];
+    if (dependant.issueDependenciesSummary.blockedBy !== 1) return [];
+    const eligibility = otherwiseEligible(dependant, context);
+    // Unknown eligibility (platform restriction without a viewer platform, truncated closing-PR
+    // evidence) is unknown impact, never a silent zero.
+    if (eligibility.status === "unknown") {
+      unknown.push(...eligibility.reasons.map((reason) => `dependant ${name}: ${reason}`));
+      return [];
+    }
+    return eligibility.status === "eligible" ? [dependant] : [];
   });
   return { unlocks, unknown };
 }

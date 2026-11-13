@@ -4116,6 +4116,26 @@ describe("next-action ranking (#45, doc/design/briefings.md acceptance examples)
       /unlocks at least 1 \(#65\); impact unknown: dependant list truncated/,
     );
   });
+  it("a dependant with unknown eligibility gives unknown impact, not zero (#208)", () => {
+    const blocker = issue(71);
+    const restricted = blockedBy(issue(72, ["status:ready", "platform:codex"]), 1);
+    blocks(blocker, [restricted]);
+    const data = snapshot([blocker, restricted], []);
+    const unknown = briefing(data, { limit: 100 }, new Date(time)).ready.items.find(
+      (i) => i.number === 71,
+    )!;
+    expect(unknown.unlocks).toEqual([]);
+    expect(unknown.unlocksUnknown).toEqual([
+      "dependant example/project#72: restricted to platform codex; viewer platform unknown (state --platform)",
+    ]);
+    const match = briefing(
+      data,
+      { limit: 100, platform: "codex" },
+      new Date(time),
+    ).ready.items.find((i) => i.number === 71)!;
+    expect(match.unlocks).toEqual([72]);
+    expect(match.unlocksUnknown).toEqual([]);
+  });
   it("a cross-repository dependant gives unknown impact (#208)", () => {
     const blocker = issue(66);
     const elsewhere = blockedBy(issue(67), 1);
