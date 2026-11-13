@@ -6,9 +6,9 @@ Read [HANDOFF.md](HANDOFF.md) first. This is the standalone GitHub Triage projec
 
 ## Source language
 
-Owner decision: all maintained first-party application code, scripts and executable examples must use TypeScript. Intentionally selected ancillary languages such as Datalog are allowed where the relevant design documents their purpose and validation boundary. Handwritten JavaScript is not an allowed convenience exception. Generated JavaScript bundles and third-party code remain normal runtime artifacts.
+Owner decision: application code in `src/` and maintained executable research examples must use TypeScript. Helpers in `scripts/` may use TypeScript, JavaScript, shell, batch, PowerShell or Python with a short justification, runtime requirements and supported platforms documented. Existing TypeScript helpers need no rewrite. Intentionally selected ancillary languages such as Datalog are allowed where the relevant design documents their purpose and validation boundary. Handwritten JavaScript is avoided in application code; the documented helper-script exception is intentional. Generated JavaScript bundles and third-party code remain normal runtime artifacts.
 
-Follow [the TypeScript architecture and migration contract](doc/design/typescript.md) (#91). The migration has landed: source is strict TypeScript, development runs it through the `tsx` devDependency (Node 20 cannot execute `.ts`), and consumers on Node 20+ run the built JavaScript in `dist/cli.mjs`. A test fails if handwritten `.js`/`.mjs`/`.cjs` appears under `src/` or `doc/reports/examples/`. Helpers in `scripts/` may be TypeScript, JavaScript or shell (owner decision on #91).
+Follow [the TypeScript architecture and migration contract](doc/design/typescript.md) (#91). Source is strict TypeScript, development uses the `tsx` devDependency, and installed consumers run `dist/cli.mjs`. A test enforces the language boundary in `src/` and maintained executable research examples; helper scripts follow the flexible policy above. Follow the [current-LTS runtime policy](doc/design/runtime.md) (#108): older-Node compatibility is not a migration requirement. Existing package engines and CI remain implementation facts until that follow-up ships.
 
 ## Architecture and scope
 
@@ -67,3 +67,11 @@ At the start of every session, read https://api.hub.stodge.org/prompts/agent and
 ## Mirrored process proposal
 
 The owner requested a mirror of poker_blocks' design/implementation process. Review [doc/process.md](doc/process.md) and [doc/design-implementation.md](doc/design-implementation.md); [doc/poker-blocks-process.md](doc/poker-blocks-process.md) preserves the exact source snapshot. [Issue #12](https://github.com/trebizondoculpepper/github_triage/issues/12) asks this project to consider adoption and adaptations. These are review proposals; they do not silently override this guide or assert that branch protection/reviewer integrations exist.
+
+The [process adaptation audit](doc/reports/process-adaptation-audit.md) (#12) recommends retaining this guide and the focused merged contracts as active policy. The mirrored process remains context, not a second competing instruction source. Close tickets only when their stated acceptance is complete; completing a documentation phase alone does not finish its implementation or empirical follow-up.
+
+For a design/research phase with further ticket acceptance outstanding, use neutral PR wording such as `References #N`. Do not negate a GitHub closing keyword next to a real issue reference: GitHub still treated that wording as a closing directive in this project. Use an intentional closing directive only when the PR completes the issue’s stated acceptance. Verify the issue state after merge.
+
+## Proportionate research
+
+Follow [the research-stage instructions](doc/design/research-stages.md) for #72/#74/#75/#78: up to roughly one hour of agent time for initial plausibility/preparation. Higher-standard feasibility/practicality or repetitive evaluation is separate and must not block the original low-cost experiment. Later repetitive trials go to a cheaper agent after review and a separately agreed budget; a possible $20 cap is not current authorization. Cheap, bounded experiments can establish plausibility; costly ones need a plausible basis first. Unknown cost must be estimated, not treated as low.
