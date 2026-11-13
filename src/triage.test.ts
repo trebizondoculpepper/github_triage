@@ -8427,6 +8427,17 @@ x = 1
     expect(listed.identity).toMatchObject({ resolved: false, error: { code: "filesystem" } });
   });
 
+  it("keeps repository settings listable after --harness lookup errors, but rejects bad harness names", async () => {
+    const bad = setup('[agents.codex]\nname = "x"\ntoken = "leak-me\n');
+    expect(await bad.call("list", "--harness", "codex", "--json")).toBe(0);
+    const listed = bad.json();
+    expect(listed.settings.length).toBeGreaterThan(0);
+    expect(listed.identity).toMatchObject({ resolved: false, error: { code: "malformed" } });
+    expect(bad.out.at(-1)).not.toContain("leak-me");
+    const t = setup(sample);
+    expect(await t.call("list", "--harness", "bogus", "--json")).toBe(1);
+  });
+
   it("refuses malformed or tracked files without rewriting or echoing contents", async () => {
     const bad = setup('[agents.codex]\nname = "x"\ntoken = "leak-me\n');
     expect(await bad.call("get", "identity.name", "--entry", "codex", "--json")).toBe(1);

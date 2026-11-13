@@ -33,7 +33,7 @@ import {
   validateEntryKey,
   validateIdentityValue,
 } from "./identity.js";
-import { resolveEntry, SUPPORTED_HARNESSES } from "./harness.js";
+import { resolveEntry, SUPPORTED_HARNESSES, validateHarness } from "./harness.js";
 import type { EntryResolution, Environment } from "./harness.js";
 import type { IdentityKey, IdentityRecord } from "./identity.js";
 import type {
@@ -497,13 +497,16 @@ async function identityListing(
   fs: ConfigFileSystem,
   runtime: ConfigRuntime,
 ) {
+  // Invalid selection syntax is a usage error for the whole command; anything else (malformed
+  // or unreadable identity file) stays local to the identity section whatever the source.
   if (parsed.entry !== undefined) validateEntryKey(parsed.entry);
+  if (parsed.harness !== undefined) validateHarness(parsed.harness);
   let resolution: EntryResolution;
   try {
     resolution = await resolveFor(parsed, root, runtime);
   } catch (caught) {
     const error = filesystemRefusal(caught) ?? caught;
-    if (!(error instanceof ConfigError) || parsed.harness !== undefined) throw error;
+    if (!(error instanceof ConfigError)) throw error;
     return {
       resolved: false as const,
       path: IDENTITY_FILE,
