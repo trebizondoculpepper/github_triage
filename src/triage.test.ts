@@ -2558,9 +2558,10 @@ describe("addressed attention in the expanded briefing (#3)", () => {
 });
 
 describe("TypeScript source boundary (#91, doc/design/typescript.md)", () => {
-  it("keeps maintained first-party code in src/, scripts/ and doc/reports/examples/ in TypeScript", async () => {
+  it("keeps maintained first-party code in src/ and doc/reports/examples/ in TypeScript", async () => {
     const root = new URL("../", import.meta.url);
     // Generated output and dependencies are runtime artifacts, not handwritten source.
+    // scripts/ may also hold JavaScript or shell helpers (owner decision on #91).
     const skipped = new Set(["node_modules", "dist"]);
     const found: string[] = [];
     const walk = async (dir: string): Promise<void> => {
@@ -2571,7 +2572,7 @@ describe("TypeScript source boundary (#91, doc/design/typescript.md)", () => {
         } else if (/\.[cm]?js$/.test(entry.name)) found.push(path);
       }
     };
-    for (const dir of ["src/", "scripts/", "doc/reports/examples/"]) await walk(dir);
+    for (const dir of ["src/", "doc/reports/examples/"]) await walk(dir);
     expect(found).toEqual([]);
   });
 });

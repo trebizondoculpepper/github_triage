@@ -8,7 +8,7 @@ Read [HANDOFF.md](HANDOFF.md) first. This is the standalone GitHub Triage projec
 
 Owner decision: all maintained first-party application code, scripts and executable examples must use TypeScript. Intentionally selected ancillary languages such as Datalog are allowed where the relevant design documents their purpose and validation boundary. Handwritten JavaScript is not an allowed convenience exception. Generated JavaScript bundles and third-party code remain normal runtime artifacts.
 
-Follow [the TypeScript architecture and migration contract](doc/design/typescript.md) (#91). The migration has landed: source is strict TypeScript, development runs it through the `tsx` devDependency (Node 20 cannot execute `.ts`), and consumers on Node 20+ run the built JavaScript in `dist/cli.mjs`. A test fails if handwritten `.js`/`.mjs`/`.cjs` appears under `src/`, `scripts/` or `doc/reports/examples/`.
+Follow [the TypeScript architecture and migration contract](doc/design/typescript.md) (#91). The migration has landed: source is strict TypeScript, development runs it through the `tsx` devDependency (Node 20 cannot execute `.ts`), and consumers on Node 20+ run the built JavaScript in `dist/cli.mjs`. A test fails if handwritten `.js`/`.mjs`/`.cjs` appears under `src/` or `doc/reports/examples/`. Helpers in `scripts/` may be TypeScript, JavaScript or shell (owner decision on #91).
 
 ## Architecture and scope
 
