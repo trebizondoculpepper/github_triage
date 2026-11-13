@@ -1,6 +1,6 @@
 # Repository-relative complexity: initial guidance and rollout
 
-Owner-approved delivery direction; architecture review is pending. The first delivery is complexity only: optional T-shirt estimation using bundled guidance, native GitHub storage and CLI/MCP help. Repository-history recalibration is also deferred until estimates exist. Designer escalation, automatic splitting and new ranking weights are not decided here. No fields, labels or runtime features are created by this document.
+Owner-approved architecture, merged in PR #114. Focused implementation tickets are design-ready; native blockers and current ownership still govern pickup. The first delivery is complexity only: optional T-shirt estimation using bundled guidance, native GitHub storage and CLI/MCP help. Repository-history recalibration is also deferred until estimates exist. Designer escalation, automatic splitting and new ranking weights are not decided here. No fields, labels or runtime features are created by this document.
 
 ## Default complexity guidance
 
@@ -41,7 +41,7 @@ Record rationale, assumptions, evidence/reference tickets, estimator identity wh
 
 Keep separate eligibility for implementation and estimation. Native blockers prevent implementation pickup but do not, by themselves, prevent sizing. Estimate conditionally: “M if blocker B supplies the documented API; waiting excluded.” If the unresolved choice changes scope materially, report alternatives or inability to size confidently. Do not clear blockers, claim readiness, reserve implementation or split tickets merely by recording an estimate.
 
-Normal work selection advances attention/PR follow-up, active contributions and eligible implementation first; estimation/refinement is useful when there is no higher-value work available, or on explicit request. The estimation queue includes unestimated and meaningfully stale estimates, including blocked tickets. It must not inherit the implementation-ready-only filter. Claim/concurrency semantics for the estimate operation need a focused workflow contract; do not silently acquire a second active contribution.
+Normal work selection advances attention/PR follow-up, active contributions and eligible implementation first; estimation/refinement is useful when there is no higher-value work available, or on explicit request. The estimation queue includes unestimated and meaningfully stale estimates, including blocked tickets. It must not inherit the implementation-ready-only filter. Queue inspection and explicit estimate-recording operations acquire no claim and do not reserve future implementation. Keep the existing one-active-contribution rule: automatic work selection offers estimation only after higher-priority active work, and never silently acquires a second claim. A distinct long-lived estimation-claim lifecycle would require a separate future design; it is not required for this bounded capability.
 
 ## Help and MCP guidance
 
