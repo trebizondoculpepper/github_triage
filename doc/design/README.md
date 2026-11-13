@@ -42,3 +42,9 @@ The owner accepts a recent Node requirement: [the current Node LTS](runtime.md),
 ## Research stage and budget instructions
 
 [Proportionate research](research-stages.md) separates a roughly one-hour initial plausibility stage from later higher-standard feasibility/repetitive evaluation. The later study must not block the original experiment. A future cheaper-agent experiment budget requires separate agreement.
+
+## Estimation proposal
+
+[Repository-relative complexity estimation](complexity-estimation.md) records default T-shirt guidance and proposed small delivery slices. Native-field integration and estimation queues are not implemented or implicitly approved. Historical recalibration is later work; risk assessment belongs in a separate change set.
+
+[Repository configuration](repository-configuration.md) defines the proposed repository-only config command boundary, defaults and migration responsibilities.
