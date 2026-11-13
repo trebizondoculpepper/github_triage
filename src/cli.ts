@@ -262,7 +262,8 @@ handoff readiness label, and posts a handoff comment with the outcome, note and 
   --note TEXT       What was done and what remains (expected; absence never blocks release)
   --pr URL          Preferred deliverable link; --change URL for a direct-main change set
 Questions, blockers, attention:*, needs-design and parked/blocked labels are left untouched.
-Labels change before the comment, so released work stays pickable if the comment fails.
+The handoff comment, recording the label plan, is posted before labels change; a retry
+applies only that recorded plan and refuses if ownership or readiness changed since.
 Each step is reported done/failed/skipped; a retry of the same command completes only the
 missing steps and never duplicates the handoff comment. Changed live state is re-evaluated.
 You choose the outcome; the tool never chooses one for you.

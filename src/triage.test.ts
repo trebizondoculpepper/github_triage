@@ -3319,6 +3319,12 @@ describe("next-action ranking (#45, doc/design/briefings.md acceptance examples)
     expect(r.sections.available.items).toEqual([]);
     expect(r.actions.items).toEqual([pr().url]);
   });
+  it("awaiting review is a consistent readiness state but never implementation pickup (#62)", () => {
+    const waiting = issue(22, ["status:awaiting-review"]);
+    const r = brief(snapshot([waiting], []));
+    expect(r.ready.items.map((i) => i.number)).toEqual([]);
+    expect(r.actions.items.some((a) => a.rule === "readiness-inconsistent")).toBe(false);
+  });
   it("prefers released incomplete work over unstarted work on an impact tie", () => {
     const ready = issue(20, ["status:ready"]);
     const incomplete = issue(21, ["status:incomplete"]);
@@ -5971,10 +5977,23 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
     linkedOpenPr?: boolean;
     prState?: string | null;
     labelledAt?: string;
+    events: { createdAt: string; label: { name: string } }[];
   };
   /** A mutable fake GitHub: writes through `run` change what later reads see. */
   const live = (initial: Partial<Live> & { labels: string[] }) => {
-    const s: Live = { comments: [], labelledAt: "2026-11-12T09:00:00.000Z", ...initial };
+    const labelledAt = "labelledAt" in initial ? initial.labelledAt : "2026-11-12T09:00:00.000Z";
+    const s: Live = {
+      comments: [],
+      events: labelledAt ? [{ createdAt: labelledAt, label: { name: "agent:kavya" } }] : [],
+      ...initial,
+    };
+    // A monotonic clock, so label events and comments are ordered like GitHub's.
+    let ticks = 0;
+    const tick = () => new Date(Date.parse(time) + ++ticks * 1000).toISOString();
+    const addLabel = (name: string) => {
+      s.labels.push(name);
+      s.events.push({ createdAt: tick(), label: { name } });
+    };
     const writes: string[][] = [];
     const query = async (source: string, variables: Record<string, unknown> = {}) => {
       if (source.includes("resource(url:"))
@@ -5999,9 +6018,7 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
                 : [],
             ),
             comments: page(s.comments),
-            timelineItems: page(
-              s.labelledAt ? [{ createdAt: s.labelledAt, label: { name: "agent:kavya" } }] : [],
-            ),
+            timelineItems: page(s.events),
           },
           claims: page([]),
           ownerLabel: { name: "agent:kavya" },
@@ -6017,19 +6034,19 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
       writes.push(args);
       if (args[1] === "edit")
         for (let i = 0; i < args.length; i++) {
-          if (args[i] === "--add-label") s.labels.push(args[i + 1]);
+          if (args[i] === "--add-label") addLabel(args[i + 1]);
           if (args[i] === "--remove-label") s.labels = s.labels.filter((l) => l !== args[i + 1]);
         }
       if (args[1] === "comment")
-        s.comments.push({ body: args[args.indexOf("--body") + 1], createdAt: time });
+        s.comments.push({ body: args[args.indexOf("--body") + 1], createdAt: tick() });
     };
-    return { s, query, run, writes };
+    return { s, query, run, writes, addLabel };
   };
   const pr = `https://github.com/${repo}/pull/70`;
   const release = (env: ReturnType<typeof live>, extra: Record<string, unknown> = {}) =>
     planRelease(repo, { number: 7, agent: "kavya", outcome: "incomplete", ...extra }, env.query);
 
-  it("releases incomplete work with a note: labels first, then one handoff comment", async () => {
+  it("releases incomplete work with a note: the recorded handoff comment first, then labels", async () => {
     const env = live({ labels: ["agent:kavya", "bug", "question", "attention:nicole"] });
     const result = await applyPlan(
       repo,
@@ -6037,7 +6054,7 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
       env,
     );
     expect(result.exitCode).toBe(0);
-    expect(env.writes.map((w) => w[1])).toEqual(["edit", "comment"]);
+    expect(env.writes.map((w) => w[1])).toEqual(["comment", "edit"]);
     expect(env.s.labels.sort()).toEqual(
       ["attention:nicole", "bug", "question", "status:incomplete"].sort(),
     );
@@ -6127,10 +6144,10 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
     expect(result.exitCode).toBe(2);
     expect(result.conflict).toMatch(/status:incomplete is no longer/);
   });
-  it("partial API failure: released work stays pickable, the failure is visible, retry completes once", async () => {
+  it("partial API failure: the recorded intent is visible, retry applies only its labels once", async () => {
     const env = live({ labels: ["agent:kavya", "status:ready"] });
     const failing = async (args: string[]) => {
-      if (args[1] === "comment") throw new Error("gh issue comment failed.");
+      if (args[1] === "edit") throw new Error("gh issue edit failed.");
       await env.run(args);
     };
     const first = await applyPlan(repo, await release(env, { note: "half" }), {
@@ -6139,20 +6156,98 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
     });
     expect(first.exitCode).toBe(2);
     expect(first.steps!.map((s) => s.status)).toEqual(["done", "failed"]);
-    expect(env.s.labels).toEqual(["status:incomplete"]);
+    expect(env.s.labels).toEqual(["agent:kavya", "status:ready"]);
     const { claimText } = await import("./claims.js");
     expect(claimText(first)).toMatch(
       /Retry \(safe.*github-triage release 7 --agent kavya --as incomplete --note half --repo/,
     );
     const retry = await release(env, { note: "half" });
-    expect(accepted(retry).changes.map((c) => c.step)).toEqual(["comment"]);
+    expect(accepted(retry).changes.map((c) => c.step)).toEqual(["labels"]);
     expect((await applyPlan(repo, retry, env)).exitCode).toBe(0);
+    expect(env.s.labels).toEqual(["status:incomplete"]);
     expect(env.s.comments).toHaveLength(1);
     // A further retry, even with different wording, recognises the recorded handoff.
     const again = await release(env, { note: "different" });
     expect(again).toMatchObject({ ok: true, noop: true, changes: [] });
     expect((await applyPlan(repo, again, env)).exitCode).toBe(0);
     expect(env.s.comments).toHaveLength(1);
+  });
+  it("never treats a historical claim label as release authorisation", async () => {
+    // The claim was removed some other way: no recorded handoff, so nothing is stripped or posted.
+    const env = live({ labels: ["status:ready"] });
+    expect(await release(env, { outcome: "ready" })).toMatchObject({
+      ok: false,
+      error: "NOT_CLAIMED",
+    });
+    expect(await release(env, { outcome: "done" })).toMatchObject({
+      ok: false,
+      error: "NOT_CLAIMED",
+    });
+    // A marker with an unparsable plan is not authorisation either.
+    env.s.comments.push({
+      body: "<!-- github-triage:release:0123456789abcdef {broken -->",
+      createdAt: time,
+    });
+    expect(await release(env, { outcome: "ready" })).toMatchObject({ ok: false });
+  });
+  it("a retry keeps the owners the original release retained", async () => {
+    const env = live({ labels: ["agent:kavya", "agent:other"] });
+    const failing = async (args: string[]) => {
+      if (args[1] === "edit") throw new Error("gh issue edit failed.");
+      await env.run(args);
+    };
+    await applyPlan(repo, await release(env), { run: failing, query: env.query });
+    // Simulate a partial label write: our label gone, target not yet added.
+    env.s.labels = ["agent:other"];
+    const retry = accepted(await release(env));
+    expect(retry.changes.map((c) => c.step)).toEqual(["labels"]);
+    expect(retry.notes!.join(" ")).toMatch(/Other owners kept: agent:other/);
+    expect((await applyPlan(repo, retry, env)).exitCode).toBe(0);
+    expect(env.s.labels.sort()).toEqual(["agent:other", "status:incomplete"]);
+    expect(env.s.comments).toHaveLength(1);
+  });
+  it("refuses a retry when ownership or readiness changed after the recorded handoff", async () => {
+    const env = live({ labels: ["agent:kavya"] });
+    const failing = async (args: string[]) => {
+      if (args[1] === "edit") throw new Error("gh issue edit failed.");
+      await env.run(args);
+    };
+    await applyPlan(repo, await release(env), { run: failing, query: env.query });
+    env.s.labels = [];
+    env.addLabel("agent:newcomer");
+    expect(await release(env)).toMatchObject({ ok: false, error: "RELEASE_DIVERGED" });
+    const ready = live({ labels: ["agent:kavya"] });
+    await applyPlan(repo, await release(ready), {
+      run: async (args) => {
+        if (args[1] === "edit") throw new Error("failed");
+        await ready.run(args);
+      },
+      query: ready.query,
+    });
+    ready.addLabel("status:ready");
+    expect(await release(ready)).toMatchObject({ ok: false, error: "RELEASE_DIVERGED" });
+    // A different outcome cannot replace a recorded, unfinished one.
+    const pending = live({ labels: ["agent:kavya"] });
+    await applyPlan(repo, await release(pending), {
+      run: async (args) => {
+        if (args[1] === "edit") throw new Error("failed");
+        await pending.run(args);
+      },
+      query: pending.query,
+    });
+    expect(await release(pending, { outcome: "ready" })).toMatchObject({
+      ok: false,
+      error: "RELEASE_PENDING",
+    });
+  });
+  it("done: a linked open closing PR awaits review even when the supplied --pr is merged or unknown", async () => {
+    for (const prState of ["MERGED", "CLOSED", null]) {
+      const env = live({ labels: ["agent:kavya"], prState, linkedOpenPr: true });
+      const plan = accepted(
+        await release(env, { outcome: "done", pr: `https://github.com/${repo}/pull/69` }),
+      );
+      expect(plan.facts.target).toBe("status:awaiting-review");
+    }
   });
   it("validates arguments and dry-runs without writing", async () => {
     for (const bad of [

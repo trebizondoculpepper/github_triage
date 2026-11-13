@@ -153,6 +153,81 @@ interface TicketResponse {
 const marker = (kind: string, parts: unknown[]): string =>
   `<!-- github-triage:${kind}:${createHash("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 16)} -->`;
 
+/** A release's durable intent, recorded in its handoff comment before labels change. */
+interface ReleaseRecord {
+  v: 1;
+  agent: string;
+  outcome: ReleaseOutcome;
+  target: string | null;
+  remove: string[];
+  retained: string[];
+  claimedAt: string | null;
+  /** The comment's creation time (from GitHub; not serialised). */
+  createdAt: string;
+}
+/** Marker plus JSON plan; `<`/`>` are escaped so the HTML comment cannot be terminated early. */
+const releaseMarker = (op: string, record: ReleaseRecord): string => {
+  const { createdAt: _, ...plan } = record;
+  const json = JSON.stringify(plan).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e");
+  return op.replace(/ -->$/, ` ${json} -->`);
+};
+function releaseRecords(
+  comments: { body: string; createdAt?: string }[],
+  op: string,
+): ReleaseRecord[] {
+  const prefix = op.replace(/ -->$/, " ");
+  const records: ReleaseRecord[] = [];
+  for (const c of comments) {
+    const at = c.body.indexOf(prefix);
+    if (at < 0) continue;
+    const endAt = c.body.indexOf(" -->", at + prefix.length);
+    try {
+      const r = JSON.parse(c.body.slice(at + prefix.length, endAt)) as ReleaseRecord;
+      if (r.v === 1 && Array.isArray(r.remove) && Array.isArray(r.retained))
+        records.push({ ...r, createdAt: c.createdAt ?? "" });
+    } catch {
+      // Not a parsable record: never treated as authorisation.
+    }
+  }
+  return records.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+function labelSteps(
+  repository: string,
+  number: number,
+  add: string[],
+  remove: string[],
+  repoLabels: Set<string>,
+): PlanStep[] {
+  const changes: PlanStep[] = add
+    .filter((l) => !repoLabels.has(l))
+    .map((name) => ({
+      step: "create-label",
+      command: [
+        "label",
+        "create",
+        name,
+        "--repo",
+        repository,
+        "--color",
+        claimPolicy.labelColours[name] ?? "ededed",
+      ],
+    }));
+  if (add.length || remove.length)
+    changes.push({
+      step: "labels",
+      command: [
+        "issue",
+        "edit",
+        String(number),
+        "--repo",
+        repository,
+        ...add.flatMap((l) => ["--add-label", l]),
+        ...remove.flatMap((l) => ["--remove-label", l]),
+      ],
+    });
+  return changes;
+}
+
 /** Live read of one ticket plus the agent's open claims. */
 async function readTicket(
   repository: string,
@@ -572,9 +647,10 @@ async function readPullRequest(url: string, query: GraphQuery): Promise<string |
  * Plan `release N --agent NAME --as ready|incomplete|parked|done [--note TEXT] [--pr URL|--change URL]`
  * (#62, doc/design/workflow.md "Focused handoff"). Reads only.
  *
- * The outcome is always the agent's explicit choice. Labels change first, so released work is
- * never left unpickable by a failed comment; the comment carries an operation marker tied to the
- * claim being released, so a retry completes a missing comment without duplicating one.
+ * The outcome is always the agent's explicit choice. The handoff comment is posted first and
+ * records the whole label plan (target, labels to remove, owners retained, claim time) in a
+ * hidden marker; labels change second. A retry is accepted only on that recorded intent: it
+ * completes exactly the recorded label plan, or refuses if ownership/readiness changed since.
  */
 export async function planRelease(
   repository: string,
@@ -607,7 +683,8 @@ export async function planRelease(
       [`gh pr view ${number} --repo ${repository}`],
     );
   const linkedOpen = item.closedByPullRequestsReferences.nodes.filter((p) => p.state === "OPEN");
-  const openPr = prState === "OPEN" || (!pr && linkedOpen.length > 0);
+  // A verified open closing PR establishes review whatever state a supplied --pr has.
+  const openPr = prState === "OPEN" || linkedOpen.length > 0;
   const target = outcome === "done" ? (openPr ? claimPolicy.awaitingReview : null) : preliminary;
   const facts = {
     number,
@@ -637,31 +714,77 @@ export async function planRelease(
     ...(change ? [`--change ${shellQuote(change)}`] : []),
   ].join(" ");
   const retry = command(args);
-  // The operation identity is the claim being released (when its label was last added), so a
-  // retry finds its own comment whatever wording changed, and a later claim gets a new one.
-  const since = (item.timelineItems?.nodes ?? [])
-    .filter((e) => e.label?.name === mine)
-    .map((e) => e.createdAt ?? "")
-    .sort((a, b) => a.localeCompare(b))
+  // The operation identity is the claim being released (when its label was last added). The
+  // handoff comment is posted BEFORE any label changes and carries the full label plan, so a
+  // retry is authorised only by that durable record of intent, never by label history alone.
+  const labelled = (item.timelineItems?.nodes ?? []).filter((e) => e.label && e.createdAt);
+  const since =
+    labelled
+      .filter((e) => e.label!.name === mine)
+      .map((e) => e.createdAt!)
+      .sort((a, b) => a.localeCompare(b))
+      .at(-1) ?? null;
+  const op = marker("release", [repository, number, agent, since]);
+  const record = releaseRecords(item.comments.nodes, op)
+    .filter((r) => r.agent === agent && r.claimedAt === since)
     .at(-1);
-  const op = marker("release", [repository, number, agent, since ?? null]);
-  const recorded = item.comments.nodes.some(
-    (c) => c.body.includes(op) && (!since || !c.createdAt || c.createdAt >= since),
-  );
   const holds = label(item, mine);
-  if (!holds && recorded)
+  const others = facts.owners.filter((o) => o !== mine);
+  if (record) {
+    const recordedRetry = command(`release ${number} --agent ${agent} --as ${record.outcome}`);
+    const recorded = { ...facts, outcome: record.outcome, target: record.target };
+    const same = (a: string[], b: string[]): boolean =>
+      a.length === b.length && a.every((x) => b.includes(x));
+    const complete =
+      (!record.target || label(item, record.target)) &&
+      !record.remove.some((l) => label(item, l)) &&
+      same(others, record.retained);
+    if (complete)
+      return {
+        ok: true,
+        noop: true,
+        facts: recorded,
+        reason: `Handoff already recorded and ${agent}'s claim already released.`,
+        changes: [],
+      };
+    // Anything another party did after the record (a new owner, a readiness label other than
+    // the recorded target) means the recorded plan no longer describes the ticket.
+    const handoffStates = [...workflow.readiness, claimPolicy.awaitingReview];
+    const later = labelled
+      .filter((e) => e.createdAt! > record.createdAt)
+      .map((e) => e.label!.name)
+      .filter(
+        (n) =>
+          n !== record.target && (n.startsWith(workflow.ownerPrefix) || handoffStates.includes(n)),
+      );
+    if (later.length || !same(others, record.retained))
+      return refuse(
+        "RELEASE_DIVERGED",
+        recorded,
+        `A handoff was recorded for ${agent}'s claim at ${record.createdAt}, but ownership or readiness changed afterwards (${[...new Set([...later, ...others.filter((o) => !record.retained.includes(o))])].join(", ") || "retained owners removed"}); the recorded label plan is not applied. Inspect and coordinate on the ticket.`,
+        [command(`who ${number}`), `${triage} --issue ${number}`],
+      );
+    if (outcome !== record.outcome)
+      return refuse(
+        "RELEASE_PENDING",
+        recorded,
+        `A ${record.outcome} handoff is already recorded for this claim and its labels are not yet applied; complete it with the recorded outcome.`,
+        [recordedRetry],
+      );
+    const add = record.target && !label(item, record.target) ? [record.target] : [];
+    const remove = record.remove.filter((l) => label(item, l));
     return {
       ok: true,
-      noop: true,
-      facts,
-      reason: `Handoff already recorded and ${agent}'s claim already released.`,
-      changes: [],
+      noop: false,
+      facts: recorded,
+      reason: "Handoff comment already recorded; applying its recorded label changes.",
+      changes: labelSteps(repository, number, add, remove, repoLabels),
+      notes: record.retained.length ? [`Other owners kept: ${record.retained.join(", ")}.`] : [],
+      recheck: { agent, release: { target: record.target } },
+      retry: recordedRetry,
     };
-  const others = facts.owners.filter((o) => o !== mine);
-  // A label-only partial release (comment failed): the claim label was added before and is
-  // gone, the recorded target is in place, no handoff comment for that claim exists.
-  const partial = !holds && !!since && !others.length && (target ? label(item, target) : true);
-  if (!holds && !partial)
+  }
+  if (!holds)
     return refuse(
       "NOT_CLAIMED",
       facts,
@@ -696,38 +819,18 @@ export async function planRelease(
   if (held.length) notes.push(`Kept unrelated state: ${held.join(", ")}.`);
   // Exactly one handoff readiness state; questions, blockers, attention and others untouched.
   const handoff = [...claimPolicy.pickable, claimPolicy.awaitingReview];
-  const remove = [
-    ...(holds ? [mine] : []),
-    ...handoff.filter((l) => l !== target && label(item, l)),
-  ];
+  const remove = [mine, ...handoff.filter((l) => l !== target && label(item, l))];
   const add = target && !label(item, target) ? [target] : [];
-  const changes: PlanStep[] = [];
-  for (const name of add.filter((l) => !repoLabels.has(l)))
-    changes.push({
-      step: "create-label",
-      command: [
-        "label",
-        "create",
-        name,
-        "--repo",
-        repository,
-        "--color",
-        claimPolicy.labelColours[name] ?? "ededed",
-      ],
-    });
-  if (add.length || remove.length)
-    changes.push({
-      step: "labels",
-      command: [
-        "issue",
-        "edit",
-        String(number),
-        "--repo",
-        repository,
-        ...add.flatMap((l) => ["--add-label", l]),
-        ...remove.flatMap((l) => ["--remove-label", l]),
-      ],
-    });
+  const plan: ReleaseRecord = {
+    v: 1,
+    agent,
+    outcome,
+    target,
+    remove,
+    retained: others,
+    claimedAt: since,
+    createdAt: "",
+  };
   const describe =
     outcome === "done"
       ? target
@@ -736,6 +839,7 @@ export async function planRelease(
       : outcome === "parked"
         ? `incomplete (parked; \`${target}\`)`
         : `${outcome} (\`${target}\`)`;
+  const changes: PlanStep[] = [];
   changes.push({
     step: "comment",
     command: [
@@ -746,7 +850,7 @@ export async function planRelease(
       repository,
       "--body",
       [
-        `Handoff by \`${agent}\` with \`github-triage release\`: **${describe}**. Claim released.`,
+        `Handoff by \`${agent}\` with \`github-triage release\`: **${describe}**. Releasing the claim.`,
         "",
         ...(pr
           ? [`Pull request: ${pr}${prState ? ` (${prState})` : " (state unknown)"}`, ""]
@@ -755,15 +859,15 @@ export async function planRelease(
             : []),
         note ? `**Note:** ${note}` : "_No handoff note supplied._",
         "",
-        op,
+        releaseMarker(op, plan),
       ].join("\n"),
     ],
   });
+  changes.push(...labelSteps(repository, number, add, remove, repoLabels));
   return {
     ok: true,
     noop: false,
     facts,
-    reason: partial ? "Claim already released; recording the missing handoff comment." : undefined,
     changes,
     notes,
     recheck: { agent, release: { target } },
