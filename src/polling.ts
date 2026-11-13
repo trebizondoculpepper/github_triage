@@ -11,7 +11,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { analysisRules, prChecks, workflow } from "./briefing.js";
 import { RateLimitError } from "./dependencies.js";
 import type { collect as collectFn } from "./github.js";
-import { pickupEligibility } from "./ranking.js";
+import { closingPrEvidence, pickupEligibility } from "./ranking.js";
 import type { Issue, Snapshot } from "./types.js";
 
 export const eventKinds = [
@@ -144,10 +144,9 @@ export function observe(snapshot: Snapshot, observedAt: string): Observation {
       .filter((action) => action.rule === "pr-inspect-merge")
       .map((action) => action.target),
   );
-  // Cross-subject evidence: an issue's eligibility rests on every open PR's closing
-  // references (openClosingPrs). If any PR's references are truncated, no issue can be proven
-  // to lack an open closing PR, so every issue's evidence is incomplete for this poll.
-  const closingTruncated = prs.some((pr) => pr.closingIssuesReferences.pageInfo.hasNextPage);
+  // Cross-subject evidence: an issue's eligibility rests on the closing link (closingPrEvidence,
+  // shared with pickup ranking). When an open PR's references are truncated and the issue's
+  // own reverse link cannot prove absence, the issue's evidence is incomplete for this poll.
   const subjects = new Map<string, SubjectObservation>();
   const add = (
     item: Issue,
@@ -189,7 +188,7 @@ export function observe(snapshot: Snapshot, observedAt: string): Observation {
       issue,
       "issue",
       eligibility,
-      !incomplete.has(issue.url) && !closingTruncated,
+      !incomplete.has(issue.url) && closingPrEvidence(issue, prs).complete,
     );
     attention(subject, issue);
     if (eligibility === "eligible")

@@ -73,13 +73,54 @@ export interface PickupContext {
   platform?: string;
 }
 
-/** Open pull requests that would close the issue; such an issue is PR follow-up, not pickup. */
-export const openClosingPrs = (issue: Issue, prs: PullRequest[]): PullRequest[] =>
-  prs.filter(
-    (pr) =>
-      pickupPolicy.openStates.includes(pr.state) &&
-      pr.closingIssuesReferences.nodes.some((ref) => ref.url === issue.url),
-  );
+/**
+ * What is known about the open pull requests that would close an issue (#162). Such an issue is
+ * PR follow-up, not pickup. Presence is proven by either side of the link: an open PR's
+ * `closingIssuesReferences` naming the issue, or the issue's own `closedByPullRequestsReferences`
+ * naming an open PR. Absence needs a complete side: every open PR's closing references are
+ * untruncated, or the issue's reverse link is present and untruncated. Otherwise `complete` is
+ * false and the absence of an open closing PR is unknown, never assumed.
+ *
+ * The one rule shared by pickup eligibility, design pickup, polling and Ticket Doctor.
+ */
+export interface ClosingPrEvidence {
+  /** Open closing PR numbers proven by either side of the link, ascending. */
+  open: number[];
+  /** False when no open closing PR was found and its absence cannot be proven. */
+  complete: boolean;
+  /** Why absence is unproven; empty when complete. */
+  reasons: string[];
+}
+
+const isOpen = (state: string | undefined): boolean =>
+  !!state && pickupPolicy.openStates.includes(state);
+
+export function closingPrEvidence(issue: Issue, prs: PullRequest[]): ClosingPrEvidence {
+  const open = new Set<number>();
+  const truncated: number[] = [];
+  for (const pr of prs) {
+    if (!isOpen(pr.state)) continue;
+    if (pr.closingIssuesReferences.nodes.some((ref) => ref.url === issue.url)) open.add(pr.number);
+    if (pr.closingIssuesReferences.pageInfo?.hasNextPage) truncated.push(pr.number);
+  }
+  const reverse = issue.closedByPullRequestsReferences;
+  for (const node of reverse?.nodes ?? []) if (isOpen(node.state)) open.add(node.number);
+  const reverseComplete = !!reverse && !reverse.pageInfo?.hasNextPage;
+  const complete = open.size > 0 || !truncated.length || reverseComplete;
+  return {
+    open: [...open].sort((a, b) => a - b),
+    complete,
+    reasons: complete
+      ? []
+      : [
+          `open closing PR unknown: closing references truncated on open PR ${truncated.map((n) => `#${n}`).join(", ")}${reverse ? " and the issue's closing-PR list is truncated" : " and the issue's closing-PR list was not collected"}`,
+        ],
+  };
+}
+
+/** Open closing PR numbers proven by either side of the link (see closingPrEvidence). */
+export const openClosingPrs = (issue: Issue, prs: PullRequest[]): number[] =>
+  closingPrEvidence(issue, prs).open;
 
 /**
  * The eligibility gates other than native blockers. Shared by the ticket itself and by the
@@ -95,20 +136,19 @@ function otherwiseEligible(issue: Issue, context: PickupContext): Eligibility {
     hard.push(`not labelled ${pickupPolicy.available.join(" or ")}`);
   const prerequisites = tags.filter((tag) => pickupPolicy.prerequisites.includes(tag));
   if (prerequisites.length) hard.push(`outstanding prerequisite: ${prerequisites.join(", ")}`);
-  const linked = openClosingPrs(issue, context.prs);
-  if (linked.length)
-    hard.push(`open closing PR ${linked.map((pr) => `#${pr.number}`).join(", ")} (PR follow-up)`);
+  const closing = closingPrEvidence(issue, context.prs);
+  if (closing.open.length)
+    hard.push(`open closing PR ${closing.open.map((n) => `#${n}`).join(", ")} (PR follow-up)`);
   const platforms = platformsOf(issue);
   if (platforms.length && context.platform && !platforms.includes(context.platform))
     hard.push(`restricted to platform ${platforms.join(" or ")}; viewer is ${context.platform}`);
   if (hard.length) return { status: "ineligible", reasons: hard };
+  const unknown = [...closing.reasons];
   if (platforms.length && !context.platform)
-    return {
-      status: "unknown",
-      reasons: [
-        `restricted to platform ${platforms.join(" or ")}; viewer platform unknown (state --platform)`,
-      ],
-    };
+    unknown.push(
+      `restricted to platform ${platforms.join(" or ")}; viewer platform unknown (state --platform)`,
+    );
+  if (unknown.length) return { status: "unknown", reasons: unknown };
   return { status: "eligible", reasons: [] };
 }
 

@@ -10,7 +10,7 @@
  */
 import { isParked, owners } from "./briefing.js";
 import type { Bounded, Briefing } from "./briefing.js";
-import { immediateUnlocks, openClosingPrs, platformsOf } from "./ranking.js";
+import { closingPrEvidence, immediateUnlocks, platformsOf } from "./ranking.js";
 import type { Action, Issue, PullRequest, Snapshot } from "./types.js";
 
 /** One row of a role section: the subject and why it is here, in this position. */
@@ -106,18 +106,33 @@ const platformGate = (item: Issue, context: RoleContext): "mismatch" | "unknown"
   if (!viewer) return "unknown";
   return platforms.includes(viewer) ? null : "mismatch";
 };
-/** Unclaimed, unparked, undecided pending-design tickets without an open closing PR. */
-const designCandidates = (context: RoleContext): Issue[] => {
-  const prs = openPrs(context);
-  return openIssues(context).filter(
+/** Unclaimed, unparked, undecided pending-design tickets, before closing-PR evidence. */
+const pendingDesign = (context: RoleContext): Issue[] =>
+  openIssues(context).filter(
     (item) =>
       labelsOf(item).includes(designPolicy.pendingDesign) &&
       !owners(item).length &&
       !labelsOf(item).includes(designPolicy.decisionNeeded) &&
-      nextStepAllowed(item, context) &&
-      // An open closing PR is represented by DESIGN REVIEW, as pickup eligibility excludes it.
-      !openClosingPrs(item, prs).length,
+      nextStepAllowed(item, context),
   );
+/** Pending-design tickets proven to have no open closing PR. */
+const designCandidates = (context: RoleContext): Issue[] => {
+  const prs = openPrs(context);
+  // An open closing PR is represented by DESIGN REVIEW, as pickup eligibility excludes it.
+  return pendingDesign(context).filter((item) =>
+    ((closing) => closing.complete && !closing.open.length)(closingPrEvidence(item, prs)),
+  );
+};
+/**
+ * Pending-design tickets whose absence of an open closing PR cannot be proven (truncated closing
+ * references, no complete reverse link): inspection only, with the evidence reasons.
+ */
+const designClosingUnknown = (context: RoleContext): { item: Issue; reasons: string[] }[] => {
+  const prs = openPrs(context);
+  return pendingDesign(context).flatMap((item) => {
+    const closing = closingPrEvidence(item, prs);
+    return !closing.complete && !closing.open.length ? [{ item, reasons: closing.reasons }] : [];
+  });
 };
 
 /** Unclaimed open issues another open ticket or PR is waiting on. */
@@ -263,15 +278,25 @@ sectionSelectors.set("design-pickup", (context) => {
       reason: `Unclaimed design work; immediately unlocks ${unlocks.length}${unlocks.length ? ` (${unlocks.map((n) => `#${n}`).join(", ")})` : ""} otherwise-ready ticket(s).`,
     }));
 });
-// Platform-restricted design work while the viewer platform is unknown: inspection only.
+// Possible design work that cannot be offered as pickup: the viewer platform is unknown for a
+// restricted ticket, or an open closing PR cannot be ruled out. Inspection only, with reasons.
 sectionSelectors.set("design-pickup-inspect", (context) =>
-  designCandidates(context)
-    .filter((item) => platformGate(item, context) === "unknown")
-    .sort(byNumber)
-    .map((item) => ({
-      url: item.url,
-      reason: `Possible design work restricted to platform ${platformsOf(item).join(" or ")}; viewer platform unknown (state --platform). Inspect only.`,
-    })),
+  [
+    ...designCandidates(context)
+      .filter((item) => platformGate(item, context) === "unknown")
+      .map((item) => ({
+        item,
+        reason: `Possible design work restricted to platform ${platformsOf(item).join(" or ")}; viewer platform unknown (state --platform). Inspect only.`,
+      })),
+    ...designClosingUnknown(context)
+      .filter(({ item }) => platformGate(item, context) !== "mismatch")
+      .map(({ item, reasons }) => ({
+        item,
+        reason: `Possible design work, but an open closing PR cannot be ruled out: ${reasons.join("; ") || "closing-PR evidence incomplete"}. Inspect only.`,
+      })),
+  ]
+    .sort((a, b) => byNumber(a.item, b.item))
+    .map(({ item, reason }) => ({ url: item.url, reason })),
 );
 sectionSelectors.set("implementation-prs", (context) =>
   openPrs(context)
