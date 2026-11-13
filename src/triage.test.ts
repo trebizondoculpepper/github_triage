@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
@@ -8264,6 +8264,59 @@ x = 1
       }),
     ).rejects.toMatchObject({ code: "conflict" });
   });
+
+  it("refuses a tracked file and excludes an unignored one even when the value is unchanged", async () => {
+    const equal = '[agents.codex]\nname = "stable_one"\ntriage_role = "designer"\n';
+    const tracked = setup(equal, { tracked: true, ignored: true });
+    await expect(
+      setIdentity({ root, repository: null }, "codex", "identity.triage_role", "designer", {
+        fs: tracked.fs,
+        git: tracked.git,
+      }),
+    ).rejects.toMatchObject({ code: "tracked" });
+    expect(tracked.files.get(file)).toBe(equal);
+
+    const unignored = setup(equal);
+    const write = await setIdentity(
+      { root, repository: null },
+      "codex",
+      "identity.triage_role",
+      "designer",
+      { fs: unignored.fs, git: unignored.git },
+    );
+    expect(write).toMatchObject({ changed: false, excluded: true });
+    expect(unignored.files.get(exclude)).toBe(`/${IDENTITY_FILE}\n`);
+    expect(unignored.files.get(file)).toBe(equal);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "creates the identity file 0600 and keeps an existing file's mode on replace",
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), "triage-identity-mode-"));
+      const previous = process.umask(0o022);
+      try {
+        await new Promise<void>((resolve, reject) =>
+          execFile("git", ["init", "-q"], { cwd: dir }, (error) =>
+            error ? reject(error) : resolve(),
+          ),
+        );
+        const target = await resolveIdentityTarget(dir, undefined);
+        const path = join(target.root, IDENTITY_FILE);
+        await setIdentity(target, "codex", "identity.triage_role", "designer", {
+          random: () => 0.1,
+        });
+        expect((await stat(path)).mode & 0o777).toBe(0o600);
+        await setIdentity(target, "codex", "identity.triage_role", "implementer");
+        expect((await stat(path)).mode & 0o777).toBe(0o600);
+        await chmod(path, 0o640);
+        await setIdentity(target, "codex", "identity.triage_role", "designer");
+        expect((await stat(path)).mode & 0o777).toBe(0o640);
+      } finally {
+        process.umask(previous);
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("resolves the working-tree root from nested directories and linked worktrees", async () => {
     const dir = await mkdtemp(join(tmpdir(), "triage-identity-"));

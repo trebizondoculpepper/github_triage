@@ -28,6 +28,9 @@ import type { ConfigFileSystem, GitRunner } from "./config.js";
 /** Root-relative identity file name (shared format with the agent-inbox tooling). */
 export const IDENTITY_FILE = "agent-inbox.toml";
 
+/** Permission bits for a newly created identity file (owner read/write only). */
+const PRIVATE_FILE_MODE = 0o600;
+
 /** Accepted `triage_role` values. Independent of any generic `role` key, which is preserved. */
 export const TRIAGE_ROLES = ["implementer", "designer"] as const;
 export type TriageRole = (typeof TRIAGE_ROLES)[number];
@@ -499,12 +502,15 @@ export async function setIdentity(
     );
   }
   if (identityValue(before, key) === value) {
+    // An unchanged value still refuses a tracked file and establishes missing exclusion; the
+    // identity contents are left untouched.
+    const excludedOnly = await ensureExcluded(target.root, git, fs, token);
     return {
       changed: false,
       createdFile: false,
       createdEntry: false,
       generatedName: null,
-      excluded: false,
+      excluded: excludedOnly,
       record: before,
     };
   }
@@ -525,8 +531,13 @@ export async function setIdentity(
 
   // Exclusion is established before the file can be created or rewritten.
   const excluded = await ensureExcluded(target.root, git, fs, token);
+  // The file may hold other tools' credentials: keep it private. A new file is 0600; a
+  // replaced file keeps its original mode, and the temporary copy is never more permissive
+  // than either. Mode handling is a no-op where unsupported (Windows).
+  const originalMode = raw === null ? null : ((await fs.fileMode?.(path)) ?? null);
+  const finalMode = originalMode ?? PRIVATE_FILE_MODE;
   const temporary = `${path}.${token()}.tmp`;
-  await fs.writeText(temporary, text);
+  await fs.writeText(temporary, text, finalMode & PRIVATE_FILE_MODE);
   try {
     if ((await fs.readText(path)) !== raw) throw conflict();
     await fs.rename(temporary, path);
@@ -534,6 +545,7 @@ export async function setIdentity(
     await fs.remove(temporary).catch(() => undefined);
     throw error;
   }
+  await fs.setFileMode?.(path, finalMode);
   return {
     changed: true,
     createdFile: raw === null,
