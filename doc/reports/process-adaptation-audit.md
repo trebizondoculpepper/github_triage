@@ -23,7 +23,9 @@ The project already has the practical architecture it needs: evidence-first inta
 | Abstract checks/review assumptions                                          | doc/repository-settings.md; implemented verify matrix and installed-archive checks      | Use documented actual gates, not inherited game assumptions; inspect current-head review evidence before merge                                                |
 | Plain JavaScript precedent                                                  | doc/design/typescript.md, owner decision #91/#93                                        | Superseded: maintained first-party code is TypeScript, with deliberate documented ancillary-language integrations                                             |
 
-The false-completion cases are an observed reason to distinguish contribution completion from ticket completion. This audit does not infer intent from who closed a ticket. They were reopened with explicit remaining work; it is not evidence that the underlying features or experiment were implemented.
+The false-completion cases are an observed reason to distinguish contribution completion from ticket completion. A subsequent timeline audit identified the concrete cause: the designer's PR descriptions negated a closing keyword beside an issue reference. GitHub nevertheless associated the automatic closures of #78/#71/#25/#32 with PRs #83/#85/#87/#96. This was a PR-description mistake, not evidence that another agent implemented the outstanding work. The references were changed to neutral tracking wording and those tickets reopened.
+
+For partial/design phases, use `References #N` and state what remains. Avoid a negated closing directive beside a real numeric issue reference; the negation did not protect these tickets. Use intentional closing syntax only when the declared ticket acceptance is complete, and inspect issue state after merge. The TypeScript migration #91 was not closed by its docs PR; a subsequent full intake confirmed its open state and the implementer's recorded claim.
 
 ## Small active workflow, without new governance machinery
 
