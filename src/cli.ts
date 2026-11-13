@@ -16,6 +16,7 @@ import {
 } from "./dependencies.js";
 import { roleNames, roleRegistry } from "./roles.js";
 import { prStatusText, pullRequestStatus } from "./prstatus.js";
+import { pullRequestReviewHistory, reviewHistoryText } from "./reviewhistory.js";
 import { doctorStaleHours, ticketDoctor, ticketDoctorText } from "./ticketdoctor.js";
 import { applyPlan, claimText, planClaim, planNeedsHuman } from "./claims.js";
 import { checkForUpdate, installedVersion, optOutEnv, updateAdvisory } from "./updates.js";
@@ -91,6 +92,7 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   estimate N --size S --rationale TEXT [--assumption A]... [--replace OLD]  Record a size
                         in the mapped native field with provenance (estimate --help)
   pr N                  Why is pull request N not progressing? Every blocker at once
+  pr N --history        Why does PR N keep failing review? Rounds, findings, recurring files
   claim N --agent NAME [--branch B] [--platform P] [--dry-run]  Claim an eligible ticket
   needs-human N --agent NAME --designer NAME --why TEXT --question TEXT... [--dry-run]
                         Record questions for a designer and mark the ticket decision-needed
@@ -598,13 +600,28 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
     const { values, positionals } = parseArgs({
       args: args.slice(1),
       allowPositionals: true,
-      options: { repo: { type: "string" }, json: { type: "boolean" } },
+      options: {
+        repo: { type: "string" },
+        json: { type: "boolean" },
+        history: { type: "boolean" },
+      },
     });
     if (positionals.length !== 1 || !/^[1-9]\d*$/.test(positionals[0]))
-      throw new Error("Usage: github-triage pr N [--json] [--repo owner/name]");
+      throw new Error("Usage: github-triage pr N [--history] [--json] [--repo owner/name]");
     if (values.repo && !/^[\w.-]+\/[\w.-]+$/.test(values.repo))
       throw new Error("--repo must be owner/name.");
     const repository = values.repo ?? (await runtime.currentRepository());
+    if (values.history) {
+      const history = await pullRequestReviewHistory(
+        repository,
+        Number(positionals[0]),
+        runtime.query ?? ghQuery,
+      );
+      await output(
+        values.json ? JSON.stringify(history, null, 2) + "\n" : reviewHistoryText(history),
+      );
+      return history.completeness.complete ? 0 : 2;
+    }
     const report = await pullRequestStatus(
       repository,
       Number(positionals[0]),
