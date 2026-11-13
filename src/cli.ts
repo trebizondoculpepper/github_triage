@@ -30,6 +30,8 @@ import { runConfig } from "./configcli.js";
 import type { ConfigRuntime } from "./configcli.js";
 import { runSetup, terminalPrompt } from "./complexitysetup.js";
 import type { SetupRuntime } from "./complexitysetup.js";
+import { estimateUsage, runEstimate } from "./estimate.js";
+import type { EstimateRuntime } from "./estimate.js";
 import { diagnoseComplexityConfig } from "./complexitydoctor.js";
 import type { ComplexityDoctorRuntime } from "./complexitydoctor.js";
 import type { GhRun } from "./dependencies.js";
@@ -69,6 +71,8 @@ export interface Runtime {
   config?: ConfigRuntime;
   /** Filesystem, git, GitHub field API and prompt for `setup complexity`. */
   setup?: SetupRuntime;
+  /** Filesystem, git, GitHub field API and clock for `estimate N`. */
+  estimate?: EstimateRuntime;
   /** Filesystem, git and GitHub field API for Ticket Doctor's configuration checks. */
   doctor?: ComplexityDoctorRuntime;
 }
@@ -80,7 +84,9 @@ export const help = `Usage: github-triage [options]
 Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   deps N [--tree]       Read native upstream/downstream dependencies (deps --help)
   deps add|remove N --on M --note WHY [--dry-run]  Change native dependencies
-  estimate --help       Complexity sizing guidance (XS..XXL); recording is not yet available
+  estimate --help       Complexity sizing guidance (XS..XXL)
+  estimate N --size S --rationale TEXT [--assumption A]... [--replace OLD]  Record a size
+                        in the mapped native field with provenance (estimate --help)
   pr N                  Why is pull request N not progressing? Every blocker at once
   claim N --agent NAME [--branch B] [--platform P] [--dry-run]  Claim an eligible ticket
   needs-human N --agent NAME --designer NAME --why TEXT --question TEXT... [--dry-run]
@@ -118,7 +124,8 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   version               Show the installed version and the update check result
   --help                Show usage
 Exit: 0 complete; 2 incomplete evidence; 1 invalid arguments/API/cache failure.
-The briefing never changes GitHub; only deps add/remove, claim and needs-human do;
+The briefing never changes GitHub; only deps add/remove, claim, needs-human
+and estimate N do;
 config set changes only the local .github/triage.json; setup complexity may
 also create an owner-wide issue field, only after --create/confirmation. Hints require inspection.
 `;
@@ -558,18 +565,18 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
     return report.completeness.complete ? 0 : 2;
   }
   if (args[0] === "estimate") {
-    const { values, positionals } = parseArgs({
-      args: args.slice(1),
-      allowPositionals: true,
-      options: { help: { type: "boolean" }, json: { type: "boolean" } },
-    });
-    // Only the bundled guidance exists; never present recording as installed.
-    if (!values.help || positionals.length)
-      throw new Error(
-        "Usage: github-triage estimate --help [--json] (recording estimates is not yet available)",
+    const rest = args.slice(1);
+    if (rest.includes("--help")) {
+      if (rest.some((a) => a !== "--help" && a !== "--json"))
+        throw new Error("Usage: github-triage estimate --help [--json]");
+      await output(
+        rest.includes("--json")
+          ? complexityGuidanceJson()
+          : `${estimateUsage}\n\n${complexityGuidanceText()}`,
       );
-    await output(values.json ? complexityGuidanceJson() : complexityGuidanceText());
-    return 0;
+      return 0;
+    }
+    return runEstimate(rest, output, { now: runtime.now, ...runtime.estimate });
   }
   if (args[0] === "pr") {
     const { values, positionals } = parseArgs({

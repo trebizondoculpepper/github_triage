@@ -39,6 +39,8 @@ import {
 import { briefing, dependencyDone, textReport } from "./briefing.js";
 import { complexityGuidance } from "./complexity.js";
 import { classifyField } from "./complexitysetup.js";
+import { MAX_COMMENT_PAGES, parseProvenance, provenanceComment } from "./estimate.js";
+import type { EstimateProvenance } from "./estimate.js";
 import { complexityConfigText, diagnoseComplexityConfig } from "./complexitydoctor.js";
 import {
   collect,
@@ -3906,17 +3908,22 @@ describe("bundled complexity guidance (#118)", () => {
     expect(text).toMatch(/not hours/);
     expect(text).toMatch(/waiting/);
     expect(text).toMatch(/no anchors/);
-    expect(text).toContain("not yet available");
+    expect(text).toContain("--rationale TEXT");
     // Repository-neutral: no ticket/PR numbers from any repository are bundled.
     expect(json).not.toMatch(/#\d+/);
   });
-  it("lists estimate in top-level help and refuses unimplemented recording", async () => {
+  it("lists estimate in top-level help and validates recording arguments first", async () => {
     let text = "";
     await main(["--help"], async (t) => void (text = t), offline);
     expect(text).toContain("estimate --help");
-    await expect(main(["estimate", "12", "M"], async () => {}, offline)).rejects.toThrow(
-      "not yet available",
+    expect(text).toContain("estimate N --size S --rationale TEXT");
+    await expect(main(["estimate", "12", "M"], async () => {}, offline)).rejects.toThrow("Usage:");
+    await expect(main(["estimate", "12", "--size", "M"], async () => {}, offline)).rejects.toThrow(
+      "--rationale is required",
     );
+    await expect(
+      main(["estimate", "12", "--size", "huge", "--rationale", "x"], async () => {}, offline),
+    ).rejects.toThrow("--size must be one of");
     await expect(main(["estimate"], async () => {}, offline)).rejects.toThrow("Usage:");
   });
 });
@@ -4057,6 +4064,420 @@ describe("config get/set/list/help commands (#117)", () => {
     const top: string[] = [];
     await main(["--help", "--no-update-check"], async (x) => void top.push(x));
     expect(top.join("")).toContain("config get KEY | set KEY VALUE | list | help [KEY]");
+  });
+});
+
+describe("estimate N records a size with provenance (#121)", () => {
+  const root = "/repo";
+  const path = join(root, CONFIG_PATH);
+  const sha = "a".repeat(40);
+  const mapped = '{"schemaVersion":1,"complexity":{"fieldId":"IF_c"}}\n';
+  const field = {
+    __typename: "IssueFieldSingleSelect",
+    id: "IF_c",
+    name: "Complexity",
+    dataType: "SINGLE_SELECT",
+    visibility: "ALL",
+    options: ["XS", "S", "M", "L", "XL", "XXL"].map((name) => ({ id: `O_${name}`, name })),
+  };
+  type Answer = { data: unknown; errors: { type?: string; message?: string }[] };
+  function harness(
+    options: {
+      config?: string | null;
+      current?: string | null;
+      comments?: string[];
+      fieldNode?: unknown;
+      queryErrors?: Answer["errors"];
+      /** Change the remote value after the Nth query (simulates a concurrent writer). */
+      concurrent?: { afterQuery: number; size?: string; comment?: string };
+      /** Fail the Nth older-comments page query with GraphQL errors. */
+      failPage?: number;
+      failSet?: Answer;
+      failComment?: boolean;
+      /** Degrade the Nth query: GraphQL errors and/or issueFieldValues missing. */
+      degrade?: { onQuery: number; errors?: Answer["errors"]; dropValues?: boolean };
+    } = {},
+  ) {
+    const files = new Map<string, string>();
+    const config = options.config === undefined ? mapped : options.config;
+    if (config !== null) files.set(path, config);
+    const fs: ConfigFileSystem = {
+      readText: async (file) => files.get(file) ?? null,
+      writeText: async () => {
+        throw new Error("estimate must not write config");
+      },
+      rename: async () => undefined,
+      remove: async () => undefined,
+      makeDirectory: async () => undefined,
+    };
+    const git: GitRunner = async (args) =>
+      args[0] === "rev-parse"
+        ? args[1] === "HEAD"
+          ? `${sha}\n`
+          : `${root}\n`
+        : "origin\thttps://github.com/owner/name.git (fetch)\n";
+    const remote = { current: options.current ?? null, comments: [...(options.comments ?? [])] };
+    const mutations: { query: string; vars: Record<string, string> }[] = [];
+    let queries = 0;
+    let pageQueries = 0;
+    // Comment pages are served newest-last, 100 at a time; a cursor is the start index.
+    const page = (end: number) => {
+      const start = Math.max(0, end - 100);
+      return {
+        pageInfo: { hasPreviousPage: start > 0, startCursor: String(start) },
+        nodes: remote.comments.slice(start, end).map((body) => ({ body })),
+      };
+    };
+    const answer = (): Answer => ({
+      data: {
+        field: options.fieldNode === undefined ? field : options.fieldNode,
+        repository: {
+          issue: {
+            id: "I_7",
+            state: "OPEN",
+            issueFieldValues: {
+              nodes: remote.current
+                ? [
+                    {
+                      __typename: "IssueFieldSingleSelectValue",
+                      name: remote.current,
+                      field: { id: "IF_c" },
+                    },
+                  ]
+                : [],
+            },
+            comments: page(remote.comments.length),
+          },
+        },
+      },
+      errors: options.queryErrors ?? [],
+    });
+    const out: string[] = [];
+    const call = (...args: string[]) =>
+      main(["estimate", "7", ...args, "--no-update-check"], async (t) => void out.push(t), {
+        collect: async () => {
+          throw new Error("no GitHub");
+        },
+        currentRepository: async () => {
+          throw new Error("no GitHub");
+        },
+        now: () => new Date("2026-11-13T12:00:00Z"),
+        estimate: {
+          fs,
+          git,
+          cwd: root,
+          api: {
+            query: async (query, vars) => {
+              if (query.includes("$before")) {
+                pageQueries += 1;
+                if (options.failPage === pageQueries)
+                  return { data: null, errors: [{ type: "INTERNAL", message: "timeout" }] };
+                return {
+                  data: { repository: { issue: { comments: page(Number(vars.before)) } } },
+                  errors: [],
+                };
+              }
+              queries += 1;
+              const a = answer();
+              const d = options.degrade;
+              if (d && queries === d.onQuery) {
+                if (d.errors) a.errors = d.errors;
+                if (d.dropValues)
+                  delete (a.data as { repository: { issue: Record<string, unknown> } }).repository
+                    .issue.issueFieldValues;
+              }
+              const c = options.concurrent;
+              if (c && queries === c.afterQuery) {
+                if (c.size) remote.current = c.size;
+                if (c.comment) remote.comments.push(c.comment);
+              }
+              return a;
+            },
+            mutate: async (query, vars) => {
+              mutations.push({ query, vars });
+              if (query.includes("setIssueFieldValue")) {
+                if (options.failSet) return options.failSet;
+                remote.current = vars.option!.replace("O_", "");
+                return { data: { setIssueFieldValue: { issue: { id: "I_7" } } }, errors: [] };
+              }
+              if (options.failComment) throw new Error("network down");
+              remote.comments.push(vars.body!);
+              return {
+                data: { addComment: { commentEdge: { node: { url: "https://c/1" } } } },
+                errors: [],
+              };
+            },
+          },
+        },
+      });
+    return {
+      remote,
+      mutations,
+      out,
+      call,
+      pageQueries: () => pageQueries,
+      json: () => JSON.parse(out.at(-1)!),
+    };
+  }
+  const base = ["--size", "M", "--rationale", "few modules; bounded tests", "--json"];
+
+  it("records the native value and versioned provenance without inventing identity", async () => {
+    const t = harness();
+    expect(
+      await t.call(
+        ...base,
+        "--assumption",
+        "blocker #3 supplies the API; waiting excluded",
+        "--reference",
+        "#86",
+      ),
+    ).toBe(0);
+    expect(t.json()).toMatchObject({
+      schemaVersion: 1,
+      kind: "complexity-estimate",
+      status: "recorded",
+      previous: null,
+      valueWritten: true,
+      provenanceWritten: true,
+      provenance: {
+        size: "M",
+        estimator: null,
+        revision: sha,
+        guidanceVersion: complexityGuidance.guidanceVersion,
+        assumptions: ["blocker #3 supplies the API; waiting excluded"],
+        references: ["#86"],
+      },
+    });
+    expect(t.remote.current).toBe("M");
+    expect(t.mutations.map((m) => m.query.match(/(setIssueFieldValue|addComment)/)![1])).toEqual([
+      "setIssueFieldValue",
+      "addComment",
+    ]);
+    // Never touches labels, claims or dependencies.
+    expect(t.mutations.some((m) => /label|claim|BlockedBy/i.test(m.query))).toBe(false);
+    const stored = parseProvenance(t.remote.comments[0]!);
+    expect(stored).toMatchObject({ size: "M", rationale: "few modules; bounded tests" });
+  });
+  it("records the estimator only when given", async () => {
+    const t = harness();
+    expect(await t.call(...base, "--agent", "kavya")).toBe(0);
+    expect(t.json().provenance.estimator).toBe("kavya");
+  });
+  it("is idempotent: the same size and provenance write nothing", async () => {
+    const t = harness();
+    await t.call(...base);
+    const writes = t.mutations.length;
+    expect(await t.call(...base)).toBe(0);
+    expect(t.json().status).toBe("unchanged");
+    expect(t.mutations.length).toBe(writes);
+  });
+  it("preserves a different existing estimate unless --replace names it", async () => {
+    const t = harness({ current: "S" });
+    expect(await t.call(...base)).toBe(1);
+    expect(t.json()).toMatchObject({ status: "refused:existing", code: "existing-estimate" });
+    expect(t.json().recovery).toContain("--replace S");
+    expect(t.mutations).toEqual([]);
+    expect(await t.call(...base, "--replace", "S")).toBe(0);
+    expect(t.json()).toMatchObject({
+      status: "recorded",
+      previous: "S",
+      provenance: { previous: "S" },
+    });
+  });
+  it("refuses a stale --replace", async () => {
+    const t = harness({ current: "L" });
+    expect(await t.call(...base, "--replace", "S")).toBe(1);
+    expect(t.json()).toMatchObject({ status: "refused:stale", code: "stale" });
+    expect(t.mutations).toEqual([]);
+  });
+  it("does not overwrite a concurrent estimate recorded after the first read", async () => {
+    const t = harness({ concurrent: { afterQuery: 1, size: "XL" } });
+    expect(await t.call(...base)).toBe(1);
+    expect(t.json()).toMatchObject({ status: "refused:stale", code: "concurrent-change" });
+    expect(t.remote.current).toBe("XL");
+    expect(t.mutations).toEqual([]);
+  });
+  it("rereads before a provenance-only write and refuses a concurrent value change", async () => {
+    // Value already M (needs provenance); another writer sets L after the first read.
+    const t = harness({ current: "M", concurrent: { afterQuery: 1, size: "L" } });
+    expect(await t.call(...base)).toBe(1);
+    expect(t.json()).toMatchObject({ status: "refused:stale", code: "concurrent-change" });
+    expect(t.json().recovery).toContain("Re-run");
+    expect(t.mutations).toEqual([]);
+    expect(t.remote.current).toBe("L");
+  });
+  it("refuses a provenance-only write when newer provenance appeared meanwhile", async () => {
+    const other = harness();
+    await other.call(...base, "--agent", "other");
+    const t = harness({
+      current: "M",
+      concurrent: { afterQuery: 1, comment: other.remote.comments[0]! },
+    });
+    expect(await t.call(...base)).toBe(1);
+    expect(t.json()).toMatchObject({ status: "refused:stale", code: "concurrent-change" });
+    expect(t.mutations).toEqual([]);
+  });
+  it("pages back through older comments to find the newest provenance marker", async () => {
+    const seed = harness();
+    await seed.call(...base);
+    const marker = seed.remote.comments[0]!;
+    const filler = Array.from({ length: 250 }, (_, i) => `chatter ${i}`);
+    const t = harness({ current: "M", comments: [marker, ...filler] });
+    expect(await t.call(...base)).toBe(0);
+    expect(t.json().status).toBe("unchanged");
+    expect(t.mutations).toEqual([]);
+    // Bounded: stops once found (2 older pages per read; unchanged needs no reread).
+    expect(t.pageQueries()).toBe(2);
+  });
+  it("treats failed or unbounded comment paging as unknown provenance and writes nothing", async () => {
+    const filler = Array.from({ length: 150 }, (_, i) => `chatter ${i}`);
+    const failed = harness({ current: "M", comments: filler, failPage: 1 });
+    expect(await failed.call(...base)).toBe(2);
+    expect(failed.json()).toMatchObject({
+      status: "failed:unknown",
+      code: "provenance-unavailable",
+    });
+    expect(failed.mutations).toEqual([]);
+    const huge = Array.from({ length: 100 * (MAX_COMMENT_PAGES + 2) }, (_, i) => `c ${i}`);
+    const endless = harness({ current: "M", comments: huge });
+    expect(await endless.call(...base)).toBe(2);
+    expect(endless.json().code).toBe("provenance-unavailable");
+    expect(endless.pageQueries()).toBe(MAX_COMMENT_PAGES);
+    expect(endless.mutations).toEqual([]);
+  });
+  it("reports a partial write honestly and repairs only provenance on retry", async () => {
+    const t = harness({ failComment: true });
+    expect(await t.call(...base)).toBe(2);
+    expect(t.json()).toMatchObject({
+      status: "partial",
+      valueWritten: true,
+      provenanceWritten: false,
+    });
+    expect(t.remote.current).toBe("M");
+    const retry = harness({ current: "M" });
+    expect(await retry.call(...base)).toBe(0);
+    expect(retry.json()).toMatchObject({ status: "recorded", valueWritten: false });
+    expect(retry.mutations.map((m) => m.query.includes("addComment"))).toEqual([true]);
+  });
+  it("refuses an errored or incomplete value read instead of treating it as unset", async () => {
+    for (const degrade of [
+      { onQuery: 1, dropValues: true },
+      { onQuery: 1, errors: [{ type: "INTERNAL", message: "partial" }] },
+      { onQuery: 2, dropValues: true },
+      { onQuery: 2, errors: [{ type: "INTERNAL", message: "partial" }], dropValues: true },
+    ]) {
+      const t = harness({ current: "S", degrade });
+      // The reread (query 2) is only reached by an authorised replacement.
+      const replace = degrade.onQuery === 2 ? ["--replace", "S"] : [];
+      expect(await t.call(...base, ...replace)).toBe(2);
+      expect(t.json()).toMatchObject({ status: "failed:unknown", code: "value-unavailable" });
+      expect(t.json().recovery).toContain("Retry");
+      expect(t.mutations).toEqual([]);
+      expect(t.remote.current).toBe("S");
+    }
+  });
+  it("retries --replace idempotently after a partial write, repairing only provenance", async () => {
+    const t = harness({ current: "S", failComment: true });
+    expect(await t.call(...base, "--replace", "S")).toBe(2);
+    expect(t.json().status).toBe("partial");
+    const retry = harness({ current: "M", comments: t.remote.comments });
+    expect(await retry.call(...base, "--replace", "S")).toBe(0);
+    expect(retry.json()).toMatchObject({
+      status: "recorded",
+      valueWritten: false,
+      provenance: { previous: "S" },
+    });
+    expect(retry.mutations.map((m) => m.query.includes("addComment"))).toEqual([true]);
+    const conflict = harness({ current: "L" });
+    expect(await conflict.call(...base, "--replace", "S")).toBe(1);
+    expect(conflict.json().code).toBe("stale");
+  });
+  it("records new provenance when only the estimator identity changes", async () => {
+    const t = harness();
+    await t.call(...base);
+    const sets = () => t.mutations.filter((m) => m.query.includes("setIssueFieldValue")).length;
+    expect(await t.call(...base, "--agent", "kavya")).toBe(0);
+    expect(t.json()).toMatchObject({
+      status: "recorded",
+      valueWritten: false,
+      provenance: { estimator: "kavya" },
+    });
+    expect(sets()).toBe(1);
+    expect(parseProvenance(t.remote.comments.at(-1)!)?.estimator).toBe("kavya");
+    expect(await t.call(...base, "--agent", "kavya")).toBe(0);
+    expect(t.json().status).toBe("unchanged");
+  });
+  it("reports the stored provenance, not a new timestamp or revision, when unchanged", async () => {
+    const t = harness();
+    await t.call(...base);
+    const stored = t.remote.comments.at(-1)!;
+    const first = parseProvenance(stored)!;
+    expect(first.revision).toBe(sha);
+    const older = stored
+      .replaceAll(first.recordedAt, "2026-01-01T00:00:00.000Z")
+      .replaceAll(sha, "b".repeat(40));
+    t.remote.comments[t.remote.comments.length - 1] = older;
+    expect(await t.call(...base)).toBe(0);
+    expect(t.json().status).toBe("unchanged");
+    expect(t.json().provenance).toEqual(parseProvenance(older));
+    expect(JSON.stringify(t.json().provenance)).not.toContain(sha);
+  });
+  it("reports API denial of the value write without claiming success", async () => {
+    const t = harness({ failSet: { data: null, errors: [{ type: "FORBIDDEN", message: "no" }] } });
+    expect(await t.call(...base)).toBe(1);
+    expect(t.json()).toMatchObject({ status: "failed", code: "api-denied" });
+    expect(t.json().message).toContain("FORBIDDEN");
+    expect(t.remote.comments).toEqual([]);
+  });
+  it("gives opt-in and setup guidance when disabled or unmapped, without remote calls", async () => {
+    const off = harness({ config: '{"schemaVersion":1,"complexity":{"enabled":false}}\n' });
+    expect(await off.call(...base)).toBe(2);
+    expect(off.json()).toMatchObject({
+      status: "disabled",
+      recovery: "Opt in with: github-triage config set complexity.enabled true",
+    });
+    const unset = harness({ config: null });
+    expect(await unset.call(...base)).toBe(2);
+    expect(unset.json()).toMatchObject({ status: "setup-required", code: "not-configured" });
+    expect(unset.json().recovery).toContain("github-triage setup complexity");
+    expect([...off.mutations, ...unset.mutations]).toEqual([]);
+  });
+  it("distinguishes a forbidden or incompatible field and never writes", async () => {
+    const forbidden = harness({
+      fieldNode: null,
+      queryErrors: [{ type: "FORBIDDEN", message: "x" }],
+    });
+    expect(await forbidden.call(...base)).toBe(2);
+    expect(forbidden.json()).toMatchObject({
+      status: "setup-required:inaccessible",
+      code: "field-forbidden",
+    });
+    const wrong = harness({ fieldNode: { ...field, options: field.options.slice(0, 3) } });
+    expect(await wrong.call(...base)).toBe(2);
+    expect(wrong.json()).toMatchObject({ status: "setup-required:incompatible" });
+    expect([...forbidden.mutations, ...wrong.mutations]).toEqual([]);
+  });
+  it("keeps the provenance marker safe inside an HTML comment and ignores forgeries", () => {
+    const p: EstimateProvenance = {
+      schemaVersion: 1,
+      kind: "complexity-estimate",
+      fieldId: "IF_c",
+      size: "S",
+      previous: null,
+      rationale: "ends --> early? <b>",
+      assumptions: [],
+      references: [],
+      estimator: null,
+      revision: null,
+      guidanceVersion: 1,
+      recordedAt: "2026-11-13T12:00:00.000Z",
+    };
+    const body = provenanceComment(p);
+    expect(body.split("-->")[0]).toContain("recordedAt"); // the marker ends only at its own close
+    expect(parseProvenance(body)).toEqual(p);
+    expect(
+      parseProvenance('<!-- github-triage:complexity-estimate v1 {"size":"HUGE"} -->'),
+    ).toBeNull();
   });
 });
 
