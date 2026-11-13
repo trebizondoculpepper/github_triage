@@ -5167,3 +5167,131 @@ describe("estimation queue and briefing visibility (#122)", () => {
     }
   });
 });
+
+describe("role-shaped briefings (#1, doc/design/briefings.md)", () => {
+  const compact = async (
+    data: Snapshot,
+    options: { limit: number; agent?: string; role?: string },
+  ) => {
+    const { compactBriefing } = await import("./compact.js");
+    const expanded = briefing(data, { ...options, limit: 1000 }, new Date(time));
+    return compactBriefing(data, options, expanded);
+  };
+  const numbers = (rows: { url: string }[]) => rows.map(({ url }) => Number(url.split("/").pop()));
+  const section = (r: Awaited<ReturnType<typeof compact>>, name: string) =>
+    r.role!.sections.find((s) => s.name === name)!;
+  const blocking = (from: Issue, dependant: Issue): void => {
+    from.issueDependenciesSummary!.blocking = 1;
+    from.blocking = page([
+      {
+        number: dependant.number,
+        title: dependant.title,
+        url: dependant.url,
+        state: dependant.state,
+        repository: { nameWithOwner: repo },
+        issueDependenciesSummary: dependant.issueDependenciesSummary!,
+      },
+    ]);
+    dependant.issueDependenciesSummary!.blockedBy = 1;
+    dependant.issueDependenciesSummary!.totalBlockedBy = 1;
+  };
+
+  it("leaves the briefing unchanged without --role", async () => {
+    const data = snapshot([issue(1), issue(2)], []);
+    const r = await compact(data, { limit: 5 });
+    expect(r.role).toBeNull();
+    expect(r.sections.available.total).toBe(2);
+  });
+  it("implementer orders addressed, PR follow-up, own work, then ranked pickup", async () => {
+    const addressed = issue(10, ["status:needs-design", "attention:reader"]);
+    const own = issue(11, ["agent:reader"]);
+    const pickup = issue(12);
+    const design = issue(13, ["status:needs-design"]);
+    const failing = { ...pr(), closingIssuesReferences: page([]) };
+    failing.commits.nodes[0]!.commit.statusCheckRollup!.contexts = page([
+      { name: "verify", status: "COMPLETED", conclusion: "FAILURE" },
+    ]);
+    const r = await compact(snapshot([addressed, own, pickup, design], [failing]), {
+      limit: 10,
+      agent: "reader",
+      role: "implementer",
+    });
+    expect(r.role!.question).toMatch(/implementation/);
+    expect(numbers(r.role!.next)).toEqual([10, 4, 11, 12]);
+    expect(r.actions.items.map((u) => Number(u.split("/").pop()))).toEqual([10, 4, 11, 12]);
+    // Pending design is short background awareness, never a next step.
+    expect(numbers(section(r, "pending-design").items)).toEqual([13]);
+    expect(section(r, "pending-design").background).toBe(true);
+    expect(section(r, "pickup").items[0]!.reason).toMatch(/Pickup rank 1/);
+  });
+  it("designer keeps addressed implementation questions visible and unblocks active work first", async () => {
+    const addressed = issue(20, ["status:ready", "attention:reader"]);
+    const idle = issue(21, ["design:decision-needed"]);
+    const holding = issue(22, ["design:decision-needed"]);
+    const claimed = issue(23, ["agent:other"]);
+    blocking(holding, claimed);
+    const documentation = issue(24, ["design:documentation-needed"]);
+    const newDesign = issue(25, ["status:needs-design"]);
+    const unlocked = issue(26);
+    blocking(newDesign, unlocked);
+    const quiet = issue(27, ["status:needs-design"]);
+    const docsPr = {
+      ...pr(),
+      number: 40,
+      url: `https://github.com/${repo}/pull/40`,
+      labels: page([{ name: "documentation" }]),
+      closingIssuesReferences: page([]),
+    };
+    const implPr = {
+      ...pr(),
+      number: 41,
+      url: `https://github.com/${repo}/pull/41`,
+      closingIssuesReferences: page([]),
+      reviews: page([
+        { body: "", url: "r1", author: null, state: "CHANGES_REQUESTED" },
+        { body: "", url: "r2", author: null, state: "CHANGES_REQUESTED" },
+      ]),
+    };
+    const r = await compact(
+      snapshot(
+        [addressed, idle, holding, claimed, documentation, quiet, newDesign, unlocked],
+        [docsPr, implPr],
+      ),
+      { limit: 10, agent: "reader", role: "designer" },
+    );
+    expect(numbers(section(r, "addressed").items)).toEqual([20]);
+    expect(numbers(section(r, "decision-needed").items)).toEqual([22, 21]);
+    expect(section(r, "decision-needed").items[0]!.reason).toMatch(/Holds up active work #23/);
+    expect(numbers(section(r, "documentation-needed").items)).toEqual([24]);
+    expect(numbers(section(r, "design-review").items)).toEqual([40]);
+    expect(numbers(section(r, "design-pickup").items)).toEqual([25, 27]);
+    expect(section(r, "design-pickup").items[0]!.reason).toMatch(/unlocks 1 \(#26\)/);
+    const impl = section(r, "implementation-prs");
+    expect(impl.background).toBe(true);
+    expect(impl.items[0]!.reason).toMatch(/possible design input/);
+    // General implementation pickup is outside the designer view.
+    expect(r.role!.sections.some((s) => s.name === "pickup")).toBe(false);
+    expect(numbers(r.role!.next)).not.toContain(41);
+  });
+  it("bounds each section with omission counts and lists each subject once", async () => {
+    const many = Array.from({ length: 8 }, (_, i) =>
+      issue(50 + i, ["design:decision-needed", "attention:reader"]),
+    );
+    const r = await compact(snapshot(many, []), { limit: 5, agent: "reader", role: "designer" });
+    expect(section(r, "addressed")).toMatchObject({ total: 8, omitted: 0 });
+    expect(section(r, "decision-needed").total).toBe(0);
+    expect(r.actions).toMatchObject({ total: 8, omitted: 3 });
+  });
+  it("renders the role in text and rejects unknown roles", async () => {
+    const { compactText } = await import("./compact.js");
+    const r = await compact(snapshot([issue(60)], []), { limit: 5, role: "implementer" });
+    const text = compactText(r);
+    expect(text).toMatch(/Role implementer: What action advances implementation most\?/);
+    expect(text).toMatch(/\nPICKUP \(1; 0 omitted\)/);
+    expect(text).not.toMatch(/\nAVAILABLE/);
+    const { argumentsFor } = await import("./cli.js");
+    expect(() => argumentsFor(["--role", "owner"])).toThrow(/implementer, designer/);
+    expect(() => argumentsFor(["--role", "designer", "--full"])).toThrow(/--full/);
+    expect(argumentsFor(["--role=designer"]).role).toBe("designer");
+  });
+});

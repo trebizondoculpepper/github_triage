@@ -4,6 +4,8 @@ import { unblocks } from "./dependencies.js";
 import type { Briefing, BriefingOptions, Bounded, CheckOutcome } from "./briefing.js";
 import { estimateLine } from "./estimation.js";
 import type { EstimateEntry } from "./estimation.js";
+import { roleView } from "./roles.js";
+import type { RoleView } from "./roles.js";
 import type { Action, Issue, PullRequest, Snapshot } from "./types.js";
 
 export type RuleGroup =
@@ -99,7 +101,7 @@ export interface CompactSubject {
 }
 export function compactBriefing(
   snapshot: Snapshot,
-  options: Pick<BriefingOptions, "limit" | "agent" | "estimate">,
+  options: Pick<BriefingOptions, "limit" | "agent" | "estimate"> & { role?: string },
   expanded: Briefing,
 ) {
   const bound = <T>(items: T[], size = 3): Bounded<T> => ({
@@ -219,7 +221,24 @@ export function compactBriefing(
       .filter((item) => item.labels.nodes.some(({ name }) => name === "status:parked"))
       .map((item) => item.url),
   );
-  const actions = bound(next, options.limit);
+  // A registered role (#1) reshapes presentation of the same facts; without one, unchanged.
+  const role: RoleView | null = options.role
+    ? roleView(options.role, {
+        snapshot,
+        facts,
+        findings: grouped,
+        byUrl: new Map(
+          objects.filter((item) => item.state === "OPEN").map((item) => [item.url, item]),
+        ),
+        isAddressed: (item) => isAddressed(item),
+        isMine,
+        linkedMine: (item) => linkedMine(item),
+      })
+    : null;
+  const ordered = role
+    ? role.next.map(({ url }) => ({ target: url, findings: grouped.get(url) ?? [] }))
+    : next;
+  const actions = bound(ordered, options.limit);
   // Estimation is offered automatically only when no higher-priority group (addressed
   // attention, PR follow-up, own work, eligible pickup) exists; explicit requests always see it.
   const higher = next.some((group) => tier(group) <= 4);
@@ -236,6 +255,7 @@ export function compactBriefing(
   const urls = new Set([
     ...actions.items.map((item) => item.target),
     ...Object.values(sections).flatMap((s) => s.items),
+    ...(role?.sections.flatMap((s) => s.items.map((row) => row.url)) ?? []),
   ]);
   const subjects = [...urls].map((url): CompactSubject => {
     const item = defined(byUrl.get(url));
@@ -284,6 +304,7 @@ export function compactBriefing(
     },
     actions: { ...actions, items: actions.items.map(({ target }) => target) },
     sections,
+    role,
     estimation,
     subjects,
     changes: facts.changes,
@@ -304,17 +325,22 @@ export function compactText(report: CompactBriefing, maxChars = 10000): string {
   ];
   const rows: string[] = [];
   const shown = new Set<string>();
-  const add = (title: string, section: Bounded<string>): void => {
+  const add = (
+    title: string,
+    section: Bounded<string>,
+    reasons?: ReadonlyMap<string, string>,
+  ): void => {
     rows.push(`\n${title} (${section.total}; ${section.omitted} omitted)`);
     for (const url of section.items) {
       const s = defined(subjects.get(url));
+      const why = reasons?.get(url);
       if (shown.has(url)) {
-        rows.push(`- #${s.number}: ${url}`);
+        rows.push(`- #${s.number}: ${url}${why ? ` — ${why}` : ""}`);
         continue;
       }
       shown.add(url);
       rows.push(
-        `- #${s.number} ${s.title} ${s.owners.join(", ")}${s.complexity && report.estimation.status === "available" ? ` (${s.complexity.state === "unknown" ? "size unknown" : (s.complexity.size ?? "unestimated")})` : ""}\n  ${s.findings.map((f) => `[${f.uncertainty}] ${f.reason}${markerSource(f)} Next: ${f.next}`).join(" ")}\n  ${url}${s.pullRequest ? `\n  Head ${s.pullRequest.head}; ${s.pullRequest.checks.map((c) => `${c.name}:${c.outcome}`).join(", ")}; ${s.pullRequest.unresolvedThreads} unresolved threads` : ""}\n  ${s.source.chronology}\n  ${s.detailCommand}`,
+        `- #${s.number} ${s.title} ${s.owners.join(", ")}${s.complexity && report.estimation.status === "available" ? ` (${s.complexity.state === "unknown" ? "size unknown" : (s.complexity.size ?? "unestimated")})` : ""}${why ? `\n  Why: ${why}` : ""}\n  ${s.findings.map((f) => `[${f.uncertainty}] ${f.reason}${markerSource(f)} Next: ${f.next}`).join(" ")}\n  ${url}${s.pullRequest ? `\n  Head ${s.pullRequest.head}; ${s.pullRequest.checks.map((c) => `${c.name}:${c.outcome}`).join(", ")}; ${s.pullRequest.unresolvedThreads} unresolved threads` : ""}\n  ${s.source.chronology}\n  ${s.detailCommand}`,
       );
     }
   };
@@ -332,15 +358,32 @@ export function compactText(report: CompactBriefing, maxChars = 10000): string {
     );
   };
   if (estimation.requested) estimationRows();
-  add("NEXT STEPS", report.actions);
+  const roleReasons = new Map(
+    report.role?.sections.flatMap((s) =>
+      s.items.map((row): [string, string] => [row.url, row.reason]),
+    ) ?? [],
+  );
+  add("NEXT STEPS", report.actions, roleReasons);
   if (estimation.offered && !estimation.requested)
     rows.push("- No higher-priority work: estimation is offered below (optional).");
+  if (report.role) {
+    lines.push(`Role ${report.role.name}: ${report.role.question}`);
+    for (const section of report.role.sections) {
+      const reasons = new Map(section.items.map((row) => [row.url, row.reason]));
+      add(
+        section.background ? `${section.title} (background)` : section.title,
+        { ...section, items: section.items.map((row) => row.url) },
+        reasons,
+      );
+    }
+  }
   const titles: Record<string, string> = {
     "decision-needed": "DECISION NEEDED",
     "documentation-needed": "AGREED, NEEDS DOCUMENTATION",
   };
-  for (const [name, section] of Object.entries(report.sections))
-    add(titles[name] ?? name.toUpperCase(), section);
+  if (!report.role)
+    for (const [name, section] of Object.entries(report.sections))
+      add(titles[name] ?? name.toUpperCase(), section);
   if (!estimation.requested) estimationRows();
   // Warnings are always shown, but bounded so they cannot exhaust the text budget alone;
   // JSON output keeps the full list.
