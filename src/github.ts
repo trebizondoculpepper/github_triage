@@ -510,3 +510,42 @@ export async function concurrentMap<T, R>(
   );
   return results;
 }
+
+/** Raw GraphQL response: data plus any errors, never thrown for GraphQL-level errors. */
+export interface GraphqlAnswer {
+  readonly data: unknown;
+  readonly errors: readonly { type?: string; message?: string }[];
+}
+
+/** Injected authenticated GraphQL boundary. `query` is read-only; `mutate` changes GitHub. */
+export interface GraphqlApi {
+  query(query: string, variables: Record<string, string>): Promise<GraphqlAnswer>;
+  mutate(query: string, variables: Record<string, string>): Promise<GraphqlAnswer>;
+}
+
+async function ghGraphql(query: string, variables: Record<string, string>): Promise<GraphqlAnswer> {
+  const args = ["api", "graphql", "-f", `query=${query}`];
+  for (const [key, value] of Object.entries(variables)) args.push("-f", `${key}=${value}`);
+  let stdout: unknown;
+  try {
+    ({ stdout } = await execute("gh", args, { maxBuffer: 8 * 1024 * 1024, timeout: 60_000 }));
+  } catch (error) {
+    // gh exits non-zero on GraphQL errors but still prints the response body.
+    stdout = prop(error, "stdout");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(typeof stdout === "string" ? stdout : "");
+  } catch {
+    // Never echo arguments, stderr or response bodies.
+    throw new Error("GitHub query failed. Check gh auth status, network and API rate limits.");
+  }
+  const errors = prop(parsed, "errors");
+  return {
+    data: prop(parsed, "data"),
+    errors: Array.isArray(errors) ? errors.filter(isRecord) : [],
+  };
+}
+
+/** Production GraphQL boundary through the existing authenticated `gh` (no shell). */
+export const ghGraphqlApi: GraphqlApi = { query: ghGraphql, mutate: ghGraphql };

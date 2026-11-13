@@ -112,6 +112,11 @@ try {
     const guidance = await cli(["estimate", "--help"]);
     if (!/XS[\s\S]*XXL/.test(guidance.stdout) || !guidance.stdout.includes("guidance (version"))
       throw new Error(`Installed bin printed no complexity guidance in ${cwd}.`);
+    // Labels-only complexity (#153): the installed artifact names label storage and no field setup.
+    if (!guidance.stdout.includes("complexity:XS"))
+      throw new Error(`Installed complexity guidance does not describe size labels in ${cwd}.`);
+    if (/setup complexity|issue field|fieldId/.test(help.stdout + guidance.stdout))
+      throw new Error(`Installed bin still advertises retired native-field setup in ${cwd}.`);
     const invalid = await cli(["--no-such-option"]).then(
       () => null,
       (error: { code?: unknown }) => error,

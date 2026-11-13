@@ -1,56 +1,23 @@
 /**
- * Optional implementer estimation queue and briefing visibility (#122).
- * Contract: doc/design/complexity-estimation.md "Estimation as implementer work" and
- * "Repository setup and configuration diagnostics".
+ * Optional implementer estimation queue and briefing visibility (#122, labels-only since #152/#153).
+ * Contract: doc/design/complexity-estimation.md "Estimation as implementer work".
  *
  * Estimation eligibility is separate from implementation eligibility: a blocked ticket can be
  * sized while staying ineligible for pickup. The queue holds unestimated and meaningfully stale
  * estimates; it is presented after higher-priority work unless explicitly requested, acquires
- * no claim and reserves nothing. Disabled complexity suppresses it; a missing field mapping is
- * a configuration finding, not an empty queue. A native value that could not be read (offline,
- * FORBIDDEN on user-owned accounts, API errors) is unknown, never "unestimated" or queued.
- *
- * Collection cost: provenance comes from the comments already in the snapshot; native values
- * cost one paginated query over open issues, only when complexity is enabled and mapped, and only
- * after Ticket Doctor's discovery query verifies the mapped field exists and is compatible.
+ * no claim and reserves nothing. Disabled complexity suppresses it. Sizes come from the
+ * `complexity:` labels already in the snapshot (complexitylabels.ts); incomplete label evidence
+ * is unknown, never "unestimated" or queued. Missing labels or label definitions are not setup
+ * errors. Provenance comes from v2 marker comments already in the snapshot.
  */
-import { COMPLEXITY_SIZES, complexityGuidance } from "./complexity.js";
+import { complexityGuidance } from "./complexity.js";
 import type { ComplexitySize } from "./complexity.js";
-import {
-  ConfigError,
-  filesystemRefusal,
-  loadConfig,
-  nodeFileSystem,
-  nodeGit,
-  resolveRepositoryTarget,
-  settingFor,
-} from "./config.js";
-import type { ConfigFileSystem, GitRunner } from "./config.js";
-import { diagnoseComplexityConfig } from "./complexitydoctor.js";
-import { ghFieldApi } from "./complexitysetup.js";
-import type { FieldApi, GraphqlAnswer } from "./complexitysetup.js";
-import { parseLabelProvenance, parseProvenance } from "./estimate.js";
-import { prop } from "./github.js";
+import { parseLabelProvenance } from "./estimate.js";
 import { pickupEligibility } from "./ranking.js";
 import type { PickupContext } from "./ranking.js";
 import type { Issue } from "./types.js";
 
-export interface EstimationRuntime {
-  readonly fs?: ConfigFileSystem;
-  readonly git?: GitRunner;
-  readonly cwd?: string;
-  readonly api?: FieldApi;
-}
-
-export type EstimationStatus =
-  | "available"
-  | "disabled"
-  | "setup-required"
-  | "missing"
-  | "incompatible"
-  | "inaccessible"
-  | "unsupported"
-  | "unknown";
+export type EstimationStatus = "available" | "disabled" | "unknown";
 
 export interface EstimationFinding {
   rule: string;
@@ -59,157 +26,8 @@ export interface EstimationFinding {
   next: string[];
 }
 
-/** Collected inputs: configuration state and native values (by issue number). */
-export interface EstimationInput {
-  status: EstimationStatus;
-  fieldId: string | null;
-  /** Read native values: null means read and unset. A missing key means unknown. */
-  values: ReadonlyMap<number, ComplexitySize | null>;
-  /** Why some or all native values are unknown, when they are. */
-  unavailable: string | null;
-  findings: EstimationFinding[];
-}
-
-const SETUP = "github-triage setup complexity";
-const DISABLE = "github-triage config set complexity.enabled false";
-/** Bound on pages (100 open issues each) of native field values read per briefing. */
-export const MAX_VALUE_PAGES = 10;
 /** Bound on conflicting-size inspection lines in text output. */
 export const MAX_CONFLICT_LINES = 10;
-
-const valuesQuery = `query($owner: String!, $name: String!, $cursor: String) {
-  repository(owner: $owner, name: $name) {
-    issues(states: OPEN, first: 100, after: $cursor) { pageInfo { hasNextPage endCursor }
-      nodes { number issueFieldValues(first: 50) { nodes { __typename
-        ... on IssueFieldSingleSelectValue { name field { ... on IssueFieldSingleSelect { id } } } } } } } } }`;
-
-const unknownInput = (
-  status: EstimationStatus,
-  fieldId: string | null,
-  unavailable: string,
-  findings: EstimationFinding[] = [],
-): EstimationInput => ({ status, fieldId, values: new Map(), unavailable, findings });
-
-/** Read configuration and, when enabled and mapped online, native values. Never throws for missing evidence. */
-export async function collectEstimationInput(
-  repository: string,
-  { offline = false }: { offline?: boolean } = {},
-  runtime: EstimationRuntime = {},
-): Promise<EstimationInput> {
-  let config;
-  try {
-    const target = await resolveRepositoryTarget(
-      runtime.cwd ?? process.cwd(),
-      repository,
-      runtime.git ?? nodeGit,
-    );
-    config = await loadConfig(target.root, runtime.fs ?? nodeFileSystem);
-  } catch (caught) {
-    const error = filesystemRefusal(caught) ?? caught;
-    if (!(error instanceof ConfigError)) throw error;
-    return unknownInput(
-      "unknown",
-      null,
-      `repository configuration not read (${error.message}); complexity state is unknown`,
-      [{ rule: "config-unavailable", detail: error.message, next: [error.recovery] }],
-    );
-  }
-  if (settingFor(config, "complexity.enabled").value === false)
-    return {
-      status: "disabled",
-      fieldId: null,
-      values: new Map(),
-      unavailable: null,
-      findings: [],
-    };
-  const mapped = settingFor(config, "complexity.fieldId").value;
-  const fieldId = typeof mapped === "string" && mapped ? mapped : null;
-  if (!fieldId)
-    return unknownInput("setup-required", null, "no complexity field is mapped", [
-      {
-        rule: "complexity-field-unmapped",
-        detail:
-          "Complexity is enabled but complexity.fieldId is not set: estimates cannot be read, so the queue is unavailable (a configuration finding, not an empty queue).",
-        next: [SETUP, DISABLE],
-      },
-    ]);
-  if (offline) return unknownInput("unknown", fieldId, "offline: native values were not read");
-
-  // An absent value only means "unset" for a verified, compatible field: a deleted, foreign,
-  // inaccessible or incompatible mapping yields no matching values for every issue. Reuse
-  // Ticket Doctor's live verification (and its recovery commands) rather than duplicating it.
-  const doctor = await diagnoseComplexityConfig(repository, {}, runtime);
-  if (doctor.status !== "configured-compatible") {
-    const status: EstimationStatus =
-      doctor.status === "missing" ||
-      doctor.status === "incompatible" ||
-      doctor.status === "inaccessible" ||
-      doctor.status === "unsupported"
-        ? doctor.status
-        : doctor.status === "disabled"
-          ? "disabled"
-          : doctor.status === "unconfigured"
-            ? "setup-required"
-            : "unknown";
-    const findings = doctor.findings.map(({ rule, detail, next }) => ({ rule, detail, next }));
-    return unknownInput(
-      status,
-      fieldId,
-      `mapped complexity field ${fieldId} not verified compatible (${doctor.status})`,
-      findings,
-    );
-  }
-
-  const api = runtime.api ?? ghFieldApi;
-  const [owner, name] = repository.split("/") as [string, string];
-  const values = new Map<number, ComplexitySize | null>();
-  let cursor: string | null = null;
-  for (let page = 0; page < MAX_VALUE_PAGES; page += 1) {
-    const vars: Record<string, string> = cursor ? { owner, name, cursor } : { owner, name };
-    const answer: GraphqlAnswer = await api
-      .query(valuesQuery, vars)
-      .catch((error: unknown) => ({ data: null, errors: [{ message: (error as Error).message }] }));
-    const issues = prop(answer.data, "repository", "issues");
-    const nodes = prop(issues, "nodes");
-    if (answer.errors.length || !Array.isArray(nodes)) {
-      const error = answer.errors[0];
-      const why = error
-        ? `${error.type ? `${error.type}: ` : ""}${error.message ?? "GitHub returned an error"}`
-        : "issue field values missing from the response";
-      return {
-        ...unknownInput("unknown", fieldId, `native values unreadable (${why})`),
-        values,
-      };
-    }
-    for (const node of nodes) {
-      const number = prop(node, "number");
-      const fieldValues = prop(node, "issueFieldValues", "nodes");
-      if (typeof number !== "number" || !Array.isArray(fieldValues)) continue;
-      let size: ComplexitySize | null = null;
-      let readable = true;
-      for (const value of fieldValues)
-        if (prop(value, "field", "id") === fieldId) {
-          const text = prop(value, "name");
-          if (COMPLEXITY_SIZES.includes(text as ComplexitySize)) size = text as ComplexitySize;
-          else readable = false;
-        }
-      if (readable) values.set(number, size);
-    }
-    const more = prop(issues, "pageInfo", "hasNextPage");
-    const next = prop(issues, "pageInfo", "endCursor");
-    if (more !== true)
-      return { status: "available", fieldId, values, unavailable: null, findings: [] };
-    if (typeof next !== "string" || !next) break;
-    cursor = next;
-  }
-  return {
-    status: "available",
-    fieldId,
-    values,
-    unavailable: `native values read for the first ${MAX_VALUE_PAGES * 100} open issues only`,
-    findings: [],
-  };
-}
 
 /** "conflicting" (#151, additive): several recognized size labels; inspect, never choose one. */
 export type EstimateState = "estimated" | "unestimated" | "stale" | "conflicting" | "unknown";
@@ -229,7 +47,7 @@ export interface EstimateEntry {
   title: string;
   url: string;
   createdAt: string;
-  /** Native field value; null when unset or unknown (see state). */
+  /** Size from the complexity label; null when unset or unknown (see state). */
   size: ComplexitySize | null;
   state: EstimateState;
   /** Newest provenance marker in the comment history, if any. */
@@ -241,15 +59,19 @@ export interface EstimateEntry {
 
 export interface EstimationReport {
   status: EstimationStatus;
+  /**
+   * Deprecated, always null: native-field storage was retired (#153). Kept so the briefing
+   * output shape stays compatible with schema versions 1 (expanded) and 2 (compact).
+   */
+  fieldId: null;
   /** True when the caller asked to estimate (--estimate): the queue is presented first. */
   requested: boolean;
-  fieldId: string | null;
   guidanceVersion: number;
   detail: string;
   findings: EstimationFinding[];
   /** Unestimated and stale tickets, oldest first; null when the queue is unavailable. */
   queue: { total: number; omitted: number; items: EstimateEntry[] } | null;
-  /** Open tickets whose native value could not be read. */
+  /** Open tickets whose size evidence could not be read completely. */
   unknown: number;
   /** Open tickets with conflicting size evidence: inspection candidates, never queued (#151). */
   conflicts: EstimateEntry[];
@@ -258,13 +80,15 @@ export interface EstimationReport {
   boundaries: string;
 }
 
-/** Newest valid provenance marker for the field; undefined when comment history is incomplete. */
-function newestRecord(issue: Issue, fieldId: string | null): RecordedEstimate | null | undefined {
+/**
+ * Newest valid v2 (label-backed) provenance marker; undefined when comment history is incomplete.
+ * Retired field-era v1 markers are not provenance and are ignored, never parsed.
+ */
+function newestRecord(issue: Issue): RecordedEstimate | null | undefined {
   let found: RecordedEstimate | null = null;
   for (const comment of issue.comments.nodes) {
-    // Label-backed reads (no field) accept only v2 label provenance, never field-era records.
-    const p = fieldId ? parseProvenance(comment.body) : parseLabelProvenance(comment.body);
-    if (p && (!fieldId || ("fieldId" in p && p.fieldId === fieldId)))
+    const p = parseLabelProvenance(comment.body);
+    if (p)
       found = {
         size: p.size,
         rationale: p.rationale,
@@ -280,52 +104,22 @@ function newestRecord(issue: Issue, fieldId: string | null): RecordedEstimate | 
 }
 
 /**
- * One issue's current-size evidence, as read by a size reader (native field today; the prepared
- * label reader in complexitylabels.ts, #151). "conflict" is an inspection case: no size is chosen.
+ * One issue's current-size evidence, as read by the label reader in complexitylabels.ts.
+ * "conflict" is an inspection case: no size is chosen.
  */
 export type SizeReading =
   | { kind: "known"; size: ComplexitySize | null }
   | { kind: "unknown"; reason: string }
   | { kind: "conflict"; sizes: ComplexitySize[]; reason: string };
 
-/** Report inputs shared by every size reader. */
+/** Report inputs from the size reader. */
 export interface SizeSource {
   status: EstimationStatus;
-  fieldId: string | null;
   unavailable: string | null;
   findings: EstimationFinding[];
-  /** Restrict provenance markers to this field; null reads label-backed (v2) markers only. */
-  provenanceFieldId: string | null;
-  /** Human noun for the authoritative size evidence, e.g. "native value". */
+  /** Human noun for the authoritative size evidence, e.g. "complexity size label". */
   evidence: string;
   read: (issue: Issue) => SizeReading;
-}
-
-/** Classify every open issue and build the bounded queue. Pure. */
-export function estimationReport(
-  issues: Issue[],
-  input: EstimationInput | undefined,
-  options: PickupContext & { limit: number; requested?: boolean },
-): EstimationReport {
-  return sizeReport(
-    issues,
-    input && {
-      status: input.status,
-      fieldId: input.fieldId,
-      unavailable: input.unavailable,
-      findings: input.findings,
-      provenanceFieldId: input.fieldId,
-      evidence: "native value",
-      read: (issue) =>
-        input.values.has(issue.number)
-          ? { kind: "known", size: input.values.get(issue.number) ?? null }
-          : {
-              kind: "unknown",
-              reason: `native value unknown (${input.unavailable ?? "not read"})`,
-            },
-    },
-    options,
-  );
 }
 
 /** Shared report builder over any size reader. Pure. */
@@ -335,8 +129,8 @@ export function sizeReport(
   options: PickupContext & { limit: number; requested?: boolean },
 ): EstimationReport {
   const base = {
+    fieldId: null,
     requested: !!options.requested,
-    fieldId: input?.fieldId ?? null,
     guidanceVersion: complexityGuidance.guidanceVersion,
     findings: input?.findings ?? [],
     boundaries:
@@ -358,7 +152,7 @@ export function sizeReport(
     .filter((issue) => issue.state === "OPEN")
     .map((issue): EstimateEntry => {
       const reading = input.read(issue);
-      const recorded = newestRecord(issue, input.provenanceFieldId);
+      const recorded = newestRecord(issue);
       const reasons: string[] = [];
       let state: EstimateState;
       let size: ComplexitySize | null = null;
@@ -419,15 +213,7 @@ export function sizeReport(
     return {
       ...base,
       status: input.status,
-      detail:
-        input.status === "setup-required"
-          ? "Estimation queue unavailable: no complexity field is mapped (configuration finding)."
-          : input.status === "missing" ||
-              input.status === "incompatible" ||
-              input.status === "inaccessible" ||
-              input.status === "unsupported"
-            ? `Estimation queue unavailable: ${input.unavailable ?? `complexity field ${input.status}`} (configuration finding, not an empty queue). Unknown is not unestimated.`
-            : `Estimation queue unavailable: ${input.unavailable ?? "complexity state unknown"}. Unknown is not unestimated.`,
+      detail: `Estimation queue unavailable: ${input.unavailable ?? "complexity state unknown"}. Unknown is not unestimated.`,
       queue: null,
       unknown,
       conflicts,

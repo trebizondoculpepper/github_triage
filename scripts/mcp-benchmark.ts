@@ -95,14 +95,8 @@ const runtime: McpRuntime = {
   }) as McpRuntime["dependencyReport"],
   now: clock,
   guide: local,
-  estimation: {
-    ...local,
-    api: new Proxy({} as NonNullable<McpRuntime["estimation"]>["api"] & object, {
-      get: (_t, name) => {
-        throw new Error(`benchmark isolation: unexpected field API ${String(name)}`);
-      },
-    }),
-  },
+  // Label-backed estimation reads only local configuration; it has no GitHub boundary.
+  estimation: local,
 };
 
 const cli = async (args: string[]): Promise<string> => {

@@ -139,4 +139,4 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for contribution requirements and the [d
 
 [MIT](LICENSE).
 
-Complexity is stored in repository labels (`complexity:XS`–`complexity:XXL`); the retired native-field `setup complexity` command is no longer needed and will be removed (#153). See the [contract](doc/design/complexity-estimation.md). No field migration or separate field permissions are needed.
+Complexity is stored in repository labels (`complexity:XS`–`complexity:XXL`); no setup is needed. The native-field `setup complexity` command and the `complexity.fieldId` setting were removed (#153); an old configuration file that still contains the key keeps working, and `config list` shows how to drop it. See the [contract](doc/design/complexity-estimation.md). No field migration or separate field permissions are needed.

@@ -40,9 +40,8 @@ import {
   settingFor,
 } from "./config.js";
 import type { ConfigFileSystem, GitRunner } from "./config.js";
-import { ghFieldApi } from "./complexitysetup.js";
-import type { FieldApi, GraphqlAnswer } from "./complexitysetup.js";
-import { isRecord, prop } from "./github.js";
+import { ghGraphqlApi, isRecord, prop } from "./github.js";
+import type { GraphqlAnswer, GraphqlApi } from "./github.js";
 
 export const estimateUsage = `Usage: github-triage estimate N --size SIZE --rationale TEXT [--assumption TEXT]...
          [--reference REF]... [--agent NAME] [--replace SIZE] [--replace-invalid] [--json]
@@ -79,24 +78,8 @@ export interface EstimateRuntime {
   readonly git?: GitRunner;
   readonly cwd?: string;
   /** The authenticated gh GraphQL boundary (production: gh api graphql). */
-  readonly api?: FieldApi;
+  readonly api?: GraphqlApi;
   readonly now?: () => Date;
-}
-
-/** Retired field-backed provenance (v1, #121); parsed only by the retired field read route. */
-export interface EstimateProvenance {
-  readonly schemaVersion: 1;
-  readonly kind: "complexity-estimate";
-  readonly fieldId: string;
-  readonly size: ComplexitySize;
-  readonly previous: ComplexitySize | null;
-  readonly rationale: string;
-  readonly assumptions: readonly string[];
-  readonly references: readonly string[];
-  readonly estimator: string | null;
-  readonly revision: string | null;
-  readonly guidanceVersion: number;
-  readonly recordedAt: string;
 }
 
 /** Label-backed provenance stored in the v2 marker comment. */
@@ -118,7 +101,6 @@ export interface LabelEstimateProvenance {
   readonly replacedInvalid?: readonly string[];
 }
 
-const V1_PATTERN = /<!-- github-triage:complexity-estimate v1 (\{.*?\}) -->/s;
 const MARKER = "github-triage:complexity-estimate v2";
 const MARKER_PATTERN = /<!-- github-triage:complexity-estimate v2 (\{.*?\}) -->/s;
 
@@ -166,26 +148,6 @@ export function parseLabelProvenance(body: string): LabelEstimateProvenance | nu
       strings(value.references)
     )
       return value as unknown as LabelEstimateProvenance;
-  } catch {
-    // Not ours or corrupted.
-  }
-  return null;
-}
-
-/** Parse a retired v1 (field-backed) marker; used only by the retired field read route (#153). */
-export function parseProvenance(body: string): EstimateProvenance | null {
-  const match = V1_PATTERN.exec(body);
-  if (!match) return null;
-  try {
-    const value: unknown = JSON.parse(match[1]!);
-    if (
-      isRecord(value) &&
-      value.kind === "complexity-estimate" &&
-      typeof value.fieldId === "string" &&
-      COMPLEXITY_SIZES.includes(value.size as ComplexitySize) &&
-      typeof value.rationale === "string"
-    )
-      return value as unknown as EstimateProvenance;
   } catch {
     // Not ours or corrupted.
   }
@@ -430,7 +392,7 @@ export async function runEstimate(
   const json = !!values.json;
   const fs = runtime.fs ?? nodeFileSystem;
   const git = runtime.git ?? nodeGit;
-  const api = runtime.api ?? ghFieldApi;
+  const api = runtime.api ?? ghGraphqlApi;
   const label = complexityLabelName(size);
   const result: Record<string, unknown> = {
     schemaVersion: 2,

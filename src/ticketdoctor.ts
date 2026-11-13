@@ -10,8 +10,6 @@ import { owners, workflow } from "./briefing.js";
 import { dependencyDrift, nativeKnown } from "./dependencies.js";
 import { teamView } from "./team.js";
 import { complexityLabelFindings } from "./complexitylabels.js";
-import { complexityConfigText } from "./complexitydoctor.js";
-import type { ComplexityConfigReport } from "./complexitydoctor.js";
 import type { Issue, PullRequest, Snapshot } from "./types.js";
 
 /**
@@ -79,8 +77,6 @@ export interface TicketDoctorReport {
   omittedTickets: number;
   completeness: { complete: boolean; warnings: string[] };
   guidance: string;
-  /** Repository-level configuration diagnosis (#120); additive, absent when not evaluated. */
-  configuration?: { complexity: ComplexityConfigReport };
 }
 
 /**
@@ -730,7 +726,6 @@ export function ticketDoctorText(r: TicketDoctorReport): string {
       }
     }
   }
-  if (r.configuration) lines.push("", ...complexityConfigText(r.configuration.complexity));
   if (r.omittedTickets)
     lines.push("", `…${r.omittedTickets} more tickets; raise --limit to see them.`);
   for (const w of r.completeness.warnings) lines.push(`INCOMPLETE: ${w}`);

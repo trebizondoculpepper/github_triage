@@ -48,12 +48,9 @@ import type { PickupOrder } from "./ranking.js";
 import { complexityGuidanceJson, complexityGuidanceText } from "./complexity.js";
 import { runConfig } from "./configcli.js";
 import type { ConfigRuntime } from "./configcli.js";
-import { runSetup, terminalPrompt } from "./complexitysetup.js";
-import type { SetupRuntime } from "./complexitysetup.js";
 import { estimateUsage, runEstimate } from "./estimate.js";
-import type { EstimationRuntime } from "./estimation.js";
+import type { LabelEstimationRuntime } from "./complexitylabels.js";
 import type { EstimateRuntime } from "./estimate.js";
-import type { ComplexityDoctorRuntime } from "./complexitydoctor.js";
 import { localDoctor, localDoctorExitCode, localDoctorText } from "./localdoctor.js";
 import type { LocalDoctorRuntime } from "./localdoctor.js";
 import type { GhRun } from "./dependencies.js";
@@ -91,16 +88,12 @@ export interface Runtime {
   stderr?: (text: string) => void;
   /** Filesystem, git and working directory for `config`; tests never touch the real checkout. */
   config?: ConfigRuntime;
-  /** Filesystem, git, GitHub field API and prompt for `setup complexity`. */
-  setup?: SetupRuntime;
-  /** Filesystem, git, GitHub field API and clock for `estimate N`. */
+  /** Filesystem, git, GitHub GraphQL API and clock for `estimate N`. */
   estimate?: EstimateRuntime;
-  /** Filesystem, git and GitHub field API for Ticket Doctor's configuration checks. */
-  doctor?: ComplexityDoctorRuntime;
   /** Working directory, filesystem and process probe for `doctor` (#64). */
   localDoctor?: LocalDoctorRuntime;
-  /** Filesystem, git and GitHub field API for the briefing's estimation queue (#122). */
-  estimation?: EstimationRuntime;
+  /** Filesystem, git and working directory for the briefing's estimation settings (#122). */
+  estimation?: LabelEstimationRuntime;
   /** Filesystem, git and working directory for the workflow-guide setting (#71). */
   guide?: GuideRuntime;
 }
@@ -130,7 +123,7 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   who N [--stale-hours N]  Read-only: who is working on ticket N? Claims, PRs, activity,
                         handoff evidence and contradictions in one operation
   ticket-doctor [--stale-hours N] [--limit N]  Read-only consistency scan of all open tickets
-                        and repository complexity configuration, with suggested correction
+                        (including conflicting complexity labels), with suggested correction
                         commands per finding (never run; claim commands only for the claimant)
   doctor [--agent NAME] [--role NAME] [--entry KEY | --harness NAME]  Read-only local
                         configuration checks: Node, gh install/auth, checkout, agent-inbox.toml
@@ -140,8 +133,6 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
                         .github/triage.json of this checkout; identity.name and
                         identity.triage_role in local agent-inbox.toml, entry chosen by
                         --entry KEY, --harness NAME or the detected harness
-  setup complexity [--select ID | --create]  Discover native issue fields and map one
-                        for complexity; creation is explicit (setup --help)
   --repo owner/name     Repository (default: current gh checkout)
   --json                Versioned structured output (from a checkout: npm run --silent triage)
   --issue N             Include full issue body/history, even if closed; diagnoses
@@ -183,8 +174,7 @@ ${guideRules()
   Details: ${PROCESS_COMMAND}
 Exit: 0 complete; 2 incomplete evidence; 1 invalid arguments/API/cache failure.
 The briefing never changes GitHub; only ${mutatingCommands().join(", ")} do;
-config set changes only the local .github/triage.json or agent-inbox.toml; setup complexity may
-also create an owner-wide issue field, only after --create/confirmation. Hints require inspection.
+config set changes only the local .github/triage.json or agent-inbox.toml. Hints require inspection.
 `;
 export const depsHelp = `Usage: github-triage deps N [--tree] [--json] [--repo owner/name]
        github-triage deps add N --on M [--on K] --note WHY [--dry-run] [--json]
@@ -565,11 +555,6 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
     return 0;
   }
   if (args[0] === "config") return runConfig(args.slice(1), output, runtime.config);
-  if (args[0] === "setup")
-    return runSetup(args.slice(1), output, {
-      prompt: runtime.setup ? null : terminalPrompt(),
-      ...runtime.setup,
-    });
   if (args[0] === "doctor") {
     const { values } = parseArgs({
       args: args.slice(1),

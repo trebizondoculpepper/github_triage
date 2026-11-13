@@ -13,7 +13,7 @@ import { compactBriefing, compactText } from "./compact.js";
 import { briefing, textReport } from "./briefing.js";
 import type { BriefingOptions } from "./briefing.js";
 import { collectLabelEstimationInput } from "./complexitylabels.js";
-import type { EstimationRuntime } from "./estimation.js";
+import type { LabelEstimationRuntime } from "./complexitylabels.js";
 import type { Snapshot } from "./types.js";
 import { briefingProcess, resolveGuideSetting } from "./process.js";
 import type { BriefingProcess, GuideRuntime } from "./process.js";
@@ -41,7 +41,7 @@ export interface PresentedBriefing {
 export async function presentBriefing(
   snapshot: Snapshot,
   options: PresentOptions,
-  estimationRuntime?: EstimationRuntime,
+  estimationRuntime?: LabelEstimationRuntime,
   now: Date = new Date(),
   redactDiagnostic?: (text: string) => string,
 ): Promise<PresentedBriefing> {
@@ -86,7 +86,7 @@ export async function presentBriefing(
 export interface ReadRuntime {
   collect: typeof collect;
   dependencyReport: typeof dependencyReport;
-  estimation?: EstimationRuntime;
+  estimation?: LabelEstimationRuntime;
   /** Clock for freshness ages; defaults to the system clock. */
   now?: () => Date;
   /** Rewrites locally generated diagnostics (not GitHub evidence) for remote consumers. */
