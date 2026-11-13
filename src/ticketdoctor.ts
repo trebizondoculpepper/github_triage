@@ -385,8 +385,7 @@ export function ticketDoctor(
       );
     const prs = openPrsFor.get(issue.url) ?? [];
     const pickup = labels.filter((l) => doctorPolicy.claimedReadiness.includes(l));
-    // Releasing as done ends active ownership, so it is a single definite step only when every
-    // linked PR is evidently finished (not draft, checks green, no open review threads).
+    // Whether every linked PR is evidently finished (not draft, checks green, no open threads).
     const finished = prs.length > 0 && prs.every((p) => p.finished);
     if (prs.length && pickup.length)
       add(
@@ -401,17 +400,15 @@ export function ticketDoctor(
           ...prs.map((p) => cmd.pr(p.number)),
           ...(held.length === 1
             ? [
-                ...(finished
-                  ? []
-                  : [
-                      cmd.labels(
-                        issue.number,
-                        [],
-                        pickup,
-                        `${agents[0]} keeps the claim while the PR is unfinished: remove the leftover pickup label.`,
-                        { choice: "keep-claim", runBy: `agent ${agents[0]} only (the claimant)` },
-                      ),
-                    ]),
+                // The outcome is the claimant's choice (release never chooses for them), so
+                // keeping the claim is always offered alongside the done handoff.
+                cmd.labels(
+                  issue.number,
+                  [],
+                  pickup,
+                  `${agents[0]} keeps the claim${finished ? "" : " while the PR is unfinished"}: remove the leftover pickup label.`,
+                  { choice: "keep-claim", runBy: `agent ${agents[0]} only (the claimant)` },
+                ),
                 ...prs.map((p) => {
                   const step = cmd.release(
                     issue.number,
@@ -438,7 +435,8 @@ export function ticketDoctor(
                   ),
                 ]),
         ],
-        { judgment: prs.length > 1 || held.length > 1 || (held.length === 1 && !finished) },
+        // A claimant's handoff outcome is always their decision; only the unclaimed fix is mechanical.
+        { judgment: prs.length > 1 || held.length > 0 },
       );
     // A handoff to review that no open PR backs: the PR merged or closed, so the awaiting-review
     // state (and any remaining claim) is a leftover to inspect.

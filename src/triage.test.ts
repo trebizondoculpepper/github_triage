@@ -3311,14 +3311,24 @@ describe("Ticket Doctor review fixes", () => {
         "Only once PR #91 is finished",
       );
     }
-    // A finished PR keeps the single definite handoff.
+    // Even with a finished PR the outcome is the claimant's choice: both options, as a judgment,
+    // and the done handoff carries no unfinished-PR precondition.
     const done = ticketDoctor(
       snapshot([issue(40, ["bug", "agent:ana", "status:ready"])], [linkedPr(91, 40)]),
       { now: new Date(time) },
     );
     const plan = planOf(done, 40, "ready-with-open-pr");
-    expect(plan.judgment).toBe(false);
-    expect(plan.steps.map((s) => s.choice).filter(Boolean)).toEqual(["done"]);
+    expect(plan.judgment).toBe(true);
+    expect(plan.steps.map((s) => s.choice).filter(Boolean)).toEqual(["keep-claim", "done"]);
+    expect(plan.steps.find((s) => s.choice === "done")!.preconditions.join(" ")).not.toContain(
+      "Only once",
+    );
+    // Without a claimant the awaiting-review fix stays a single mechanical step.
+    const unclaimed = ticketDoctor(
+      snapshot([issue(43, ["bug", "status:ready"])], [linkedPr(92, 43)]),
+      { now: new Date(time) },
+    );
+    expect(planOf(unclaimed, 43, "ready-with-open-pr").judgment).toBe(false);
   });
   it("truncated labels or PR links: ownership/PR absence unknown, inspection-only plans", () => {
     const truncated = (n: number, names: string[]) =>
