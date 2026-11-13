@@ -16,6 +16,7 @@ import {
 } from "./dependencies.js";
 import { compactBriefing, compactText } from "./compact.js";
 import { applyPlan, claimText, planClaim, planNeedsHuman } from "./claims.js";
+import { checkForUpdate, installedVersion, optOutEnv, updateAdvisory } from "./updates.js";
 import { defaultStaleHours, teamText, teamView } from "./team.js";
 import { migrationPlanText, planMigration } from "./migration.js";
 import { briefing, textReport } from "./briefing.js";
@@ -40,6 +41,8 @@ Read-only LLM action briefing. Requires authenticated gh and Node 20+.
   --agent NAME          Focus current work on explicit inbox owner
   --max-chars N         Compact text budget (default 10000)
   --limit N             Next steps (default 5 compact, 10 expanded)
+  --no-update-check     Skip the npm version check (also ${optOutEnv}=1)
+  version               Show the installed version and the update check result
   --help                Show usage
 Exit: 0 complete; 2 incomplete evidence; 1 invalid arguments/API/cache failure.
 The briefing never changes GitHub; only deps add/remove do. Hints require inspection.
@@ -262,7 +265,7 @@ export async function checkpointSince(path, repository) {
 /**
  * @param {string[]} args
  * @param {(text: string) => Promise<void>} [output]
- * @param {{collect: typeof collect, currentRepository: typeof currentRepository, dependencyReport?: typeof dependencyReport, planDependencyChange?: typeof planDependencyChange, ghRun?: import("./dependencies.js").GhRun, planMigration?: typeof planMigration, migrationRuntime?: Record<string, any>, query?: import("./github.js").Query, now?: () => Date}} [runtime]
+ * @param {{collect: typeof collect, currentRepository: typeof currentRepository, dependencyReport?: typeof dependencyReport, planDependencyChange?: typeof planDependencyChange, ghRun?: import("./dependencies.js").GhRun, planMigration?: typeof planMigration, migrationRuntime?: Record<string, any>, query?: import("./github.js").Query, now?: () => Date, updateCheck?: typeof checkForUpdate, stderr?: (text: string) => void}} [runtime]
  * @returns {Promise<number>}
  */
 export async function main(
@@ -273,6 +276,39 @@ export async function main(
     ),
   runtime = { collect, currentRepository, dependencyReport },
 ) {
+  // Version check (#51): runs alongside the command, bounded by a short timeout, and reports
+  // only on stderr so JSON on stdout stays valid. --offline and opt-outs mean no network.
+  const optOut = args.includes("--no-update-check") || !!process.env[optOutEnv];
+  const rest = args.filter((a) => a !== "--no-update-check");
+  const check = runtime.updateCheck ?? checkForUpdate;
+  if (rest[0] === "version") {
+    const installed = await installedVersion();
+    const result = await check({ offline: rest.includes("--offline"), optOut, installed });
+    await output(
+      rest.includes("--json")
+        ? JSON.stringify({ schemaVersion: 1, version: installed.version, check: result }, null, 2) +
+            "\n"
+        : `github-triage ${installed.version ?? "(unknown version)"}\nUpdate check: ${result.status}${result.reason ? ` — ${result.reason}` : ""}${result.available ? ` (npm ${result.channel}: ${result.available})` : ""}\n`,
+    );
+    return 0;
+  }
+  // Help is instant; it should not wait on the network, so it is not an eligible invocation.
+  const eligible = !rest.includes("--help");
+  const pending = eligible
+    ? Promise.resolve()
+        .then(() => check({ offline: rest.includes("--offline"), optOut }))
+        .catch(() => null)
+    : Promise.resolve(null);
+  try {
+    return await run(rest, output, runtime);
+  } finally {
+    const advisory = updateAdvisory((await pending) ?? { status: "unknown" });
+    if (advisory) (runtime.stderr ?? ((t) => process.stderr.write(t)))(`${advisory}\n`);
+  }
+}
+
+/** The command itself; `main` adds the version check around it. */
+async function run(args, output, runtime) {
   if (args[0] === "claim" || args[0] === "needs-human") {
     const values = workflowArgumentsFor(args[0], args.slice(1));
     const repository = values.repo ?? (await runtime.currentRepository());
