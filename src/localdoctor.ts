@@ -173,7 +173,7 @@ export async function localDoctor(
             next: ["gh --version"],
           },
     );
-    const auth = await probe("gh", ["auth", "status", "--hostname", "github.com"], cwd);
+    const auth = await probe("gh", ["auth", "status", "--active", "--hostname", "github.com"], cwd);
     add(
       auth.code === 0
         ? {

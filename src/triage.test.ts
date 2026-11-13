@@ -6283,7 +6283,7 @@ describe("local configuration doctor (#64)", () => {
   type Answers = Record<string, number | null>;
   const base: Answers = {
     "gh --version": 0,
-    "gh auth status --hostname github.com": 0,
+    "gh auth status --active --hostname github.com": 0,
     "git rev-parse --show-toplevel": 0,
     "git remote -v": 0,
     "git check-ignore --quiet --no-index agent-inbox.toml": 0,
@@ -6411,10 +6411,18 @@ describe("local configuration doctor (#64)", () => {
     expect(localDoctorExitCode(report)).toBe(1);
   });
 
+  it("checks only the active GitHub account, not expired inactive ones", async () => {
+    const r = await run({
+      "gh auth status --active --hostname github.com": 0,
+      "gh auth status --hostname github.com": 1,
+    });
+    expect(r.status["gh.auth"]).toBe("ok");
+  });
+
   it("separates unauthenticated gh, missing identity file, unreadable file and old Node", async () => {
-    expect((await run({ "gh auth status --hostname github.com": 1 })).status["gh.auth"]).toBe(
-      "access",
-    );
+    expect(
+      (await run({ "gh auth status --active --hostname github.com": 1 })).status["gh.auth"],
+    ).toBe("access");
     expect((await run({}, null)).status["identity.file"]).toBe("missing");
     const denied = Object.assign(new Error("denied"), { code: "EACCES" });
     expect((await run({}, denied)).status["identity.file"]).toBe("access");
