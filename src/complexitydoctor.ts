@@ -18,7 +18,7 @@ import {
   settingFor,
 } from "./config.js";
 import type { ConfigFileSystem, EffectiveSetting, GitRunner } from "./config.js";
-import { discoverFields, ghFieldApi } from "./complexitysetup.js";
+import { createRefusal, discoverFields, ghFieldApi } from "./complexitysetup.js";
 import type { DiscoveredField, Discovery, FieldApi } from "./complexitysetup.js";
 import type { Certainty } from "./ticketdoctor.js";
 
@@ -136,10 +136,13 @@ export async function diagnoseComplexityConfig(
       failure = `native issue-field discovery failed: ${(error as Error).message}`;
     }
   const compatible = discovery?.fields.filter((f) => f.compatible) ?? [];
+  const blocked = discovery && !compatible.length ? createRefusal(discovery) : null;
   const suggestion = compatible.length
     ? `${SETUP} --select ${compatible[0]!.id}`
     : discovery?.status === "available"
-      ? `${SETUP} --create`
+      ? blocked
+        ? blocked.recovery
+        : `${SETUP} --create`
       : SETUP;
 
   if (discovery?.status === "unsupported" || discovery?.status === "inaccessible") {

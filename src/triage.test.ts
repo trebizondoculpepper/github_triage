@@ -4422,6 +4422,16 @@ describe("Ticket Doctor: complexity configuration (#120)", () => {
       findings: [{ rule: "config-unavailable" }],
     });
   });
+  it("never recommends --create when setup would refuse it", async () => {
+    const taken = { ...bad, id: "IF_taken", name: "complexity" };
+    const unmapped = (await run(null, owner(list(taken)))).r;
+    expect(unmapped.findings[0]!.next[0]).toMatch(/Choose or fix a field in GitHub yourself/);
+    expect(unmapped.findings[0]!.next.join(" ")).not.toContain("--create");
+    const incompatible = (await run(mapped("IF_taken"), owner(list(taken)))).r;
+    expect(incompatible.findings[0]!.next.join(" ")).not.toContain("--create");
+    const free = (await run(null, owner(list(bad)))).r;
+    expect(free.findings[0]!.next[0]).toBe("github-triage setup complexity --create");
+  });
   it("reports an unreadable configuration file as unknown instead of failing the report", async () => {
     const denied = Object.assign(new Error("denied"), { code: "EACCES", path });
     const { r, queries } = await run(mapped("IF_good"), owner(list(good)), { readError: denied });
