@@ -12,11 +12,23 @@ Eligible implementation pickup is open, unclaimed, `status:ready` or `status:inc
 
 `platform:codex`, `platform:claude-code`, `platform:opencode`, `platform:ori` represent explicit restrictions. Multiple platform labels are an allowed-set; the viewer must match one. No platform label means unrestricted. Unknown viewer platform means restricted tickets are inspection context, not confirmed pickup. This does not restrict non-exclusive attention visibility.
 
+## Blended next-action policy
+
+The reviewed replacement policy is [blended-action-queues.md](blended-action-queues.md). On delivery it replaces fixed implementation-before-estimation ordering in both role views; the paragraphs below retain the existing baseline and unrelated eligibility rules. Assessments become first-class ranked actions, with paired impact/complexity facts and cross-role boosts.
+
 ## Implementer: advance implementation
 
-First matching action group: (1) attention explicitly addressed to the viewer, (2) actionable PR follow-up, (3) own active work, (4) eligible pickup. Keep directed attention visible regardless of role or urgency. Group linked ticket/PR work once and retain all relevant reasons.
+First matching action group: (1) attention explicitly addressed to the viewer, (2) actionable follow-up on the viewer’s own PRs, (3) actionable review opportunities on other PRs that can advance delivery, (4) own active work, (5) eligible implementation pickup, (6) optional estimation work. Keep directed attention visible regardless of role or urgency. Group linked ticket/PR work once and retain all relevant reasons.
 
 PR follow-up distinguishes review/rework, failing checks/conflicts, current verified merge consideration, and waiting. Show own follow-up before unassigned/other review opportunities; do not make shared-login authorship proof of ownership. Pending/queued CI is waiting. Cancelled checks are incomplete verification, distinct from test failures. Review receipts/comments count as evidence; state reviewed SHA versus current head. A new head needs fresh coverage or an explicit stale-review notice. Green/current evidence suggests inspection/merge consideration, never approval. Closed-unmerged PRs need inspection, not an awaiting-merge claim.
+
+### Bounded first ranking version (#182, #196)
+
+Owner decision: ship a simple deterministic ordering before introducing a compound benefit/effort score. The action groups above are lifecycle priorities, not numbers to multiply by impact. A short actionable review that can unblock another contributor’s merge is preferred over continuing the viewer’s implementation; pending checks/reviews, intentionally parked/draft work and unknown merge evidence do not become actionable reviews. This is a provisional flow heuristic, not a claim that human-team guidance proves an optimal LLM schedule. Choose at normal action boundaries, never interrupt a running tool or steal/reassign a claim automatically. Preserve eligibility and fresh head/protection requirements.
+
+Within comparable actionable candidates, use proven immediate otherwise-ready unlock impact, then oldest first and stable identity, while retaining the applicable existing urgency and incomplete-work keys for pickup. Retain explicit oldest/newest pickup semantics below. Do not turn a partial multi-PR contribution into delivery or credit an estimate with clearing implementation blockers. Missing impact stays an explicit lower bound/unknown, not definite zero. Do not fetch a full dependency tree for routine prioritization.
+
+Complexity and future designer-assessed benefit remain visible information in this first version; no impact/complexity ratio, remaining-effort estimate or new risk score is required. Later #244–#248 may add paired assessments and a separately reviewed within-group easy-win heuristic, without delaying this baseline. Measure review waiting time, time to merge, throughput and context/token cost when revisiting the default; no paid bulk study is authorized by this decision.
 
 ## Designer: unblock active work before new design
 

@@ -49,7 +49,7 @@ Keep separate eligibility for implementation and estimation. Open native blocker
 
 Preserve the optional queue and `--estimate` view. With complexity enabled, it contains known-unestimated and meaningfully stale assessments; include blocked tickets while preserving their implementation-ineligible status. Explain conflicts as inspection candidates, distinct from ordinary unestimated work. Disabled complexity suppresses the queue without deleting labels or history. Read sizes from the ordinary collected labels: no extra native-field queries, field mapping, owner-wide discovery or account setup.
 
-Default work selection keeps addressed attention, actionable PR follow-up, current contributions and eligible implementation ahead of optional estimation. The queue/record operation acquires no claim. This change does not add size-weighted pickup scores, mandatory estimates, automatic splitting or designer escalation. Explicit oldest/newest ordering retains its existing semantics and all relevant metadata stays visible within output budgets.
+The baseline keeps addressed attention, actionable PR follow-up, current contributions and eligible implementation ahead of optional estimation. The documentation-first replacement in [blended-action-queues.md](blended-action-queues.md) supersedes that fixed assessment-last policy when implemented, blending assessment and implementation actions using known value and cross-role signals. The queue/record operation acquires no claim. This change does not add size-weighted pickup scores, mandatory estimates, automatic splitting or designer escalation. Explicit oldest/newest ordering retains its existing semantics and all relevant metadata stays visible within output budgets.
 
 ## Help, configuration and output
 
