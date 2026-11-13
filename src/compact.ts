@@ -26,6 +26,7 @@ export const ruleMetadata = new Map<string, RuleGroup>([
   ["ready-prerequisites-unverified", "dependencies"],
   ["blocker-explanation", "dependencies"],
   ["ready-unclaimed", "available"],
+  ["urgency-conflict", "hygiene"],
   ["addressed-attention", "addressed"],
   ...[
     "native-evidence-unknown",
