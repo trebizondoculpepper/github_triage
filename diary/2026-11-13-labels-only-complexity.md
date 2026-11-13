@@ -1,3 +1,5 @@
 # Labels-only complexity handoff
 
 Owner approved replacing native issue fields entirely with repository T-shirt labels; no field users exist, so no migration or dual backend is needed. Explicit recording creates its requested missing label, replaces recognized size labels and preserves unrelated labels. Require justification of the assigned size only, not an explanation for another agent's judgment. Kept rationale/history, default enablement, optional queue and deferred calibration. Retired field-specific Doctor work while preserving general Doctor cleanup. Replaced the unmerged field-permission proposal with the new contract and focused implementation handoff; no runtime code or live labels changed.
+
+Backlog review found #25/#64 returned for identity design: another agent reports a distinction between retaining the existing local identity file and removing the external service. Asked the owner directly for that distinction, preserved needs-design/ownership, and kept labels, polling and scenario work independent.
