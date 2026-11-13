@@ -129,6 +129,27 @@ export function planCommands(repository: string) {
           ],
         },
       ),
+    /** #178: record the judged size and remove invalid `complexity:*` labels in one write. */
+    estimateReplaceInvalid: (n: number, invalid: readonly string[]) =>
+      step(
+        "command",
+        `Record the size of #${n} you judge correct, removing the invalid label(s) ${invalid.join(", ")}; it also replaces every other size label.`,
+        triage(
+          "estimate",
+          String(n),
+          "--size",
+          "<SIZE>",
+          "--rationale",
+          "<RATIONALE>",
+          "--replace-invalid",
+        ),
+        {
+          preconditions: [
+            "Read the ticket and choose the size yourself; a suggested size is never applied automatically.",
+            "The command re-reads the labels first and refuses if they changed or are incomplete.",
+          ],
+        },
+      ),
     needsHuman: (n: number) =>
       step(
         "command",

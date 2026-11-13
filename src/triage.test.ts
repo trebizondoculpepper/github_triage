@@ -70,7 +70,9 @@ import {
   collectLabelEstimationInput,
   complexityLabelFindings,
   complexityLabelName,
+  INVALID_SIZE_SUGGESTIONS,
   labelEstimationReport,
+  suggestedSize,
 } from "./complexitylabels.js";
 import { estimationText } from "./estimation.js";
 import {
@@ -5221,12 +5223,99 @@ describe("estimate N records a size label with provenance (#152)", () => {
     expect(errored.json().code).toBe("labels-unavailable");
     expect([...truncated.mutations, ...errored.mutations]).toEqual([]);
   });
-  it("refuses unrecognized complexity labels instead of guessing", async () => {
+  it("refuses unrecognized complexity labels instead of guessing, naming --replace-invalid", async () => {
     const t = harness({ labels: ["complexity:huge"] });
     expect(await t.call(...base)).toBe(1);
     expect(t.json()).toMatchObject({ code: "unrecognized-label" });
+    expect(t.json().recovery).toContain("--replace-invalid");
     expect(t.json().recovery).toContain("--remove-label");
     expect(t.mutations).toEqual([]);
+  });
+  it("--replace-invalid removes invalid and other size labels and records them (#178)", async () => {
+    const t = harness({
+      labels: ["bug", "complexity:huge", "complexity:S", "Complexity:Big"],
+      repoLabels: ["complexity:M"],
+    });
+    expect(await t.call(...base, "--replace-invalid")).toBe(0);
+    expect(t.names()).toEqual(["bug", "complexity:M"]);
+    expect(t.json()).toMatchObject({
+      status: "recorded",
+      previous: ["S"],
+      replacedInvalid: ["complexity:huge", "Complexity:Big"],
+      labelsRemoved: ["complexity:huge", "complexity:S", "Complexity:Big"],
+      final: { sizes: ["M"], invalid: [] },
+    });
+    const stored = parseLabelProvenance(t.remote.comments.at(-1)!);
+    expect(stored).toMatchObject({
+      previous: ["S"],
+      replacedInvalid: ["complexity:huge", "Complexity:Big"],
+    });
+    expect(t.remote.comments.at(-1)).toContain(
+      "Replaced invalid complexity label(s): complexity:huge",
+    );
+    // Idempotent: the same command again writes nothing.
+    const writes = t.mutations.length;
+    expect(await t.call(...base, "--replace-invalid")).toBe(0);
+    expect(t.json().status).toBe("unchanged");
+    expect(t.mutations).toHaveLength(writes);
+  });
+  it("--replace-invalid still removes an invalid label beside an already-recorded size", async () => {
+    const t = harness({ labels: ["complexity:M"] });
+    expect(await t.call(...base)).toBe(0);
+    t.remote.labels.push({ id: "LA_99", name: "complexity:medium" });
+    expect(await t.call(...base)).toBe(1);
+    expect(await t.call(...base, "--replace-invalid")).toBe(0);
+    expect(t.names()).toEqual(["complexity:M"]);
+    expect(t.json()).toMatchObject({ status: "recorded", replacedInvalid: ["complexity:medium"] });
+  });
+  it("--replace-invalid retries a partial write without duplicating, recording only observed labels", async () => {
+    const options = {
+      labels: ["complexity:huge"],
+      repoLabels: ["complexity:M"],
+      failComment: true,
+    };
+    const t = harness(options);
+    expect(await t.call(...base, "--replace-invalid")).toBe(2);
+    expect(t.json()).toMatchObject({ status: "partial", provenanceWritten: false });
+    expect(t.json().recovery).toContain("Re-run the same command");
+    expect(t.names()).toEqual(["complexity:M"]);
+    options.failComment = false;
+    expect(await t.call(...base, "--replace-invalid")).toBe(0);
+    expect(t.json()).toMatchObject({ status: "recorded", labelsAdded: [], labelsRemoved: [] });
+    // The invalid label was removed by the earlier run, so this run did not observe it.
+    expect(parseLabelProvenance(t.remote.comments.at(-1)!)?.replacedInvalid).toBeUndefined();
+    expect(await t.call(...base, "--replace-invalid")).toBe(0);
+    expect(t.json().status).toBe("unchanged");
+    expect(t.remote.comments).toHaveLength(1);
+  });
+  it("--replace-invalid treats truncated labels as unknown and writes nothing", async () => {
+    const t = harness({ labels: ["complexity:huge"], truncated: true });
+    expect(await t.call(...base, "--replace-invalid")).toBe(2);
+    expect(t.json()).toMatchObject({ status: "failed:unknown", code: "labels-unavailable" });
+    expect(t.mutations).toEqual([]);
+  });
+  it("Ticket Doctor's invalid-label command runs through the real estimate parser (#178)", async () => {
+    const r = ticketDoctor(
+      {
+        ...snapshot([issue(7, ["bug", "status:ready", "complexity:huge"])], []),
+        repository: "owner/name",
+      },
+      { now: new Date(time) },
+    );
+    const finding = r.tickets[0]!.findings.find((f) => f.kind === "complexity-label-invalid")!;
+    const fix = finding.plan.steps.find((x) => x.argv[1] === "estimate")!;
+    expect(fix.command).not.toContain("#");
+    expect(fix.argv.slice(fix.argv.indexOf("--repo"), fix.argv.indexOf("--repo") + 2)).toEqual([
+      "--repo",
+      "owner/name",
+    ]);
+    expect(fix.placeholders).toEqual(["<SIZE>", "<RATIONALE>"]);
+    const argv = fix.argv
+      .slice(3)
+      .map((a) => (a === "<SIZE>" ? "XL" : a === "<RATIONALE>" ? "huge meant XL" : a));
+    const t = harness({ labels: ["bug", "complexity:huge"] });
+    expect(await t.call(...argv, "--json")).toBe(0);
+    expect(t.names()).toEqual(["bug", "complexity:XL"]);
   });
   it("reports permission refusal to create the label without touching the ticket", async () => {
     const t = harness({ labels: ["complexity:S"], createFails: "denied" });
@@ -9216,6 +9305,73 @@ describe("label-backed complexity classification and prepared reader (#151)", ()
     ).toBe("disabled");
   });
 
+  it("suggests sizes from the registered table only, case-insensitively (#178)", () => {
+    expect(INVALID_SIZE_SUGGESTIONS).toMatchObject({
+      huge: "XL",
+      small: "S",
+      med: "M",
+      tiny: "XS",
+    });
+    expect(suggestedSize("complexity:Huge")).toBe("XL");
+    expect(suggestedSize("complexity:banana")).toBeNull();
+    expect(suggestedSize("complexity:xl")).toBeNull(); // valid, not invalid
+    expect(suggestedSize("complexity:constructor")).toBeNull();
+    expect(complexityLabelFindings(labelled(1, ["complexity:xl"]))).toEqual([]);
+  });
+  it("Ticket Doctor flags invalid complexity labels as a judgment plan with suggestions (#178)", () => {
+    const r = ticketDoctor(
+      snapshot(
+        [
+          labelled(1, ["bug", "status:ready", "complexity:huge"]),
+          labelled(2, ["bug", "status:ready", "complexity:banana"]),
+          labelled(3, ["bug", "status:ready", "complexity:S", "complexity:large", "complexity:XL"]),
+          labelled(4, ["bug", "status:ready", "complexity:tiny"], true),
+        ],
+        [],
+      ),
+      { now: new Date(time) },
+    );
+    const invalid = (n: number) =>
+      r.tickets
+        .find((t) => t.number === n)!
+        .findings.find((f) => f.kind === "complexity-label-invalid")!;
+    // Mapped suffix: a labelled suggestion, never an applied size.
+    expect(invalid(1)).toMatchObject({ certainty: "definite", plan: { judgment: true } });
+    expect(invalid(1).detail).toContain("complexity:huge (suggested size XL)");
+    expect(invalid(1).plan.facts).toEqual([
+      "Suggestion only (never applied): complexity:huge probably means XL; confirm against the ticket.",
+    ]);
+    const fix = invalid(1).plan.steps.find((x) => x.argv[1] === "estimate")!;
+    expect(fix.argv).toEqual([
+      "github-triage",
+      "estimate",
+      "1",
+      "--size",
+      "<SIZE>",
+      "--rationale",
+      "<RATIONALE>",
+      "--replace-invalid",
+      "--repo",
+      repo,
+    ]);
+    // Unmapped suffix: no suggestion; asks for a size.
+    expect(invalid(2).detail).toContain("complexity:banana (no suggestion)");
+    expect(invalid(2).plan.facts[0]).toContain("No suggestion for complexity:banana");
+    // Mixed valid and invalid: both are reported, and several valid sizes are also a conflict.
+    expect(invalid(3).detail).toContain(
+      "valid size label(s) also present: complexity:S, complexity:XL",
+    );
+    expect(
+      r.tickets
+        .find((t) => t.number === 3)!
+        .findings.map((f) => f.kind)
+        .filter((k) => k.startsWith("complexity")),
+    ).toEqual(["complexity-label-invalid", "complexity-label-conflict"]);
+    // Truncated labels: unknown, inspection only, the suggestion kept as a fact.
+    expect(invalid(4)).toMatchObject({ certainty: "unknown", plan: { judgment: false } });
+    expect(invalid(4).plan.steps.every((x) => x.kind === "inspect")).toBe(true);
+    expect(invalid(4).plan.facts[0]).toContain("probably means XS");
+  });
   it("gives Ticket Doctor conflict and incomplete findings, never for unestimated tickets", () => {
     expect(complexityLabelFindings(labelled(1, []))).toEqual([]);
     expect(complexityLabelFindings(labelled(1, ["complexity:XS", "complexity:XXL"]))).toMatchObject(
