@@ -45,4 +45,4 @@ The owner accepts a recent Node requirement: [the current Node LTS](runtime.md),
 
 ## Estimation proposal
 
-[Repository-relative estimation and risk](estimation-risk.md) records the agreed default T-shirt/risk guidance and proposed small delivery slices. Native-field integration, estimation queues and easy-wins ranking are not implemented or implicitly approved by that proposal.
+[Repository-relative complexity estimation](complexity-estimation.md) records default T-shirt guidance and proposed small delivery slices. Native-field integration and estimation queues are not implemented or implicitly approved. Historical recalibration is later work; risk assessment belongs in a separate change set.

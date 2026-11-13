@@ -1,6 +1,6 @@
 # Repository-relative complexity: initial guidance and rollout
 
-Design discussion and delivery proposal. The first delivery is complexity only: optional T-shirt estimation using bundled guidance, native GitHub storage and CLI/MCP help. Risk is shelved for a later extension that can reuse the same mechanisms. Repository-history recalibration is also deferred until estimates exist. Designer escalation, automatic splitting and new ranking weights are not decided here. No fields, labels or runtime features are created by this document.
+Design discussion and delivery proposal. The first delivery is complexity only: optional T-shirt estimation using bundled guidance, native GitHub storage and CLI/MCP help. Risk assessment is outside this change set and will be designed separately later. Repository-history recalibration is also deferred until estimates exist. Designer escalation, automatic splitting and new ranking weights are not decided here. No fields, labels or runtime features are created by this document.
 
 ## Default complexity guidance
 
@@ -19,21 +19,9 @@ These are proposed retrospective anchors, not measured effort or elapsed-time fa
 
 Store stable reference tickets and a guidance version in repository-specific calibration. Initially use this bundled structural rubric when a repository lacks anchors, stating that local calibration is incomplete. Do not hard-code this repository's ticket numbers into implementation rules or use its anchors as another repository's benchmarks. A later maintenance feature can review calibration against actual delivered scope and surprises, not waiting time, review count or an agent's personal speed. Initial delivery does not require historical estimates, repository anchors or that maintenance feature. Scope changes can justify re-estimation; unchanged commits do not require repeated estimates.
 
-## Deferred: simple risk guidance
-
-This is retained future guidance, not part of the complexity delivery. When risk is introduced, use exactly three assessed values:
-
-| Risk   | Initial guidance                                                                                                                           |
-| ------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Low    | Presentation-only change with no credential, authentication or security-boundary effect                                                    |
-| Medium | Ordinary functional/integration behavior with failure consequences, without the High criteria below                                        |
-| High   | Direct interaction with credentials, authentication services or security-sensitive behavior where an error could introduce a vulnerability |
-
-Assess the changed behavior and boundary, not just the presence of an existing authenticated client. A very small authentication edit can still be High risk. A broad behavior-preserving migration can be XL without being High under this security-focused rubric. Low is not a claim that mistakes are impossible. Record a concise reason and uncertainty; if not assessed, leave the field unset rather than defaulting to Medium or Low. Further risk-policy expansion is a separate decision.
-
 ## Native storage and repository meaning
 
-Use native GitHub fields, never size/risk labels as a silent fallback. The initial field is Complexity (single-select, XS through XXL). A separate Risk field (Low/Medium/High) is deferred; do not provision it as an initial prerequisite. GitHub's [issue-field documentation](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/managing-issue-fields) describes customizable single-select fields for user/organization-owned repositories. Definitions live at the account/organization level; the repository profile supplies calibration and field-ID mapping. Shared vocabulary does not imply cross-repository size equivalence. A GitHub Project board is not required for the repository-relative concept.
+Use native GitHub fields, never size labels as a silent fallback. The initial field is Complexity (single-select, XS through XXL). GitHub's [issue-field documentation](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/managing-issue-fields) describes customizable single-select fields for user/organization-owned repositories. Definitions live at the account/organization level; the repository profile supplies calibration and field-ID mapping. Shared vocabulary does not imply cross-repository size equivalence. A GitHub Project board is not required for the repository-relative concept.
 
 Select field IDs explicitly, confirm options/visibility/read-write API support, and report unsupported or inaccessible configuration clearly. Do not automatically alter account-wide options or private/public visibility. No Project-field copy or label duplicate becomes a competing source of truth. The bounded native-field discovery/setup slice must establish actual API capability before implementation promises a write path.
 
@@ -47,29 +35,19 @@ Normal work selection advances attention/PR follow-up, active contributions and 
 
 ## Help and MCP guidance
 
-Bundle the initial complexity rubric with the estimation capability. Risk guidance is not an initial estimation requirement. Estimation --help and the equivalent MCP-discoverable help/guidance surface expose the same defaults, examples, meaning of blocked-ticket assumptions and native-field prerequisites. A short tool description points to full local guidance without a general documentation search. Never present proposed commands as installed or misuse stderr/text on MCP protocol stdout.
+Bundle the initial complexity rubric with the estimation capability. Estimation --help and the equivalent MCP-discoverable help/guidance surface expose the same defaults, examples, meaning of blocked-ticket assumptions and native-field prerequisites. A short tool description points to full local guidance without a general documentation search. Never present proposed commands as installed or misuse stderr/text on MCP protocol stdout.
 
 Use one versioned guidance definition shared by the renderers; do not maintain separate CLI/MCP prose. Rules-system overrides are a future extension: no custom rule language, per-repository executable policy or mandatory designer escalation is required for the initial capability. Repository reference anchors can vary while the initial structural default remains discoverable.
-
-## Deferred: unlocking utility and easy wins
-
-After complexity is available, a future extension may combine three distinct inputs: estimated complexity, assessed risk and measured immediate-unlock utility. Utility reuses doc/design/briefings.md: count distinct otherwise-ready dependants for which this ticket is the last open native blocker; missing evidence does not count as confirmed benefit. Blocked tickets can have estimates, but cannot enter eligible implementation pickup merely because their apparent utility is high.
-
-First display the three factors and evidence without changing default ordering. A subsequent optional easy-wins view can highlight eligible low-risk XS/S work with positive immediate unlocks, sorting by utility and then smaller size. Unassessed risk/size is not implicitly favorable. A more general compound score remains a proposal: coefficients are policy choices, not measured effort ratios, and all inputs/reasons must stay visible. Do not adopt arbitrary numeric T-shirt multipliers as if M were objectively twice S.
-
-Any agreed ranking extension stays inside general pickup and existing urgency bands. Addressed attention, PR follow-up and active work retain their lifecycle priority. Explicit oldest/newest ordering excludes these new weights while keeping metadata visible. Do not build designer escalation or automatic splitting in this slice.
 
 ## Proposed focused delivery tickets
 
 1. **Default complexity guidance and help:** bundle one versioned XS–XXL rubric and examples, available in estimation CLI/MCP help. A new repository uses these suggestions immediately; local historical anchors are optional. No remote writes or ranking changes.
-2. **Native complexity-field discovery and configuration:** verify API read/write behavior, resolve field IDs/options/visibility for a repository, and return actionable setup diagnostics. No risk field, account-wide automatic mutation or label fallback.
+2. **Native complexity-field discovery and configuration:** verify API read/write behavior, resolve field IDs/options/visibility for a repository, and return actionable setup diagnostics. No account-wide automatic mutation or label fallback.
 3. **Record a complexity estimate:** save size with rationale, assumptions and provenance; preserve newer estimates and report partial writes. No readiness/claim changes as a side effect.
 4. **Estimation queue and visibility:** surface unestimated or meaningfully stale tickets, including blocked work, as optional implementer activity; display size without changing pickup ranking. Clarify one-active-contribution handling. No compulsory estimate gate.
 
 ### Later, after estimates exist
 
 5. **Repository recalibration maintenance:** compare estimates within one repository and delivered scope to suggest revised guidance and representative benchmarks. Show evidence and proposed changes for review; do not silently rewrite historical estimates or require this job before initial sizing works.
-6. **Risk assessment:** reuse discovery, recording and guidance mechanisms for a separate Low/Medium/High metric. It does not block complexity.
-7. **Optional easy-wins ordering:** consider complexity, risk and immediate-unlock utility once the inputs exist; separately review any score and preserve existing attention, lifecycle, urgency and explicit ordering rules.
 
 These are proposed slices, not filed implementation tickets or claims of readiness. Pitch/approve them individually before delivery. The owner deliberately deferred designer rules; do not turn estimates into an unagreed escalation gate.
