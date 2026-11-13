@@ -137,3 +137,5 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for contribution requirements and the [d
 ## License
 
 [MIT](LICENSE).
+
+Complexity storage is changing to repository labels (`complexity:XS`–`complexity:XXL`); native-field setup above describes the current implementation and is being retired. See the [replacement contract](doc/design/complexity-estimation.md). No field migration or separate field permissions are planned.

@@ -49,4 +49,6 @@ The owner accepts a recent Node requirement: [the current Node LTS](runtime.md),
 
 [Repository configuration](repository-configuration.md) defines the proposed repository-only config command boundary, defaults and migration responsibilities.
 
-[Doctor permission checks](doctor-permissions.md) defines minimal, configuration-driven field/access diagnostics: creation permissions matter only after a missing field is confirmed.
+[Labels-only complexity](complexity-estimation.md) supersedes native-field setup and permission work. The recognized labels are the only size authority; no field migration is required.
+
+[Rule scenario plausibility](rule-scenario-plausibility.md) defines the small decision/explanation fixture suite before bulk agent trials. It is independent of production labels-only delivery.
