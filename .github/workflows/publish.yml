@@ -1,21 +1,26 @@
 name: Publish
-# npm releases (doc/npm-releases.md): verified main builds publish prereleases under `next`;
-# commits promoted to the `release` branch publish official versions under `latest`.
+# npm releases (doc/npm-releases.md, #79): publication happens only on explicit request.
+# `npm run make-prerelease` dispatches channel=next on main; `npm run release` fast-forwards
+# `release` and dispatches channel=latest on it. Pushes never publish.
 on:
-  push:
-    branches: [main, release]
-  # Re-run a release whose run was lost or failed (npm run release does this when release
-  # already matches main). Only the release branch is accepted; see "Choose channel".
   workflow_dispatch:
+    inputs:
+      channel:
+        description: "next (prerelease, from main) or latest (official release, from release)"
+        required: true
+        type: choice
+        options: [next, latest]
+      sha:
+        description: "Full commit SHA selected by the helper; must still be the dispatched branch's head"
+        required: true
+        type: string
 
 permissions:
   contents: read
 
-# One queue per branch, never cancelling a run that may already be publishing. GitHub keeps
-# only one pending run per group, so main pushes replace only older pending main runs (only
-# main's head publishes anyway) and can never cancel a pending official release.
+# One queue per channel, never cancelling a run that may already be publishing.
 concurrency:
-  group: npm-publish-${{ github.ref_name }}
+  group: npm-publish-${{ inputs.channel }}
   cancel-in-progress: false
 
 jobs:
@@ -27,11 +32,32 @@ jobs:
     permissions:
       contents: write # tag and GitHub release for official versions
       id-token: write # npm trusted publishing (OIDC); no npm token is stored
+    env:
+      CHANNEL: ${{ inputs.channel }}
+      SHA: ${{ inputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.sha }}
           fetch-depth: 0
           persist-credentials: false
+      # Validate before building anything: a wrong channel/branch pairing, a malformed SHA,
+      # a branch that moved after the helper chose the SHA, or a commit not on main all fail
+      # here, so a different commit is never published silently.
+      - name: Validate the request
+        run: |
+          case "$CHANNEL:$GITHUB_REF_NAME" in
+            next:main|latest:release) ;;
+            *) echo "::error::channel $CHANNEL must be dispatched on $( [ "$CHANNEL" = next ] && echo main || echo release ), not $GITHUB_REF_NAME."; exit 1 ;;
+          esac
+          echo "$SHA" | grep -Eq '^[0-9a-f]{40}$' || { echo "::error::sha must be a full 40-character commit SHA."; exit 1; }
+          if [ "$GITHUB_SHA" != "$SHA" ]; then
+            echo "::error::$GITHUB_REF_NAME is at $GITHUB_SHA, not the requested $SHA (it moved after selection). Nothing was published; make a new explicit request."
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$SHA" origin/main \
+            || { echo "::error::$SHA is not on main."; exit 1; }
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -44,32 +70,10 @@ jobs:
       - run: npm run build
       - run: npm run smoke
       - run: npm run package-test
-      - name: Choose channel
-        id: channel
-        run: |
-          git fetch --no-tags origin main
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$GITHUB_REF_NAME" != "release" ]; then
-            echo "::error::Manual runs are only for the release branch."; exit 1
-          fi
-          if [ "$GITHUB_REF_NAME" = "release" ]; then
-            git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
-              || { echo "::error::The release commit is not on main."; exit 1; }
-            echo "channel=latest" >> "$GITHUB_OUTPUT"
-          else
-            # A delayed run must not move `next` backwards: publish only main's current head.
-            if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then
-              echo "::notice::main has moved on; a newer run publishes."
-              echo "skip=true" >> "$GITHUB_OUTPUT"
-            fi
-            echo "channel=next" >> "$GITHUB_OUTPUT"
-          fi
       - name: Choose version
         id: version
-        if: steps.channel.outputs.skip != 'true'
-        env:
-          CHANNEL: ${{ steps.channel.outputs.channel }}
         run: |
-          node scripts/release-version.mjs "$CHANNEL" "$GITHUB_SHA" > version.json
+          node scripts/release-version.mjs "$CHANNEL" "$SHA" > version.json
           cat version.json
           echo "version=$(node -p 'require("./version.json").version ?? ""')" >> "$GITHUB_OUTPUT"
           echo "published=$(node -p 'require("./version.json").alreadyPublished ?? ""')" >> "$GITHUB_OUTPUT"
@@ -78,13 +82,13 @@ jobs:
         if: steps.version.outputs.version != ''
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          TAG: ${{ steps.channel.outputs.channel }}
+          TAG: ${{ inputs.channel }}
         run: |
           # The registry's read view can lag a publication by a minute or two (#57). If npm
           # reports the chosen prerelease as taken, move to the next one; never bump `latest`.
           for attempt in 1 2 3 4 5; do
             npm version "$VERSION" --no-git-tag-version --allow-same-version
-            npm pkg set gitHead="$GITHUB_SHA"
+            npm pkg set gitHead="$SHA"
             if npm publish --provenance --access public --tag "$TAG" 2> publish.err; then
               echo "version=$VERSION" >> "$GITHUB_OUTPUT"
               exit 0
@@ -101,7 +105,7 @@ jobs:
           exit 1
       - name: Tag and GitHub release
         # Also runs when a retry finds the version already published but the release missing.
-        if: steps.channel.outputs.channel == 'latest' && (steps.version.outputs.version != '' || steps.version.outputs.published != '')
+        if: inputs.channel == 'latest' && (steps.version.outputs.version != '' || steps.version.outputs.published != '')
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.publish.outputs.version || steps.version.outputs.published }}
@@ -109,5 +113,5 @@ jobs:
           if gh release view "v$VERSION" > /dev/null 2>&1; then
             echo "Release v$VERSION already exists."
           else
-            gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" --generate-notes
+            gh release create "v$VERSION" --target "$SHA" --title "v$VERSION" --generate-notes
           fi

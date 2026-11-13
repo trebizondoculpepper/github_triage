@@ -6,7 +6,7 @@ Configured on 2026-11-12. This records the exact settings so that they can be ch
 
 - `.github/workflows/ci.yml` runs on `pull_request` (never `pull_request_target`) with `permissions: contents: read` and no secrets, so a fork's code runs with a read-only token and no credentials.
 - Its matrix jobs (`test (os, node)`) run the Vite+ checks, tests, build, smoke tests and the installed-archive package test. The `verify` job passes only when every matrix job passed, and is the single check to require.
-- Current implementation: `.github/workflows/publish.yml` runs on pushes to `main` and `release`, never for pull requests. The owner superseded automatic publication in #79: the [release contract](npm-releases.md) requires explicit dispatch only. This docs change does not alter the live workflow or repository settings.
+- `.github/workflows/publish.yml` runs only on explicit `workflow_dispatch` (#79), started by `npm run make-prerelease` (channel `next`, on `main`) or `npm run release` (channel `latest`, on `release`), never for pushes or pull requests. It validates the channel/branch pairing, that the requested SHA is still the branch head and that it is on `main` before building or publishing.
 
 ## `main` ruleset
 
