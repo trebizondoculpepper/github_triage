@@ -57,6 +57,7 @@ import type { ClaimAccepted, ClaimPlan, ClaimRefusal } from "./claims.js";
 import { teamText, teamView } from "./team.js";
 import { ticketOwnership, ticketOwnershipText } from "./who.js";
 import { ticketDoctor, ticketDoctorText } from "./ticketdoctor.js";
+import { localDoctor, localDoctorExitCode, localDoctorText } from "./localdoctor.js";
 import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
 
 const repo = "example/project";
@@ -6275,5 +6276,166 @@ describe("pr review history: why does this keep failing review (#60)", () => {
     expect(r).toMatchObject({ kind: "pr-review-history", cost: { requests: 2 } });
     expect(r.current.blockers.join(" ")).toContain("verify");
     expect(r.nextCommands[1]).toBe(`github-triage pr 47 --repo ${repo} --history --json`);
+  });
+});
+
+describe("local configuration doctor (#64)", () => {
+  type Answers = Record<string, number | null>;
+  const base: Answers = {
+    "gh --version": 0,
+    "gh auth status --hostname github.com": 0,
+    "git rev-parse --show-toplevel": 0,
+    "git remote -v": 0,
+    "git check-ignore --quiet --no-index agent-inbox.toml": 0,
+    "git ls-files --error-unmatch -- agent-inbox.toml": 1,
+  };
+  const SECRET = "SECRET-TOKEN-VALUE";
+  async function run(
+    answers: Answers = {},
+    file: string | null | Error = 'name = "x"\ntoken = "SECRET-TOKEN-VALUE"\n',
+    options: { repo?: string; agent?: string; role?: string } = {},
+    nodeVersion = "26.1.0",
+  ) {
+    const all = { ...base, ...answers };
+    const calls: string[] = [];
+    const probe = async (command: string, args: readonly string[]) => {
+      const key = [command, ...args].join(" ");
+      calls.push(key);
+      const code = key in all ? all[key]! : 0;
+      const stdout =
+        key === "git rev-parse --show-toplevel"
+          ? "/private/home/user/project\n"
+          : key === "git remote -v"
+            ? "origin\tgit@github.com:owner/name.git (fetch)\n"
+            : `${SECRET}\n`;
+      return { code, stdout };
+    };
+    const fs = {
+      readText: async () => {
+        if (file instanceof Error) throw file;
+        return file;
+      },
+      writeText: async () => expect.fail("doctor wrote a file"),
+      rename: async () => expect.fail("doctor renamed a file"),
+      remove: async () => expect.fail("doctor removed a file"),
+      makeDirectory: async () => expect.fail("doctor created a directory"),
+    };
+    const report = await localDoctor(options, { cwd: "/x", probe, fs, nodeVersion });
+    const status = Object.fromEntries(report.checks.map((c) => [c.id, c.status]));
+    return { report, status, calls, text: localDoctorText(report), json: JSON.stringify(report) };
+  }
+
+  it("reports a healthy checkout with explicit identity, never leaking contents or paths", async () => {
+    const { report, status, text, json, calls } = await run({}, undefined, {
+      agent: "kavya",
+      role: "implementer",
+    });
+    expect(report).toMatchObject({ schemaVersion: 1, repository: "owner/name", agent: "kavya" });
+    expect(status).toMatchObject({
+      "runtime.node": "ok",
+      "gh.available": "ok",
+      "gh.auth": "ok",
+      "project.checkout": "ok",
+      "identity.file": "ok",
+      "identity.git-ignored": "ok",
+      "identity.git-tracked": "ok",
+      "identity.entry": "unsupported",
+      "identity.agent": "ok",
+      "triage.role": "ok",
+    });
+    expect(localDoctorExitCode(report)).toBe(0);
+    for (const out of [text, json]) {
+      expect(out).not.toContain(SECRET);
+      expect(out).not.toContain("/private/home");
+    }
+    expect(calls.every((c) => !c.includes("login") && !c.startsWith("git rm"))).toBe(true);
+  });
+
+  it("distinguishes a missing ignore rule from an already tracked file", async () => {
+    const missingRule = await run({ "git check-ignore --quiet --no-index agent-inbox.toml": 1 });
+    expect(missingRule.status["identity.git-ignored"]).toBe("missing");
+    expect(missingRule.status["identity.git-tracked"]).toBe("ok");
+    const tracked = await run({ "git ls-files --error-unmatch -- agent-inbox.toml": 0 });
+    expect(tracked.status["identity.git-ignored"]).toBe("ok");
+    expect(tracked.status["identity.git-tracked"]).toBe("invalid");
+    expect(tracked.report.checks.find((c) => c.id === "identity.git-tracked")!.next).toEqual([
+      "git rm --cached agent-inbox.toml",
+    ]);
+    expect(localDoctorExitCode(tracked.report)).toBe(1);
+  });
+
+  it("keeps reporting every check when gh and the checkout are unavailable", async () => {
+    const { status, report } = await run({
+      "gh --version": null,
+      "git rev-parse --show-toplevel": 128,
+    });
+    expect(status).toMatchObject({
+      "gh.available": "missing",
+      "gh.auth": "unknown",
+      "project.checkout": "missing",
+      "identity.file": "unknown",
+      "identity.git-ignored": "unknown",
+      "identity.git-tracked": "unknown",
+      "triage.role": "unsupported",
+    });
+    expect(report.repository).toBeNull();
+    expect(localDoctorExitCode(report)).toBe(1);
+  });
+
+  it("separates unauthenticated gh, missing identity file, unreadable file and old Node", async () => {
+    expect((await run({ "gh auth status --hostname github.com": 1 })).status["gh.auth"]).toBe(
+      "access",
+    );
+    expect((await run({}, null)).status["identity.file"]).toBe("missing");
+    const denied = Object.assign(new Error("denied"), { code: "EACCES" });
+    expect((await run({}, denied)).status["identity.file"]).toBe("access");
+    expect((await run({}, undefined, {}, "20.11.0")).status["runtime.node"]).toBe("invalid");
+  });
+
+  it("treats an ambiguous project or mismatched --repo as unknown, not a guess", async () => {
+    const { status, report } = await run({}, undefined, { repo: "other/repo" });
+    expect(status["project.checkout"]).toBe("unknown");
+    expect(report.repository).toBeNull();
+  });
+
+  it("validates --role against registered views and leaves identity unknown without --agent", async () => {
+    const { status, report } = await run({}, undefined, { role: "agent" });
+    expect(status["triage.role"]).toBe("invalid");
+    expect(status["identity.agent"]).toBe("unknown");
+    const role = report.checks.find((c) => c.id === "triage.role")!;
+    expect(role.next).toContain("github-triage doctor --role implementer");
+  });
+
+  it("is wired into the CLI with versioned JSON", async () => {
+    let out = "";
+    const probe = async (command: string, args: readonly string[]) => {
+      const key = [command, ...args].join(" ");
+      return {
+        code: key in base ? base[key]! : 0,
+        stdout:
+          key === "git rev-parse --show-toplevel"
+            ? "/r\n"
+            : key === "git remote -v"
+              ? "origin\thttps://github.com/owner/name (fetch)\n"
+              : "",
+      };
+    };
+    const code = await main(
+      ["doctor", "--json", "--agent", "a", "--role", "designer"],
+      async (t) => void (out += t),
+      {
+        collect: async () => expect.fail("doctor must not collect"),
+        currentRepository: async () => "owner/name",
+        updateCheck: async () => ({ status: "skipped" }) as never,
+        localDoctor: {
+          cwd: "/r",
+          probe,
+          nodeVersion: "26.0.0",
+          fs: { ...nodeFileSystem, readText: async () => null },
+        },
+      },
+    );
+    expect(JSON.parse(out)).toMatchObject({ schemaVersion: 1, scope: "local-configuration" });
+    expect(code).toBe(1);
   });
 });
