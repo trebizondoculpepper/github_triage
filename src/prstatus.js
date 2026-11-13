@@ -144,10 +144,13 @@ export function prStatus(repository, pr, { now = new Date(), startedAt } = {}) {
     ? {
         at: lastRequest.createdAt,
         url: lastRequest.url,
+        // The Codex state marker answers only a Codex request; other services need their own reply.
         status:
-          codex?.commit_sha === head && codex.status === "completed"
+          requested === reviewerFor.codex &&
+          codex?.commit_sha === head &&
+          codex.status === "completed"
             ? "current head reviewed (Codex)"
-            : codex?.commit_sha === head
+            : requested === reviewerFor.codex && codex?.commit_sha === head
               ? `review in progress on the current head (Codex: ${codex.status})`
               : newerReceipt(lastRequest.createdAt)
                 ? "a reviewer has posted since the request"
@@ -183,6 +186,11 @@ export function prStatus(repository, pr, { now = new Date(), startedAt } = {}) {
       blockers.push(
         `required check \`${workflow.verify}\` is ${required.class} on head ${head.slice(0, 7)}`,
       );
+    // The required check must succeed (workflow.verifySuccess); skipped or neutral is not proof.
+    else if (!workflow.verifySuccess.includes(required.outcome))
+      blockers.push(
+        `required check \`${workflow.verify}\` concluded ${required.outcome.toLowerCase()} on head ${head.slice(0, 7)}; it must succeed`,
+      );
     for (const c of byClass("failed")) if (c !== required) blockers.push(`check ${c.name} failed`);
     for (const c of byClass("cancelled"))
       if (c !== required)
@@ -195,16 +203,29 @@ export function prStatus(repository, pr, { now = new Date(), startedAt } = {}) {
     else if (pr.mergeable === "UNKNOWN")
       blockers.push("mergeability unknown (GitHub still computing)");
     if (pr.reviewDecision === "CHANGES_REQUESTED") blockers.push("changes requested");
+    if (pr.reviewDecision === "REVIEW_REQUIRED")
+      blockers.push("a required approving review is missing");
     if (unresolved.length) blockers.push(`${unresolved.length} unresolved review thread(s)`);
     if (codex?.has_unresolved_findings && codex.commit_sha === head)
       blockers.push("Codex reports unresolved findings on the current head");
-    else if (codex && codex.commit_sha !== head)
+    else if (
+      codex &&
+      codex.commit_sha !== head &&
+      // A formal Codex review of the current head covers it even if the marker comment is stale.
+      !pr.reviews.nodes.some(
+        (r) => answerer(r.author?.login) === reviewerFor.codex && r.commit?.oid === head,
+      )
+    )
       blockers.push("Codex's latest review is for an older commit; current head not yet covered");
     if (request?.status === "no reaction yet")
       blockers.push("a review was requested and has had no reaction");
     else if (request?.status.startsWith("review in progress"))
       blockers.push(`waiting for the requested review to finish (${request.status})`);
   }
+
+  // GitHub says merging is blocked but nothing above explains it: report that, never "no blocker".
+  if (open && !blockers.length && pr.mergeStateStatus === "BLOCKED")
+    blockers.push("GitHub reports merging is blocked (branch protection); inspect the rules");
 
   const incomplete = [];
   if (rollup?.contexts.pageInfo.hasNextPage) incomplete.push("more than 100 check contexts");

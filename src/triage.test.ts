@@ -2805,3 +2805,94 @@ describe("pr status: formal reviews and in-progress reviews", () => {
     ).toBe(true);
   });
 });
+
+describe("pr status: required approvals, verify success and review scoping", () => {
+  const head = "a".repeat(40);
+  const make = (o: Record<string, any> = {}) => ({
+    number: 12,
+    title: "Fix",
+    url: `https://github.com/${repo}/pull/12`,
+    state: "OPEN",
+    isDraft: false,
+    merged: false,
+    mergeable: "MERGEABLE",
+    mergeStateStatus: o.mergeState ?? "CLEAN",
+    reviewDecision: o.decision ?? null,
+    headRefOid: head,
+    headRefName: "fix",
+    baseRefName: "main",
+    updatedAt: time,
+    commits: {
+      nodes: [
+        {
+          commit: {
+            oid: head,
+            statusCheckRollup: {
+              contexts: {
+                nodes: [
+                  {
+                    __typename: "CheckRun",
+                    name: "verify",
+                    status: "COMPLETED",
+                    conclusion: o.verify ?? "SUCCESS",
+                    startedAt: time,
+                  },
+                ],
+                pageInfo: { hasNextPage: false },
+              },
+            },
+          },
+        },
+      ],
+    },
+    reviews: { nodes: o.reviews ?? [], pageInfo: { hasPreviousPage: false } },
+    reviewThreads: { nodes: [], pageInfo: { hasNextPage: false } },
+    comments: { nodes: o.comments ?? [], pageInfo: { hasPreviousPage: false } },
+    closingIssuesReferences: { nodes: [], pageInfo: { hasNextPage: false } },
+  });
+  const marker = (sha: string, at: string) => ({
+    author: { login: "chatgpt-codex-connector[bot]" },
+    body: `<!-- codex-review-state:v1 {"code_review":{"commit_sha":"${sha}","status":"completed","has_unresolved_findings":false}} -->`,
+    createdAt: at,
+    url: "m",
+  });
+  it("reports missing approvals, a merge block and a non-successful verify", async () => {
+    const { prStatus } = await import("./prstatus.js");
+    expect(prStatus(repo, make({ decision: "REVIEW_REQUIRED" })).blockers).toContain(
+      "a required approving review is missing",
+    );
+    expect(prStatus(repo, make({ mergeState: "BLOCKED" })).blockers[0]).toMatch(
+      /merging is blocked/,
+    );
+    expect(prStatus(repo, make({ verify: "SKIPPED" })).blockers[0]).toMatch(
+      /concluded skipped.*must succeed/,
+    );
+  });
+  it("does not let a Codex marker answer a CodeRabbit request, and accepts a current formal Codex review", async () => {
+    const { prStatus } = await import("./prstatus.js");
+    const rabbit = {
+      author: { login: "kavya" },
+      body: "@coderabbitai review",
+      createdAt: "2026-11-12T11:00:00Z",
+      url: "r",
+    };
+    const r = prStatus(repo, make({ comments: [marker(head, "2026-11-12T10:00:00Z"), rabbit] }));
+    expect(r.reviewRequest!.status).toBe("no reaction yet");
+    const stale = prStatus(
+      repo,
+      make({
+        comments: [marker("b".repeat(40), "2026-11-12T10:00:00Z")],
+        reviews: [
+          {
+            author: { login: "chatgpt-codex-connector" },
+            state: "COMMENTED",
+            submittedAt: "2026-11-12T12:00:00Z",
+            url: "v",
+            commit: { oid: head },
+          },
+        ],
+      }),
+    );
+    expect(stale.blockers.some((b: string) => /older commit/.test(b))).toBe(false);
+  });
+});
