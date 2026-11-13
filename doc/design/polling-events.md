@@ -40,7 +40,7 @@ Routing uses persistent agent names, separate from harness/session IDs and share
 
 ## Bounded queue and on-demand access
 
-Keep a process-local ring of at most 1,000 domain events and 24 hours of history for the watched repo; prune by both bounds. No SQLite or persistent per-agent mailbox. A cursor contains an opaque process-generation and sequence. Restart, expired/evicted cursor or unknown generation returns `resetRequired: true`, with fresh briefing/explicit-since guidance. Never silently skip a gap and report a complete catch-up.
+Keep a process-local ring of at most 1,000 domain events and 24 hours of history for the watched repo; prune by both bounds. No SQLite or persistent per-agent delivery store. A cursor contains an opaque process-generation and sequence. Restart, expired/evicted cursor or unknown generation returns `resetRequired: true`, with fresh briefing/explicit-since guidance. Never silently skip a gap and report a complete catch-up.
 
 Add one read-only tool in this follow-up: `triage_events`, with optional opaque `cursor` and integer `limit` 1–100 (default 20). It reads the configured watched repository; no per-call arbitrary watch target. Results include version, repository, watcher status, baseline/last-attempt/last-success/next-due times, backoff/collection completeness, event items, next cursor, omissions/gap status and supported detector kinds. Reuse the MCP envelope/error conventions with kind events. Reading is nondestructive: consumers maintain independent cursors, so one agent cannot consume another's events. Polling disabled returns an explicit disabled status and ordinary briefing guidance.
 

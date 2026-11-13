@@ -39,7 +39,7 @@ Use a committed `.github-triage.json` at the invoking Git project's worktree roo
 { "schemaVersion": 1, "processGuide": false }
 ```
 
-Absent file or absent `processGuide` means enabled. Precedence: explicit CLI flag, valid project setting, enabled default. No home-directory setting, parent-directory search beyond the resolved project root, network configuration or Agent Inbox file modification. This file holds project presentation policy, never identity or secrets. Do not create or edit it automatically.
+Absent file or absent `processGuide` means enabled. Precedence: explicit CLI flag, valid project setting, enabled default. No home-directory setting, parent-directory search beyond the resolved project root, network configuration or unrelated local configuration modification. This file holds project presentation policy, never identity or secrets. Do not create or edit it automatically.
 
 `--repo owner/repo` selects GitHub data, not an arbitrary local configuration path. Use local project configuration only when its resolved origin matches the requested repository; otherwise report that no matching local project setting was applied and use the default/CLI override. A non-Git working directory likewise uses the default. Do not guess configuration from another checkout or fetch a remote policy file implicitly.
 

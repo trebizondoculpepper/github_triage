@@ -66,7 +66,7 @@ Deliberately left out of the first slice: `--cache`, `--offline` and `--checkpoi
 ### Design points for #25
 
 - **Project selection.** Default to the repository of the server's working directory, as the CLI does through `gh repo view`. Hosts usually start a local server in the project directory. An explicit `repo` argument overrides this, validated as `owner/name`, as the CLI does today.
-- **Agent identity.** Identity design is still open (#3, #14). Until it is settled, accept an explicit `agent` argument, as `--agent` does now, and do not read `agent-inbox.toml` implicitly.
+- **Agent identity.** Identity design is still open (#3, #14). Until it is settled, accept an explicit `agent` argument, as `--agent` does now, and do not read unrelated applications' configuration implicitly.
 - **Authentication.** Reuse the user's existing `gh` session through `execFile`, unchanged. The MCP layer never sees or passes a token.
 - **Read and mutation separation.** One server can expose both later, but read tools must stay free of side effects, as the CLI contract already requires.
 - **Discovery and context overhead.** Three tools with short descriptions keep `tools/list` small. Most context cost comes from results: a live run on 2026-11-12 against this repository (23 open issues, 5 PRs) gave compact text of 7.7 KB, compact JSON of 44 KB and full JSON of 82 KB, from 2 GraphQL requests in about 1.1 s. Compact JSON is about six times the size of compact text, so `triage_briefing` should return the compact text in `content` and the compact JSON only in `structuredContent`. The design should check which hosts pass `structuredContent` to the model, since that decides the actual token cost.
@@ -98,7 +98,7 @@ No speed claim is made from the choice of protocol alone. Any benefit has to sho
 2. Should the MCP server accept a cache or checkpoint path from the client, or keep its own per-project state? This touches filesystem safety and #3's catch-up design.
 3. Is Zod (6 MB unpacked) acceptable as a runtime dependency, or should the design use another Standard Schema library? Zod is what the SDK's own examples and peer ranges use.
 4. Should v1 be supported for hosts that only speak older protocol revisions? `serveStdio` already serves older clients from the same factory by default, so probably not; confirm during the host smoke tests in #25.
-5. How agent identity reaches the server: argument, environment, or the per-project inbox file once #14 settles it.
+5. How agent identity reaches the server: argument, environment, or a triage-owned project-local identity record once its contract settles it.
 
 ## Follow-up implementation proposal (bounded)
 

@@ -17,7 +17,7 @@ import { readBriefing, readDependencies } from "./service.js";
 import type { ReadRuntime } from "./service.js";
 import { installedVersion } from "./updates.js";
 
-/** Startup selection, explicit only so far (roots and agent-inbox lookup are pending on #25). */
+/** Startup selection, explicit only so far (roots and project-local identity lookup are pending on #25). */
 export interface McpOptions {
   /** Configured local project used for repository resolution and repository configuration. */
   project?: string;

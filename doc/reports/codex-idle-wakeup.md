@@ -36,13 +36,7 @@ No desktop automation, terminal keystroke injection, private database edits or a
 
 On this machine, `codex --version` reports **0.167.2**. `codex queue --help` confirms `--thread`, `--message`, `--resume`, `--remote` and the warning that failed resume still succeeds. `codex app-server --help` confirms stdio, Unix and WebSocket transports. These commands only inspected capabilities; no message was queued and no model run was started.
 
-The sibling Agent Inbox checkout at commit `8c74488f8db2590902c81bb72c5ab68ffb830820` already contains a useful reference:
-
-- `src/agent_inbox/session_wake.py`: explicit project/address/session binding, absolute CLI executable, validated UUID, duplicate tracking, coalescing, rate limiting and a `codex_queue` backend.
-- `src/agent_inbox/hookconfig.py`: short boundary checks; explicitly rejects a held Codex Stop waiter because it blocks the session. Its comment that Codex lacks asynchronous hooks should not be copied as a current general capability claim: current official docs support background hooks, which still cannot initiate an idle turn.
-- `src/agent_inbox/session_hook.py`: validates session/transcript identity and separates root/child contexts.
-
-This is source inspection, not proof that those paths are configured or functioning here. Reuse the design lessons; do not copy mailbox configuration, tokens or session IDs into this repository. The merged identity compatibility report and `doc/design/identity.md` remain prerequisites for routing decisions.
+Host adapters should validate explicit project/session bindings, deduplicate events, coalesce bursts and rate-limit notifications. Keep short boundary hooks separate from mechanisms that can actually start an idle turn. Routing must follow the standalone identity contract; local personal integrations are not dependencies or evidence of delivered triage behavior.
 
 ## Proposed adapter boundary
 

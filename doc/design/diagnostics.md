@@ -18,7 +18,7 @@ Team view lists explicit named-agent claims, linked PR state, latest ticket/PR a
 
 ## #64: local configuration doctor
 
-Diagnose intended project, selected harness/server entry, TOML parse/identity/name, triage_role, supported role, Git ignored versus already tracked configuration, and missing runtime/gh access as separate checks. No repairs, login, identity creation, role writes, hooks or Git tracking changes. Return actionable in-band results, especially for hosts discarding stderr. Missing/ambiguous detection is explicit. Reuse identity resolution; compatibility blockers in identity.md remain real limitations. Can diagnose unavailable configuration without requiring the Agent Inbox service.
+Diagnose intended project, selected harness/server entry, supported local configuration parse/identity/name, triage_role, supported role, Git ignored versus already tracked configuration, and missing runtime/gh access as separate checks. No repairs, login, identity creation, role writes, hooks or Git tracking changes. Return actionable in-band results, especially for hosts discarding stderr. Missing/ambiguous detection is explicit. Reuse the standalone identity resolution contract. Diagnose unavailable or unimplemented local resolution explicitly; no external service is required.
 
 Implementation defaults (routine, under this contract): the command is `doctor`; check IDs, statuses (`ok`/`missing`/`invalid`/`access`/`unsupported`/`unknown`) and exit codes are documented in `doc/usage.md`. Until a TOML parser is approved (#25), the `agent-inbox.toml` entry, name and `triage_role` checks report `unsupported` rather than hand-parsing.
 
@@ -34,7 +34,7 @@ Add deterministic correction plans and exact commands to v1, never execution. Ex
 
 ## Acceptance
 
-Fixtures cover current versus stale SHA, cancelled/no-log CI, multiple blockers, meaningful resolved feedback versus bot noise, incomplete history, duplicate issue/PR rows, comment-only ownership, missing presence, malformed configuration, distinct triage/mail roles, Git-tracked identity files, stale agent versus human assignment, and correction-command parser validity. Show request/output costs. Each ticket is a separate implementation slice; #67 depends on #66 and #60 reuses #59 without requiring unrelated deferred work.
+Fixtures cover current versus stale SHA, cancelled/no-log CI, multiple blockers, meaningful resolved feedback versus bot noise, incomplete history, duplicate issue/PR rows, comment-only ownership, missing presence, malformed configuration, distinct project and host roles, Git-tracked identity files, stale agent versus human assignment, and correction-command parser validity. Show request/output costs. Each ticket is a separate implementation slice; #67 depends on #66 and #60 reuses #59 without requiring unrelated deferred work.
 
 ## #39: transferred issue inspection
 

@@ -5,7 +5,7 @@ The owner moved GitHub triage development from `poker_blocks` to this standalone
 ## State and provenance
 
 - Stable compact briefing implementation was merged in poker_blocks PR [#706](https://github.com/trebizondoculpepper/poker_blocks/pull/706), source main commit `7579093`. It implements the merged design PR #699 / issue #698.
-- This extraction also includes the **unfinished native-dependency read slice**, begun on `issue-707-native-dependencies` in `/Users/salimfadhley/workspace/poker_blocks-triage`. It was not merged as a completed feature. The owner redirected work during that implementation. Its source is preserved directly under `src/`, not hidden in a stash or separate patch.
+- This extraction also includes the **unfinished native-dependency read slice**, begun on `issue-707-native-dependencies` in a separate source worktree. It was not merged as a completed feature. The owner redirected work during that implementation. Its source is preserved directly under `src/`, not hidden in a stash or separate patch.
 - Existing 22 tests pass; Vite+ checks and packaging pass. A live read of poker_blocks #675 with `deps --tree` and native briefing completed successfully before extraction. This is smoke evidence, not full acceptance of the dependency implementation.
 - No claim/add/remove/migration command is implemented. No live dependency migration or retired-label deletion was run. Native edges added for the three sliced tickets were preserved by GitHub's issue transfer.
 - No game code, game dependencies, personal credentials, identity configuration, private snapshots or cache/checkpoint data were copied. Runtime is plain JavaScript with Node built-ins and the user's `gh` session.

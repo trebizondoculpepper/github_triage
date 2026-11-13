@@ -103,7 +103,7 @@ Generic stdio configuration (install globally first; nothing registers a host au
 { "command": "github-triage-mcp", "args": ["--project", "/absolute/project/path"] }
 ```
 
-`--repo owner/name` and `--agent NAME` set defaults; a tool's own `repo`/`agent` arguments win for that call. Without an agent, reads are unfocused. Automatic identity lookup from `agent-inbox.toml` and client roots are not implemented yet (#25).
+`--repo owner/name` and `--agent NAME` set defaults; a tool's own `repo`/`agent` arguments win for that call. Without an agent, reads are unfocused. Automatic project-local identity lookup and client roots remain follow-up work (#25); no external identity service is required.
 
 ## Repository settings and sizing
 

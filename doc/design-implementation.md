@@ -1,6 +1,6 @@
 # Proposed design and implementation responsibilities
 
-**Status: proposal for [adaptation review #12](https://github.com/trebizondoculpepper/github_triage/issues/12).** Mirrors poker_blocks' `AGENTS.md` sections “Recorded decisions”, “Checks before committing”, “Code Review Rules” and “Design and implementation ownership”, plus its process guide, at main commit `2dec9d10e81a21a9dfaa60fe89ac081eadb0b84e`. The [source process snapshot](poker-blocks-process.md) is preserved verbatim. This document translates the responsibilities to the standalone CLI; it does not import game rules or claim configured bot reviews.
+**Status: proposal for [adaptation review #12](https://github.com/trebizondoculpepper/github_triage/issues/12).** Mirrors poker_blocks' `AGENTS.md` sections “Recorded decisions”, “Checks before committing”, “Code Review Rules” and “Design and implementation ownership”, plus its process guide, at main commit `2dec9d10e81a21a9dfaa60fe89ac081eadb0b84e`. The [source process snapshot](poker-blocks-process.md) is retained as historical context with private integration details removed. This document translates the responsibilities to the standalone CLI; it does not import game rules or claim configured bot reviews.
 
 **Adaptation reviewed:** [the current-project audit](reports/process-adaptation-audit.md) recommends the active AGENTS/merged-contract process rather than wholesale adoption. This mirrored proposal is historical context; later owner decisions take precedence.
 

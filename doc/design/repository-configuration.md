@@ -12,7 +12,7 @@ Repository is the only supported scope and is implicit. Proposed commands are `c
 
 ## Storage and migration contract
 
-Use a repository-owned, versioned `.github/triage.json` file for non-secret shared settings. It is suitable for normal Git review; configuration changes are not automatically committed. This new file does not replace Agent Inbox's identity file or store credentials, per-agent identity or disposable caches. A remote `--repo` alone is not permission to write an unrelated local checkout: resolve/verify the target root and repository before mutation.
+Use a repository-owned, versioned `.github/triage.json` file for non-secret shared settings. It is suitable for normal Git review; configuration changes are not automatically committed. This file does not store credentials, per-agent identity or disposable caches. A remote `--repo` alone is not permission to write an unrelated local checkout: resolve/verify the target root and repository before mutation.
 
 A shared TypeScript configuration service owns registered keys, typed validation, defaults, schema versioning, migrations and filesystem access. CLI, setup and diagnostics call that service. Read-only operations never rewrite or migrate files. Writes validate and migrate supported older versions in memory, preserve unrelated supported values, and replace the file atomically after checking for intervening edits. Refuse malformed, unsupported-future or incompatible data without destructive rewriting; expose exact recovery guidance. Test missing/current/old/future versions and failed/concurrent writes through injected filesystem boundaries. No configuration framework or global daemon is required.
 

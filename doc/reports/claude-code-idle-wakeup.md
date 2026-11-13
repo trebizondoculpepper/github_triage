@@ -4,7 +4,7 @@ Platform research for the parent #20, written by an agent running on Claude Code
 
 ## Summary
 
-Claude Code can start a turn in an **idle local session** without a human typing. There is a documented, generally available route that has been demonstrated locally: a background **`asyncRewake` hook** that exits with code 2. The Agent Inbox project runs this in production as its wake mechanism. Two further documented routes exist but are unverified here: **posting into the session's own inbox socket** from a child process, and **Channels**, which are a gated research preview. Every GitHub-native route Anthropic documents (GitHub Actions, cloud scheduled tasks with GitHub triggers, cloud auto-fix) either **starts a new session** or applies only to cloud sessions. None delivers into an existing local CLI session.
+Claude Code can start a turn in an **idle local session** without a human typing. The documented route is: a background **`asyncRewake` hook** that exits with code 2. Two further documented routes exist but are unverified here: **posting into the session's own inbox socket** from a child process, and **Channels**, which are a gated research preview. Every GitHub-native route Anthropic documents (GitHub Actions, cloud scheduled tasks with GitHub triggers, cloud auto-fix) either **starts a new session** or applies only to cloud sessions. None delivers into an existing local CLI session.
 
 **Recommendation.** The smallest useful Claude Code adapter is a **session-started background waiter**. It is an `async` + `asyncRewake` hook that runs a shared GitHub change detector, for example the triage CLI with `--checkpoint`, and exits 2 with a short, fixed notice only when relevant work for this agent has appeared. The agent then runs the triage tool itself under the ordinary claim rules. The notice never contains issue text. A host without this adapter keeps ordinary on-demand triage.
 
@@ -14,16 +14,16 @@ Claude Code can start a turn in an **idle local session** without a human typing
 | ------------------------------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | UI notification to a human      | Tell a person something happened     | Yes, outbound only: `PushNotification`, Desktop OS notifications, Remote Control phone push. These do not wake the model.                                      |
 | Context on the next turn        | Text added when the agent next acts  | Yes: `additionalContext` from `SessionStart`, `UserPromptSubmit`, `Stop` and others. Output from a plain async hook also waits for the next turn.              |
-| Start a turn in an idle session | The model runs without anyone typing | Yes, by several routes (matrix below). Only `asyncRewake` has been demonstrated locally.                                                                       |
+| Start a turn in an idle session | The model runs without anyone typing | Yes, by several routes (matrix below). End-to-end operation remains unverified for this project.                                                               |
 | Interrupt an active turn        | Get the model's attention mid-turn   | Partial. Messages are queued and delivered between tool calls in the same turn. Nothing documented preempts a running tool call except a human pressing `Esc`. |
 
 ## Capability matrix
 
-Docs read on 2026-11-12 under `https://code.claude.com/docs/en/`. Key: **S** documented as supported, **P** partial or conditional, **U** documented as unsupported, **?** not documented, **✓** demonstrated locally. Variants: CLI = interactive terminal (JetBrains runs this CLI in its terminal); `-p` = headless/SDK; Desktop; VS Code; Cloud = claude.ai/code.
+Docs read on 2026-11-12 under `https://code.claude.com/docs/en/`. Key: **S** documented as supported, **P** partial or conditional, **U** documented as unsupported, **?** not documented, Variants: CLI = interactive terminal (JetBrains runs this CLI in its terminal); `-p` = headless/SDK; Desktop; VS Code; Cloud = claude.ai/code.
 
 | Mechanism                                                                               | CLI                               | `-p`                   | Desktop | VS Code | Cloud                     | Stability                        | Source                                |
 | --------------------------------------------------------------------------------------- | --------------------------------- | ---------------------- | ------- | ------- | ------------------------- | -------------------------------- | ------------------------------------- |
-| `asyncRewake` hook exits 2, waking an idle session                                      | S ✓                               | P (killed at teardown) | ?       | ?       | ?                         | GA (no label)                    | hooks.md                              |
+| `asyncRewake` hook exits 2, waking an idle session                                      | S                                 | P (killed at teardown) | ?       | ?       | ?                         | GA (no label)                    | hooks.md                              |
 | Stop hook `decision: "block"` keeps a turn going (capped at 8 in a row)                 | S                                 | ?                      | ?       | ?       | ?                         | GA                               | hooks.md                              |
 | Hook `additionalContext` on the next turn                                               | S                                 | ?                      | ?       | ?       | ?                         | GA                               | hooks.md                              |
 | Post to the session's own inbox socket from a child process, idle session starts a turn | S                                 | ?                      | P       | P       | P                         | GA (v2.1.224+)                   | cross-session-messaging.md            |
@@ -45,19 +45,9 @@ Verified quotations:
 - routines.md: "A GitHub trigger starts a new session automatically… Claude Code doesn't reuse sessions across events."
 - mcp.md: "If Claude is idle when the result arrives, Claude starts on it unprompted." This refers to MCP tasks, which are in public beta.
 
-## Local evidence: Agent Inbox
+## Verification boundary
 
-The owner's Agent Inbox (`~/workspace/agent-inbox`, commit `5324502`, read only) is the working reference:
-
-- `agent-inbox wake-check --wait`, installed as an `async` + `asyncRewake` Stop hook (`install-hook --rewake`), "keeps an idle Claude Code session reachable for up to eight hours and wakes it when mail arrives", with "a single-waiter lock, an announce-once watermark, and a fail-silent wrapper" (`kitty-specs/wake-without-polling-01KZ23TA/spec.md`). Its research records the first idle wake working on 2026-07-24 and was checked again against Claude Code 2.1.220 on 2026-07-27 (`kitty-specs/live-session-push-01KYCGZ1/research.md`, `doc/missions/0017-channels-push.md`).
-- Lessons it records that apply here:
-  - A one-shot check at Stop time only catches events already present, so the waiter must keep running.
-  - Claude Code does not deduplicate async hook runs, so a lock is needed to keep several waiters from racing.
-  - The wake injects only sender, subject and ID, never the body.
-  - Wakes are gated on the recipient's own trust list (`wake_from`) and rate-limited, defaulting to nobody (`doc/interrupting-an-agent.md`).
-- It treats Channels as the eventual, more direct route, but deferred while they remain a gated preview, stdio-only and dependent on claude.ai authentication.
-
-I did not repeat the live idle-wake experiment in this session. The `asyncRewake` behaviour is documented, and Agent Inbox demonstrates it on this machine. The inbox-socket route is not demonstrated: the docs give the socket's path and auth line but not the message line format, so testing it would mean guessing an undocumented protocol.
+A live idle-wake experiment was not repeated for this standalone project. The proposed hook behavior comes from the official host documentation; an end-to-end triage adapter remains subject to the verification plan below. The native host socket route is not demonstrated here; its documented existence does not establish a supported message protocol.
 
 ## Recommended adapter
 
@@ -67,7 +57,7 @@ GitHub ──(gh GraphQL, polled)──> shared detector/filter ──> per-host
 ```
 
 1. **Shared detector, host-neutral.** Reuse the triage CLI's existing `--since`/`--checkpoint` window and briefing rules. Filter to what this agent should act on: new pickable work, explicit attention for its persistent name (once #3 and #14 define it), and review or CI feedback on PRs it owns. A shared module serves every host. Polling `gh` is the portable floor: cheap (one briefing is 2 GraphQL requests, about 1.1 s, for this repository on 2026-11-12) and needing no inbound webhook.
-2. **Claude Code adapter.** An `async`, `asyncRewake` hook, registered on `SessionStart` (and re-armed on `Stop`, as Agent Inbox does), that:
+2. **Claude Code adapter.** An `async`, `asyncRewake` hook, registered on `SessionStart` (and re-armed on `Stop`), that:
    - takes a per-project, per-agent lock so only one waiter runs;
    - polls the detector every few minutes, within the hook's `timeout`;
    - exits 2 with a fixed notice such as `github-triage: new items for <agent>; run the triage tool.` when there is something new, and exits 0 silently otherwise;
@@ -83,7 +73,7 @@ Optional later upgrades, each behind its own evidence:
 ### Operating concerns
 
 - **Lifecycle:** the waiter lives only as long as the session. When the session closes, nothing runs and nothing is lost: the checkpoint catches up on the next `SessionStart`. A machine-wide daemon is not needed for the baseline.
-- **Duplicates and bursts:** one pending wake covers everything new since the checkpoint, so later events coalesce into it, as in Agent Inbox. Rate-limit wakes per session, for example a few per hour, and treat turning wakes off or debouncing them as ordinary user settings.
+- **Duplicates and bursts:** one pending wake covers everything new since the checkpoint, so later events coalesce into it. Rate-limit wakes per session, for example a few per hour, and treat turning wakes off or debouncing them as ordinary user settings.
 - **The agent's own writes:** the filter must ignore events whose actor is this agent (its comments, pushes and labels). Otherwise every claim comment would wake the agent that wrote it.
 - **Routing:** route by persistent agent name and default role, read from the project's identity record once #14 defines it. Ownership is decided by `agent:` labels, not by who received the notice.
 - **Rate limits:** polling uses the user's `gh` quota. Keep the interval in minutes and stop on a rate-limit response, as the dependency migration rules already require.
@@ -127,5 +117,4 @@ Accessed 2026-11-12.
 - https://code.claude.com/docs/en/claude-code-on-the-web.md
 - https://code.claude.com/docs/en/desktop.md
 - https://code.claude.com/docs/en/remote-control.md
-- Agent Inbox, local checkout at commit `5324502`: `doc/interrupting-an-agent.md`, `doc/missions/0017-channels-push.md`, `kitty-specs/live-session-push-01KYCGZ1/research.md`, `kitty-specs/wake-without-polling-01KZ23TA/spec.md`.
 - This session: Claude Code 2.1.322 on macOS. `CLAUDE_CODE_MESSAGING_SOCKET` is set and points at a live Unix socket, confirming the inbox socket exists in an interactive CLI session.
