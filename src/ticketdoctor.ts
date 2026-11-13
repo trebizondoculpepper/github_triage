@@ -222,6 +222,7 @@ export function ticketDoctor(
     }
     // Shared label classifier (#152): conflicting size labels are an inspection finding, never
     // repaired here; unestimated tickets are not findings, and truncated labels are reported above.
+    // #178: invalid `complexity:*` labels get a judgment plan with registered suggestions only.
     for (const finding of complexityLabelFindings(issue))
       if (finding.kind === "complexity-label-conflict")
         add(
@@ -231,6 +232,25 @@ export function ticketDoctor(
           `Conflicting complexity: ${finding.detail}.`,
           [cmd.inspectIssue(issue.number), cmd.estimate(issue.number)],
           { judgment: true },
+        );
+      else if (finding.kind === "complexity-label-invalid")
+        add(
+          issue,
+          finding.kind,
+          finding.certainty,
+          `Invalid complexity label: ${finding.detail}.`,
+          [
+            cmd.inspectIssue(issue.number),
+            cmd.estimateReplaceInvalid(issue.number, finding.invalid ?? []),
+          ],
+          {
+            judgment: true,
+            facts: (finding.suggestions ?? []).map((s) =>
+              s.size
+                ? `Suggestion only (never applied): ${s.label} probably means ${s.size}; confirm against the ticket.`
+                : `No suggestion for ${s.label}: read the ticket and choose a size.`,
+            ),
+          },
         );
     const classes = doctorPolicy.classification.filter((l) => labels.includes(l));
     if (!classes.length)

@@ -16,6 +16,9 @@
  * operations: a failure part-way is reported as partial, never rolled back, and a retry of the
  * same command completes it without duplicating the provenance comment.
  *
+ * `--replace-invalid` (#178) also removes `complexity:*` labels outside the recognized sizes, and
+ * the provenance lists those it observed; without it they are refused, never guessed.
+ *
  * Estimating never claims, unblocks, changes readiness, splits or re-ranks a ticket. Missing
  * identity is recorded as null, never inferred from the GitHub login.
  */
@@ -41,7 +44,8 @@ import { ghGraphqlApi, isRecord, prop } from "./github.js";
 import type { GraphqlAnswer, GraphqlApi } from "./github.js";
 
 export const estimateUsage = `Usage: github-triage estimate N --size SIZE --rationale TEXT [--assumption TEXT]...
-         [--reference REF]... [--agent NAME] [--replace SIZE] [--json] [--repo owner/name]
+         [--reference REF]... [--agent NAME] [--replace SIZE] [--replace-invalid] [--json]
+         [--repo owner/name]
        github-triage estimate --help [--json]
 (From a source checkout, use npm run triage -- estimate ...)
 Record a complexity size for issue N as the label complexity:SIZE, with its provenance in an
@@ -54,6 +58,9 @@ issue comment (marker github-triage:complexity-estimate v2).
   --reference REF       Repeatable reference anchor: #N, owner/name#N or an https URL
   --agent NAME          Estimator identity to record; omitted means null (never inferred)
   --replace SIZE        Optional guard: refuse unless the ticket still carries this size
+  --replace-invalid     Also remove complexity: labels that are not a recognized size (e.g.
+                        complexity:huge); they are listed in the provenance. Without it they
+                        are refused, never guessed.
   --json                Versioned structured output (kind complexity-estimate)
   --repo owner/name     Refuse unless this checkout is that repository
 Creates the requested label only if the repository lacks it (existing labels are reused as-is),
@@ -64,7 +71,7 @@ Same size and provenance again: unchanged, nothing written. Retrying after a par
 completes only what is missing.
 Exit: 0 recorded or unchanged; 2 disabled, partial write, conflicting or unreadable result, or
 labels/history unreadable (retry); 1 invalid arguments, refused (stale guard, concurrent change,
-unrecognized complexity label) or API denial.`;
+unrecognized complexity label without --replace-invalid) or API denial.`;
 
 export interface EstimateRuntime {
   readonly fs?: ConfigFileSystem;
@@ -90,6 +97,8 @@ export interface LabelEstimateProvenance {
   readonly revision: string | null;
   readonly guidanceVersion: number;
   readonly recordedAt: string;
+  /** #178: invalid `complexity:*` labels this run observed and removed (--replace-invalid). */
+  readonly replacedInvalid?: readonly string[];
 }
 
 const MARKER = "github-triage:complexity-estimate v2";
@@ -108,6 +117,8 @@ export function provenanceComment(p: LabelEstimateProvenance): string {
   ];
   if (p.assumptions.length) lines.push("", "Assumptions:", ...p.assumptions.map((a) => `- ${a}`));
   if (p.references.length) lines.push("", `Reference anchors: ${p.references.join(", ")}`);
+  if (p.replacedInvalid?.length)
+    lines.push("", `Replaced invalid complexity label(s): ${p.replacedInvalid.join(", ")}`);
   lines.push(
     "",
     `Estimator: ${p.estimator ?? "not given"} · Revision: ${p.revision ?? "unknown"}`,
@@ -170,6 +181,8 @@ interface IssueState {
   readonly labels: readonly LabelNode[];
   /** Recognized sizes on the ticket, in scale order. */
   readonly sizes: readonly ComplexitySize[];
+  /** Labels with the complexity prefix but no recognized size (allowed only with the flag). */
+  readonly invalid: readonly LabelNode[];
   readonly provenance: LabelEstimateProvenance | null;
 }
 
@@ -252,6 +265,7 @@ function readIssue(
   answer: GraphqlAnswer,
   number: number,
   size: ComplexitySize,
+  replaceInvalid: boolean,
 ): IssueState & { olderCursor: string | null } {
   const repository = prop(answer.data, "repository");
   const issue = prop(repository, "issue");
@@ -290,13 +304,13 @@ function readIssue(
   const classification = classifyComplexityLabels({
     labels: { nodes: labels, pageInfo: { hasNextPage: false, endCursor: null } },
   });
-  if (classification.unrecognized.length)
+  if (classification.unrecognized.length && !replaceInvalid)
     throw new Refusal(
       "unrecognized-label",
       "refused:unrecognized",
       1,
       `#${number} carries unrecognized complexity label(s) ${classification.unrecognized.join(", ")}; only ${COMPLEXITY_SIZES.map(complexityLabelName).join(", ")} are managed, so nothing was written.`,
-      `Inspect and remove them yourself (gh issue edit ${number} --remove-label LABEL), then retry.`,
+      `Read the ticket, choose the size, then re-run with --replace-invalid to remove them while recording it (or remove them yourself with gh issue edit ${number} --remove-label LABEL).`,
     );
   const comments = prop(issue, "comments");
   const provenance = newestMarker(prop(comments, "nodes"));
@@ -307,6 +321,7 @@ function readIssue(
     definition,
     labels,
     sizes: classification.sizes,
+    invalid: labels.filter((l) => classification.unrecognized.includes(l.name)),
     provenance,
     olderCursor: provenance ? null : olderCursor(comments, number),
   };
@@ -344,6 +359,7 @@ export async function runEstimate(
         reference: { type: "string", multiple: true },
         agent: { type: "string" },
         replace: { type: "string" },
+        "replace-invalid": { type: "boolean" },
         json: { type: "boolean" },
         repo: { type: "string" },
       },
@@ -369,6 +385,7 @@ export async function runEstimate(
   if (badReference !== undefined)
     throw new Error(`--reference ${badReference}: use #N, owner/name#N or an https URL.`);
   const estimator = values.agent?.trim() || null;
+  const replaceInvalid = !!values["replace-invalid"];
   if (values.repo !== undefined && !/^[\w.-]+\/[\w.-]+$/.test(values.repo))
     throw new Error("--repo must be owner/name.");
 
@@ -415,7 +432,7 @@ export async function runEstimate(
     /** Fresh read, paging comments backward until the newest marker or exhausted history. */
     const read = async (): Promise<IssueState> => {
       const answer = await safely(api.query(issueQuery(number), vars));
-      let state = readIssue(answer, number, size);
+      let state = readIssue(answer, number, size, replaceInvalid);
       let cursor = state.olderCursor;
       let pages = 0;
       while (!state.provenance && cursor !== null) {
@@ -437,9 +454,11 @@ export async function runEstimate(
     };
     const onlyTarget = (sizes: readonly ComplexitySize[]) =>
       sizes.length === 1 && sizes[0] === size;
+    const invalidNames = (state: IssueState) => state.invalid.map((l) => l.name);
 
     const before = await read();
     result.previous = before.sizes;
+    if (replaceInvalid) result.replacedInvalid = invalidNames(before);
     result.issueState = before.state;
     const revisionText = await git(["rev-parse", "HEAD"], target.root).catch(() => "");
     const revision = /^[0-9a-f]{40}$/.test(revisionText.trim()) ? revisionText.trim() : null;
@@ -460,6 +479,8 @@ export async function runEstimate(
       revision,
       guidanceVersion: complexityGuidance.guidanceVersion,
       recordedAt: (runtime.now?.() ?? new Date()).toISOString(),
+      // Only invalid labels this run observed; a retry after they were removed records none.
+      ...(before.invalid.length ? { replacedInvalid: invalidNames(before) } : {}),
     };
     result.provenance = provenance;
     const retryGuard = before.sizes.filter((observed) => observed !== size);
@@ -491,7 +512,7 @@ export async function runEstimate(
       sameList(stored.assumptions, assumptions) &&
       sameList(stored.references, references);
     const provenanceMatches = isThisAssessment(recorded);
-    if (onlyTarget(before.sizes) && provenanceMatches) {
+    if (onlyTarget(before.sizes) && !before.invalid.length && provenanceMatches) {
       // Nothing is written, so report the stored provenance (its real time and revision).
       result.provenance = recorded;
       lines.push("Unchanged: the same size and provenance are already recorded.");
@@ -535,13 +556,15 @@ export async function runEstimate(
     const latest = await read();
     if (
       !sameList(latest.sizes, before.sizes) ||
+      !sameList(invalidNames(latest), invalidNames(before)) ||
       JSON.stringify(latest.provenance) !== JSON.stringify(before.provenance)
     )
       throw new Refusal(
         "concurrent-change",
         "refused:stale",
         1,
-        !sameList(latest.sizes, before.sizes)
+        !sameList(latest.sizes, before.sizes) ||
+          !sameList(invalidNames(latest), invalidNames(before))
           ? `#${number} changed from ${before.sizes.join(", ") || "unestimated"} to ${latest.sizes.join(", ") || "unestimated"} while recording; the ticket was not changed.`
           : `#${number} received new estimate provenance while recording; the ticket was not changed.`,
         "Re-run the command after reading the new estimate and its rationale.",
@@ -568,7 +591,8 @@ export async function runEstimate(
     }
     for (const other of latest.labels) {
       const otherSize = complexityLabelSize(other.name);
-      if (!otherSize || otherSize === size) continue;
+      const invalid = latest.invalid.some((l) => l.id === other.id);
+      if (!invalid && (!otherSize || otherSize === size)) continue;
       const remove = await safely(
         api.mutate(REMOVE_LABEL, { issue: latest.issueId, label: other.id }),
       );
@@ -588,13 +612,15 @@ export async function runEstimate(
     } catch (caught) {
       if (!(caught instanceof Refusal)) throw caught;
     }
-    result.final = final ? { sizes: final.sizes } : { sizes: null, readable: false };
-    if (!final || !onlyTarget(final.sizes)) {
+    result.final = final
+      ? { sizes: final.sizes, invalid: invalidNames(final) }
+      : { sizes: null, readable: false };
+    if (!final || !onlyTarget(final.sizes) || final.invalid.length) {
       result.provenanceWritten = false;
       const why = failed.length
         ? `removing ${failed.join(", ")} failed`
         : final
-          ? `the ticket now carries ${final.sizes.join(", ") || "no size label"} (a concurrent change?)`
+          ? `the ticket now carries ${[...final.sizes, ...invalidNames(final)].join(", ") || "no size label"} (a concurrent change?)`
           : "the final labels could not be read";
       result.recovery = `Inspect #${number}, then re-run the same command${retryHint}; nothing is rolled back.`;
       lines.push(

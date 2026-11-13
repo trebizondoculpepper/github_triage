@@ -184,19 +184,85 @@ export function labelEstimationReport(
   return sizeReport(issues, source, options);
 }
 
-/** Ticket Doctor inspection finding for one issue's label evidence; never a repair. */
-export interface LabelDoctorFinding {
-  kind: "complexity-label-conflict" | "complexity-labels-incomplete";
-  certainty: "definite" | "unknown";
-  detail: string;
+/**
+ * Registered suggestion table (#178): common words people use as an invalid `complexity:`
+ * suffix, mapped to the size they usually mean. Data, not conditionals; keys are lowercase and
+ * compared case-insensitively. A mapped suffix yields a suggestion only, never an applied size;
+ * an unmapped suffix yields no suggestion.
+ */
+export const INVALID_SIZE_SUGGESTIONS: Readonly<Record<string, ComplexitySize>> = Object.freeze({
+  tiny: "XS",
+  trivial: "XS",
+  xsmall: "XS",
+  "extra-small": "XS",
+  small: "S",
+  sm: "S",
+  medium: "M",
+  med: "M",
+  large: "L",
+  lg: "L",
+  big: "L",
+  huge: "XL",
+  xlarge: "XL",
+  "extra-large": "XL",
+  xxlarge: "XXL",
+  enormous: "XXL",
+  massive: "XXL",
+});
+
+/** The suggested size for an invalid complexity label's suffix, or null when unmapped. */
+export function suggestedSize(label: string): ComplexitySize | null {
+  if (!isComplexityLabel(label) || complexityLabelSize(label)) return null;
+  const suffix = label.slice(COMPLEXITY_LABEL_PREFIX.length).trim().toLowerCase();
+  return Object.hasOwn(INVALID_SIZE_SUGGESTIONS, suffix) ? INVALID_SIZE_SUGGESTIONS[suffix]! : null;
 }
 
-/** Conflicts and incomplete label evidence; unestimated tickets are not findings. Pure. */
+/** Ticket Doctor inspection finding for one issue's label evidence; never a repair. */
+export interface LabelDoctorFinding {
+  kind: "complexity-label-conflict" | "complexity-label-invalid" | "complexity-labels-incomplete";
+  certainty: "definite" | "unknown";
+  detail: string;
+  /** complexity-label-invalid only: the invalid labels, as spelled on the ticket. */
+  invalid?: string[];
+  /** complexity-label-invalid only: valid size labels also present. */
+  valid?: string[];
+  /** complexity-label-invalid only: per invalid label, the registered suggestion or null. */
+  suggestions?: { label: string; size: ComplexitySize | null }[];
+}
+
+/**
+ * Conflicts, invalid labels and incomplete label evidence; unestimated tickets are not findings.
+ * An invalid label seen on a truncated page is still reported, but as unknown (inspection only):
+ * the unseen labels may hold more evidence. Pure.
+ */
 export function complexityLabelFindings(issue: Pick<Issue, "labels">): LabelDoctorFinding[] {
   const c = classifyComplexityLabels(issue);
-  if (c.state === "conflicting")
-    return [{ kind: "complexity-label-conflict", certainty: "definite", detail: c.detail }];
-  if (c.state === "unknown")
-    return [{ kind: "complexity-labels-incomplete", certainty: "unknown", detail: c.detail }];
-  return [];
+  const findings: LabelDoctorFinding[] = [];
+  if (c.unrecognized.length) {
+    const suggestions = c.unrecognized.map((label) => ({ label, size: suggestedSize(label) }));
+    const described = suggestions
+      .map((s) => (s.size ? `${s.label} (suggested size ${s.size})` : `${s.label} (no suggestion)`))
+      .join(", ");
+    findings.push({
+      kind: "complexity-label-invalid",
+      certainty: c.complete ? "definite" : "unknown",
+      detail: [
+        `invalid complexity label(s) ${described}`,
+        ...(c.labels.length ? [`valid size label(s) also present: ${c.labels.join(", ")}`] : []),
+        ...(c.complete ? [] : ["labels truncated, so the full set is unknown"]),
+      ].join("; "),
+      invalid: c.unrecognized,
+      valid: c.labels,
+      suggestions,
+    });
+  }
+  if (c.sizes.length > 1)
+    findings.push({
+      kind: "complexity-label-conflict",
+      certainty: "definite",
+      detail: `several size labels (${c.labels.join(", ")}); inspect, no size is chosen`,
+    });
+  if (!findings.length && c.state === "unknown")
+    findings.push({ kind: "complexity-labels-incomplete", certainty: "unknown", detail: c.detail });
+  return findings;
 }
