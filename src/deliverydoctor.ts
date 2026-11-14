@@ -10,7 +10,12 @@
  * evaluator. Nothing is posted, closed, reopened, claimed or reassigned. Unknown evidence is
  * reported as unknown: it is never read as "no record", "nobody responsible" or "not delivered".
  */
-import { collectDeliveryFacts, evaluateDelivery } from "./completion.js";
+import {
+  collectDeliveryFacts,
+  completionEffects,
+  effectiveResponsibility,
+  evaluateDelivery,
+} from "./completion.js";
 import type { DeliveryEvaluation } from "./completion.js";
 import {
   deliveryCommentFields,
@@ -297,6 +302,8 @@ export interface ClosedDriftTicket {
   ticketResponsible: string | null;
   members: { deliverable: string; responsible: string | null }[];
   completions: string[];
+  /** Effective `complete` records: responsibility has ended (empty when none is effective). */
+  effectiveCompletion: string[];
   evaluation: DeliveryEvaluation | null;
   notEvaluated: string | null;
 }
@@ -395,12 +402,15 @@ export async function diagnoseClosedDrift(
       }
       continue;
     }
-    const { fold } = await readDeliveryFold(
+    const { records: classified, fold } = await readDeliveryFold(
       history.comments,
       history.complete,
       { repository, issue: node.number },
       rt.trust,
     );
+    // An effective `complete` (issue closed, evaluation unchanged) ends all responsibility.
+    const effects = completionEffects(classified, fold, true);
+    const ended = effectiveResponsibility(fold, effects);
     // Only ignored markers (a verified non-writer's, or a copy bound to another issue) mean no
     // delivery record: out of drift scope. An unknown fold stays in scope as unknown.
     if (!fold.recordsUnknown && !fold.hasTrustedRecord) continue;
@@ -414,12 +424,10 @@ export async function diagnoseClosedDrift(
       closedAt: node.closedAt ?? null,
       fold: fold.recordsUnknown ? "unknown" : "known",
       unknownBecause: [...fold.unknownBecause],
-      ticketResponsible: fold.ticketResponsible,
-      members: fold.members.map((m) => ({
-        deliverable: deliverableLabel(m.deliverable),
-        responsible: m.responsible,
-      })),
+      ticketResponsible: ended.ticketResponsible,
+      members: ended.members,
       completions: [...fold.completions],
+      effectiveCompletion: effects.filter((e) => e.effective).map((e) => e.comment),
       evaluation: null,
       notEvaluated: null,
     };

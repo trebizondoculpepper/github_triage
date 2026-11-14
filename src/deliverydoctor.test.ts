@@ -14,6 +14,7 @@ import {
   diagnoseDelivery,
 } from "./deliverydoctor.js";
 import type { RepositoryPermission, RestAnswer } from "./github/github.js";
+import { evaluationRevision } from "./completion.js";
 import { ticketDoctor } from "./ticketdoctor.js";
 import type { TicketDoctorReport } from "./ticketdoctor.js";
 import type { Issue, Snapshot } from "./github/types.js";
@@ -648,6 +649,28 @@ describe("closed-issue delivery drift (#192: S5, S16, S68 after closing)", () =>
     );
     const f = finding(r, 41, "closed-not-delivered");
     expect(f.plan.facts.join(" ")).toContain("residual race");
+  });
+
+  it("a completed ticket whose target later lost the commit is a regression after completion, with responsibility ended", async () => {
+    const submit = post(record(51, "submit", { deliverables: [pr(71)], membership: "complete" }));
+    const { fold } = await readDeliveryFold([submit], true, { repository: repo, issue: 51 }, trust);
+    const done = post(
+      record(51, "complete", {
+        verdict: "delivered",
+        evaluatedAt: "2026-11-13T09:59:00Z",
+        evaluationRevision: evaluationRevision(fold),
+      }),
+    );
+    const r = await closedDoctor(
+      [closedNode(51, "COMPLETED", [submit, done])],
+      { 71: { merged: "m71" } },
+      { m71: "diverged" },
+    );
+    expect(kinds(r, 51)).toEqual(["delivery-regressed-after-completion"]);
+    const f = finding(r, 51, "delivery-regressed-after-completion");
+    expect(f.plan.steps.every((s) => s.kind === "inspect")).toBe(true);
+    expect(f.plan.facts).toContain("Ticket responsible: nobody.");
+    expect(f.plan.facts).toContain(`${repo}#71: responsible nobody.`);
   });
 
   it("closed completed with verified delivery is not a finding", async () => {

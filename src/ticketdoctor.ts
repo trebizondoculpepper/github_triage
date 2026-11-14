@@ -481,6 +481,19 @@ function closedDriftFindings(
     const m = label.match(prLabel);
     return m && m[1].toLowerCase() === repository.toLowerCase() ? Number(m[2]) : null;
   };
+  if (e.delivery !== "delivered" && e.delivery !== "attested" && t.effectiveCompletion.length) {
+    // Completion took effect, so responsibility ended; the evidence regressed afterwards (for
+    // example the target lost the delivered commit). Nobody is addressed; inspection only.
+    add(
+      t,
+      "delivery-regressed-after-completion",
+      "candidate",
+      `${closed}; completion (${t.effectiveCompletion.join(", ")}) took effect, but delivery is now ${e.delivery}. Responsibility ended with completion; nothing is reassigned or reopened.`,
+      [cmd.inspectIssue(t.number), cmd.deliveryDryRun(t.number, "<AGENT>")],
+      { judgment: true, facts: [...facts, ...e.because, ...lines] },
+    );
+    return;
+  }
   if (t.closure === "closed-completed") {
     if (e.delivery === "delivered" || e.delivery === "attested") return;
     const raced = t.completions.length
