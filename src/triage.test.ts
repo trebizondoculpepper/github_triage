@@ -4682,6 +4682,7 @@ describe("repository configuration service (#116, doc/design/repository-configur
     const config = await loadConfig(root, memory.fs);
     expect(config.storedVersion).toBeNull();
     expect(config.settings).toEqual([
+      { key: "briefing.engine", value: "typescript", source: "default" },
       { key: "complexity.enabled", value: true, source: "default" },
       { key: "impact.enabled", value: true, source: "default" },
       { key: "processGuide", value: false, source: "default" },
@@ -5576,6 +5577,7 @@ describe("config get/set/list/help commands (#117)", () => {
     expect(t.out.at(-1)).toContain("unchanged");
     expect(await t.call("list", "--json")).toBe(0);
     expect(t.json().settings).toEqual([
+      expect.objectContaining({ key: "briefing.engine", value: "typescript", source: "default" }),
       expect.objectContaining({ key: "complexity.enabled", value: false, source: "explicit" }),
       expect.objectContaining({ key: "impact.enabled", value: true, source: "default" }),
       expect.objectContaining({ key: "processGuide", value: false, source: "explicit" }),
@@ -9289,7 +9291,7 @@ describe("workflow guide in help and briefings (#71, doc/design/workflow-guide.m
       (await run(["--json", "--guide"], '{"schemaVersion":1,"processGuide":false}')).out,
     );
     expect(forced.process).toMatchObject({ enabled: true, source: "cli" });
-    const hidden = JSON.parse((await run(["--json", "--no-guide"], "{oops")).out);
+    const hidden = JSON.parse((await run(["--json", "--no-guide", "--issue", "1"], "{oops")).out);
     expect(hidden.process).toMatchObject({ enabled: false, source: "cli", diagnostics: [] });
     expect(() => argumentsFor(["--guide", "--no-guide"])).toThrow(/either --guide or --no-guide/);
   });
@@ -9301,7 +9303,7 @@ describe("workflow guide in help and briefings (#71, doc/design/workflow-guide.m
       '{"schemaVersion":1,"surprise":true}',
       '{"schemaVersion":1,"processGuide":"no"}',
     ]) {
-      const { code, out } = await run(["--json"], raw);
+      const { code, out } = await run(["--json", "--issue", "1"], raw);
       expect(code).toBe(0);
       const parsed = JSON.parse(out);
       expect(parsed.process).toMatchObject({ enabled: false, source: "default" });
@@ -9314,7 +9316,9 @@ describe("workflow guide in help and briefings (#71, doc/design/workflow-guide.m
     );
     expect(other.process).toMatchObject({ enabled: false, source: "default" });
     expect(other.process.diagnostics[0]).toMatch(/No matching local project setting/);
-    expect((await run([], "{oops")).out).toContain("CONFIG: Repository configuration not applied");
+    expect((await run(["--issue", "1"], "{oops")).out).toContain(
+      "CONFIG: Repository configuration not applied",
+    );
   });
 
   it("counts against the text budget and reports omission instead of truncating", async () => {

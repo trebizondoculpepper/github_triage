@@ -17,7 +17,8 @@
   "files": [
     "dist/cli.mjs",
     "dist/mcp.mjs",
-    "third-party"
+    "third-party",
+    "dist/datalog-*.mjs"
   ],
   "type": "module",
   "publishConfig": {

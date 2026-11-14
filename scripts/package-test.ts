@@ -96,6 +96,7 @@ const parityFields = [
   "rankedActions",
   "estimation",
   "impactEstimation",
+  "decisionEngine",
 ] as const;
 type Report = Record<string, unknown>;
 const rankedKinds = (report: Report): string[] => {
@@ -115,6 +116,7 @@ async function blendedParity(
   order: string,
   env: NodeJS.ProcessEnv,
   cwd: string,
+  expectedEngine = "typescript",
 ): Promise<string[]> {
   const cliRun = await run(
     windows ? `"${cliBin}"` : cliBin,
@@ -133,9 +135,21 @@ async function blendedParity(
     { cwd, env, shell: windows, maxBuffer: 64 * 1024 * 1024 },
   );
   const cli = JSON.parse(cliRun.stdout) as Report;
+  if ((cli.decisionEngine as { used?: string })?.used !== expectedEngine)
+    throw new Error(`Installed engine is not ${expectedEngine}.`);
+  if (expectedEngine === "datalog") {
+    const ranked = cli.rankedActions as {
+      items: { why?: { text?: string; facts?: object }; ruleIds?: string[] }[];
+    };
+    if (
+      !ranked.items.length ||
+      ranked.items.some((row) => !row.why?.text || !row.ruleIds?.length || !row.why.facts)
+    )
+      throw new Error("Installed Datalog reasons lack rule/fact bindings.");
+  }
   const transport = new StdioClientTransport({
     command: mcpCommand.command,
-    args: [...mcpCommand.args, "--repo", repository],
+    args: [...mcpCommand.args, "--repo", repository, "--project", cwd],
     cwd,
     env: env as Record<string, string>,
     stderr: "pipe",
@@ -171,9 +185,13 @@ try {
   );
   const packed = parsePack(stdout);
   const files = packed.files.map((f) => f.path).sort();
-  if (JSON.stringify(files) !== JSON.stringify(expected))
+  const engineChunks = files.filter((p) => /^dist\/datalog-[A-Za-z0-9_-]+\.mjs$/.test(p));
+  if (engineChunks.length !== 1)
+    throw new Error("Expected exactly one packaged lazy evaluator chunk.");
+  const expectedFiles = [...expected, ...engineChunks].sort();
+  if (JSON.stringify(files) !== JSON.stringify(expectedFiles))
     throw new Error(
-      `Archive contents ${JSON.stringify(files)} differ from ${JSON.stringify(expected)}.`,
+      `Archive contents ${JSON.stringify(files)} differ from ${JSON.stringify(expectedFiles)}.`,
     );
   console.log(`ok   archive ${packed.filename} contains exactly the allowlisted files`);
 
@@ -386,6 +404,21 @@ try {
             `Installed ${role} queue has no ${want[role]} action: ${kinds.join(", ")}.`,
           );
         console.log(`ok   installed CLI = MCP ${role} (${order}): ${kinds.join(", ")}`);
+      }
+    await run(bin, ["config", "set", "briefing.engine", "datalog"], { cwd: checkout, env });
+    for (const role of ["implementer", "designer"])
+      for (const order of ["impact", "oldest"]) {
+        const kinds = await blendedParity(
+          bin,
+          mcpCommand,
+          "example/parity",
+          role,
+          order,
+          env,
+          checkout,
+          "datalog",
+        );
+        console.log(`ok   installed Datalog CLI = MCP ${role} (${order}): ${kinds.join(", ")}`);
       }
   }
   // Optional read-only live smoke (#260): GITHUB_TRIAGE_PACKAGE_LIVE_REPO=owner/name uses the

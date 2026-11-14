@@ -143,3 +143,17 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for contribution requirements and the [d
 [MIT](LICENSE).
 
 Complexity is stored in repository labels (`complexity:XS`–`complexity:XXL`); no setup is needed. The native-field `setup complexity` command and the `complexity.fieldId` setting were removed (#153); an old configuration file that still contains the key keeps working, and `config list` shows how to drop it. See the [contract](doc/design/complexity-estimation.md). No field migration or separate field permissions are needed.
+
+### Experimental Datalog queues
+
+For a local repository trial, enable the alternative read-only decision engine through the configuration command:
+
+```sh
+github-triage config set briefing.engine datalog
+github-triage --role implementer --json
+github-triage --role designer
+```
+
+Actions and their reasons are derived from the same bundled rules. Structured output includes engine/policy provenance, matched explanation bindings and diagnostics. The experiment requires an implementer or designer role; it does not change mutation safeguards. TypeScript remains the default. Roll back with `github-triage config set briefing.engine typescript`.
+
+MCP reads the setting only from its explicitly selected matching project (`github-triage-mcp --project /path/to/checkout`). A different requested repository does not inherit that project's setting. Full ticket intake and repository catch-up remain on their existing services. Invalid repository configuration or evaluator failure produces a diagnostic rather than a silently substituted Datalog result.
