@@ -265,7 +265,7 @@ const annotations = {
 /** Stable, sanitized failures: no stack traces, subprocess stderr or configuration. */
 const failures = {
   "decision-engine-config":
-    "Selected repository configuration could not be validated. Fix it with config commands; rollback: github-triage config set briefing.engine typescript.",
+    "Selected repository configuration could not be validated. Use the local CLI diagnostic for the configuration service's repair guidance, repair or restore the configuration, then retry.",
   "decision-engine-role":
     "Datalog next actions require role implementer or designer. Rollback: github-triage config set briefing.engine typescript.",
   "decision-engine-failed":
