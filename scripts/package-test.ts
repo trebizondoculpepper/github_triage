@@ -13,6 +13,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { resolveEngineSetting } from "../src/engine-setting.js";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
@@ -431,8 +432,18 @@ try {
     ).stdout.split("\n")[0];
     console.log(`live source revision ${revision}; executable ${bin} (${version})`);
     const env = { ...process.env, GITHUB_TRIAGE_NO_UPDATE_CHECK: "1" };
+    const selected = await resolveEngineSetting(live, { cwd: root });
     for (const role of ["implementer", "designer"]) {
-      const kinds = await blendedParity(bin, mcpCommand, live, role, "impact", env, root);
+      const kinds = await blendedParity(
+        bin,
+        mcpCommand,
+        live,
+        role,
+        "impact",
+        env,
+        root,
+        selected.requested,
+      );
       console.log(`ok   live ${live} installed CLI = MCP ${role}: ${kinds.join(", ")}`);
     }
   }

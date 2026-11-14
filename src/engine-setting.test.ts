@@ -157,3 +157,36 @@ describe("repository-scoped experimental engine selection", () => {
     expect(result.text).toContain("Decision engine: Datalog");
   });
 });
+
+it("keeps background parked context without restoring TypeScript next actions", async () => {
+  const parked = {
+    ...item,
+    number: 2,
+    url: item.url.replace("/1", "/2"),
+    title: "Parked work",
+    labels: { ...item.labels, nodes: [{ name: "status:parked" }] },
+  };
+  const built = await presentBriefing(
+    { ...snapshot, issues: [parked] },
+    {
+      role: "implementer",
+      limit: 10,
+      maxChars: 10000,
+      engineSetting: { requested: "datalog", source: "config" },
+    },
+    local(),
+  );
+  expect(built.text).toContain("Parked work");
+  expect(built.text).toContain("Parked; not a next step.");
+  expect("rankedActions" in built.report && built.report.rankedActions?.items).toEqual([]);
+});
+it("preserves config repair guidance instead of an unusable rollback", async () => {
+  try {
+    await resolveEngineSetting(snapshot.repository, local("not valid TOML"));
+    throw new Error("expected config refusal");
+  } catch (error) {
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain("Roll back:");
+    expect((error as Error).message).toContain("configuration");
+  }
+});

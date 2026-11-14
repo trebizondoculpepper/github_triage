@@ -17,8 +17,9 @@ export class BriefingEngineError extends Error {
   constructor(
     readonly code: "decision-engine-config" | "decision-engine-role" | "decision-engine-failed",
     detail: string,
+    recovery = "Roll back: github-triage config set briefing.engine typescript",
   ) {
-    super(`${detail} Roll back: github-triage config set briefing.engine typescript`);
+    super(`${detail} ${recovery}`);
   }
 }
 export async function resolveEngineSetting(
@@ -53,10 +54,13 @@ export async function resolveEngineSetting(
       requested: setting.value === "datalog" ? "datalog" : "typescript",
       source: setting.source === "explicit" ? "config" : "default",
     };
-  } catch {
+  } catch (error) {
     throw new BriefingEngineError(
       "decision-engine-config",
       "Repository configuration cannot be read or validated; no decision engine was run.",
+      error instanceof ConfigError
+        ? error.recovery
+        : "Fix the repository configuration, then retry.",
     );
   }
 }

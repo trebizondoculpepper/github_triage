@@ -310,7 +310,27 @@ export function compactBriefing(
       ? {
           name: options.role,
           question: "Datalog-derived next actions",
-          sections: [],
+          sections: (() => {
+            const nextTargets = new Set(experimental.items.map((i) => i.target));
+            const context = objects
+              .filter((item) => item.state === "OPEN" && !nextTargets.has(item.url))
+              .map((item) => ({
+                url: item.url,
+                reason: isParked(item)
+                  ? "Parked; not a next step."
+                  : "Background context; not a Datalog next action.",
+              }));
+            return [
+              {
+                name: "other-context",
+                title: "OTHER CONTEXT",
+                background: true,
+                total: context.length,
+                omitted: Math.max(0, context.length - 5),
+                items: context.slice(0, 5),
+              },
+            ];
+          })(),
           next: experimental.items.map((i) => ({
             url: i.target,
             reason: i.why?.text ?? "Missing experimental explanation",
