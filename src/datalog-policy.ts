@@ -253,7 +253,7 @@ export const clauses = `[
 [(parked ?t) [?t "label" "status:parked"]]
 [(foreground ?t) (open ?t) (not (parked ?t))]
 [(foreground ?t) (open ?t) (addressed ?t)]
-[(own-issue ?t) (issue ?t) (mine ?t)]
+[(own-issue ?t) (issue ?t) (open ?t) (mine ?t)]
 [(platform-ok ?t) [?t "labels-complete" true] (not [?t "platform" _])]
 [(platform-ok ?t) [1 "platform" ?p] [?t "platform" ?p]]
 [(platform-unknown ?t) [?t "platform" _] [1 "platform" ""]]
@@ -443,3 +443,55 @@ export const commandKinds: Record<string, string> = {
 };
 export const otherClaimsQuery =
   '[:find ?t ?other :in $ % :where [?t "kind" "issue"] (own-issue ?other) [(not= ?t ?other)]]';
+
+/** Rule-selected witnesses. Each clause binds ?value from the same inference database. */
+export const commonWitnesses: Record<string, string> = {
+  impact: '[?t "impact-size" ?value]',
+  complexity: '[?t "complexity-size" ?value]',
+  impactState: '[?t "impact-state" ?value]',
+  complexityState: '[?t "complexity-state" ?value]',
+  head: '[?t "head" ?value]',
+};
+export const witnessClauses: Record<string, Record<string, string>> = {
+  "D-ATTENTION": { addressedAgent: '[1 "agent" ?value] [?t "attention" ?value]' },
+  "D-PR-FAIL": {
+    failedChecks:
+      '[?t "check" ?c] [?c "name" ?name] [?c "outcome" ?o] [1 "failure" ?o] [(str ?name ":" ?o) ?value]',
+  },
+  "D-PR-REVIEW": {
+    reviewDecision: '[?t "review-decision" ?value]',
+    unresolvedThreads: '[?t "thread" ?c] [?c "resolved" false] [(str "unresolved") ?value]',
+  },
+  "D-PR-CONFLICT": { mergeable: '[?t "mergeable" ?value]' },
+  "D-PR-MERGE": {
+    verify: '[?t "check" ?c] [?c "name" "verify"] [?c "outcome" ?value]',
+    complete: '[?t "pr-complete" ?value]',
+    draft: '[?t "draft" ?value]',
+    mergeState: '[?t "merge-state" ?value]',
+  },
+  "D-DECIDE": {
+    decisionLabel: '[?t "label" "design:decision-needed"] [(str "design:decision-needed") ?value]',
+  },
+  "D-DOCUMENT": {
+    documentationLabel:
+      '[?t "label" "design:documentation-needed"] [(str "design:documentation-needed") ?value]',
+  },
+  "D-DESIGN-REVIEW": {
+    designEvidence:
+      '(or-join [?t ?value] (and [?t "label" ?value] [1 "design-label" ?value]) (and [?t "closes" ?i] [?i "label" ?value] [1 "design-label" ?value]))',
+  },
+  "D-DESIGN": {
+    designLabel: '[?t "label" "status:needs-design"] [(str "status:needs-design") ?value]',
+  },
+  "D-INSPECT": {
+    uncertainty:
+      '(or-join [?t ?value] (and [?t "labels-complete" false] [(str "labels incomplete") ?value]) (and [?t "native-complete" false] [(str "native dependencies incomplete") ?value]) (and (not (closing-complete ?t)) [(str "closing PR evidence incomplete") ?value]) (and (platform-unknown ?t) [(str "viewer platform unknown") ?value]))',
+  },
+};
+export const eligibilityWitnesses: Record<string, string> = {
+  labelsComplete: '[?t "labels-complete" ?value]',
+  nativeComplete: '[?t "native-complete" ?value]',
+  openBlockers: '[?t "open-blockers" ?value]',
+  readiness: '[?t "label" ?value] [1 "readiness" ?value]',
+};
+constants.readiness = ["status:ready", "status:incomplete"];

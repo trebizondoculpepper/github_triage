@@ -20,6 +20,9 @@ import {
   commandTemplates,
   commandKinds,
   otherClaimsQuery,
+  witnessClauses,
+  commonWitnesses,
+  eligibilityWitnesses,
   sortClauses,
   policyVersion,
 } from "./datalog-policy.js";
@@ -79,6 +82,9 @@ const artifact = {
   commandTemplates,
   commandKinds,
   otherClaimsQuery,
+  witnessClauses,
+  commonWitnesses,
+  eligibilityWitnesses,
 };
 export const rulesHash = createHash("sha256").update(JSON.stringify(artifact)).digest("hex");
 const emptyMetric = { state: "unknown" as const, size: null, provenance: null };
@@ -310,13 +316,21 @@ export function evaluateDatalog(
       if (!subject || !definition)
         throw new DatalogError("invalid-inference", "unknown subject or rule");
       const a = assessments.get(subject.url);
-      const bindings: Record<string, Value> = {
-        impact: a?.impact.size ?? "unknown",
-        complexity: a?.complexity.size ?? "unknown",
-        impactState: a?.impact.state ?? "unknown",
-        complexityState: a?.complexity.state ?? "unknown",
-        head: snapshot.pullRequests.find((p) => p.url === subject.url)?.headRefOid ?? "not-a-pr",
+      const bindings: Record<string, Value> = {};
+      const selectedWitnesses = {
+        ...commonWitnesses,
+        ...eligibilityWitnesses,
+        ...witnessClauses[definition.id],
       };
+      for (const [key, clause] of Object.entries(selectedWitnesses)) {
+        const values = ds.q(`[:find ?value :in $ % ?t :where ${clause}]`, db, clauses, t).flat();
+        if (values.length === 1) bindings[key] = values[0];
+        else if (values.length > 1) {
+          const sorted = values.map(String).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+          bindings[key] = sorted.slice(0, 8).join("; ");
+          if (values.length > 8) bindings[`${key}Omitted`] = values.length - 8;
+        }
+      }
       const text = definition.why.replace(/\{(\w+)\}/g, (_, key: string) => {
         if (!(key in bindings)) throw new DatalogError("missing-explanation-binding", key);
         return String(bindings[key]);

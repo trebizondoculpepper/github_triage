@@ -290,3 +290,20 @@ it("coalesces equally ranked PR findings before limiting, preserving overridden 
   expect(result.total).toBe(1);
   expect(result.items[0].why.overriddenRuleIds).toContain("D-PR-REVIEW");
 });
+
+it("ignores closed retained claims when planning a new pickup", () => {
+  const old = issue(1, ["agent:me"]);
+  old.state = "CLOSED";
+  const a = issue(2);
+  const row = implementations(run([old, a], new Map(), { agent: "me" }))[0];
+  expect(row.nextCommand).toContain("claim 2");
+  expect(row.thenCommand).toBeNull();
+});
+it("returns rule-specific matched failed-check and incomplete-evidence bindings", () => {
+  const failed = run([], new Map(), {}, [pr(1, ["FAILURE"])]).items[0];
+  expect(failed.why.facts.failedChecks).toBe("verify:FAILURE");
+  const a = issue(2);
+  delete a.blockedBy;
+  const inspection = run([a]).items.find((x) => x.kind === "inspect")!;
+  expect(inspection.why.facts.uncertainty).toContain("native dependencies incomplete");
+});
