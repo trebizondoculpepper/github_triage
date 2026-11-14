@@ -1,6 +1,7 @@
 /** Repository-scoped engine selection; importing this never initializes DataScript. */
 import {
   ConfigError,
+  CONFIG_KEYS,
   loadConfig,
   settingFor,
   resolveRepositoryTarget,
@@ -9,6 +10,10 @@ import {
 } from "./config.js";
 import type { GuideRuntime } from "./process.js";
 export type EngineName = "typescript" | "datalog";
+export const defaultEngine = (): EngineName =>
+  CONFIG_KEYS.find((k) => k.key === "briefing.engine")?.defaultValue === "datalog"
+    ? "datalog"
+    : "typescript";
 export interface EngineSetting {
   requested: EngineName;
   source: "config" | "default" | "no-matching-project";
@@ -26,7 +31,7 @@ export async function resolveEngineSetting(
   repository: string,
   runtime?: GuideRuntime,
 ): Promise<EngineSetting> {
-  if (!runtime) return { requested: "typescript", source: "no-matching-project" };
+  if (!runtime) return { requested: defaultEngine(), source: "no-matching-project" };
   let target;
   try {
     target = await resolveRepositoryTarget(
@@ -39,7 +44,7 @@ export async function resolveEngineSetting(
       error instanceof ConfigError &&
       ["not-a-repository", "repository-mismatch"].includes(error.code)
     )
-      return { requested: "typescript", source: "no-matching-project" };
+      return { requested: defaultEngine(), source: "no-matching-project" };
     throw new BriefingEngineError(
       "decision-engine-config",
       "Cannot resolve the selected repository configuration.",
@@ -73,4 +78,5 @@ export interface DecisionEngineMetadata {
   rulesHash: string | null;
   coverage: object;
   diagnostics: string[];
+  role?: { used: string; source: "request" | "default" };
 }

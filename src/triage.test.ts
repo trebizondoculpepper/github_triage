@@ -4682,7 +4682,7 @@ describe("repository configuration service (#116, doc/design/repository-configur
     const config = await loadConfig(root, memory.fs);
     expect(config.storedVersion).toBeNull();
     expect(config.settings).toEqual([
-      { key: "briefing.engine", value: "typescript", source: "default" },
+      { key: "briefing.engine", value: "datalog", source: "default" },
       { key: "complexity.enabled", value: true, source: "default" },
       { key: "impact.enabled", value: true, source: "default" },
       { key: "processGuide", value: false, source: "default" },
@@ -5577,7 +5577,7 @@ describe("config get/set/list/help commands (#117)", () => {
     expect(t.out.at(-1)).toContain("unchanged");
     expect(await t.call("list", "--json")).toBe(0);
     expect(t.json().settings).toEqual([
-      expect.objectContaining({ key: "briefing.engine", value: "typescript", source: "default" }),
+      expect.objectContaining({ key: "briefing.engine", value: "datalog", source: "default" }),
       expect.objectContaining({ key: "complexity.enabled", value: false, source: "explicit" }),
       expect.objectContaining({ key: "impact.enabled", value: true, source: "default" }),
       expect.objectContaining({ key: "processGuide", value: false, source: "explicit" }),
@@ -6292,6 +6292,11 @@ describe("estimation queue and briefing visibility from size labels (#122, #152)
       currentRepository: async () => repo,
       now: () => new Date(time),
       estimation: { fs: config(configText), git, cwd: root },
+      guide: {
+        fs: config('{"schemaVersion":1,"briefing":{"engine":"typescript"}}'),
+        git,
+        cwd: root,
+      },
     });
     return { code, report: JSON.parse(out) };
   }
@@ -6448,6 +6453,11 @@ describe("estimation queue and briefing visibility from size labels (#122, #152)
       currentRepository: async () => repo,
       now: () => new Date(time),
       estimation: { fs: config(null), git, cwd: root },
+      guide: {
+        fs: config('{"schemaVersion":1,"briefing":{"engine":"typescript"}}'),
+        git,
+        cwd: root,
+      },
     };
     let text = "";
     await main(["--estimate"], async (t) => void (text = t), runtime);
@@ -6479,6 +6489,11 @@ describe("estimation queue and briefing visibility from size labels (#122, #152)
         },
         currentRepository: async () => repo,
         estimation: { fs: config(null), git, cwd: root },
+        guide: {
+          fs: config('{"schemaVersion":1,"briefing":{"engine":"typescript"}}'),
+          git,
+          cwd: root,
+        },
       });
       expect(JSON.parse(out).estimation).toMatchObject({
         status: "available",
@@ -9238,12 +9253,20 @@ describe("workflow guide in help and briefings (#71, doc/design/workflow-guide.m
     makeDirectory: async () => undefined,
   });
   const run = async (args: string[], raw: string | null, remote?: string) => {
+    // Isolate guide rendering/budget behavior from the default decision engine's evaluation cost.
+    let guideConfig = raw;
+    try {
+      const parsed = JSON.parse(raw ?? '{"schemaVersion":1}') as Record<string, unknown>;
+      guideConfig = JSON.stringify({ ...parsed, briefing: { engine: "typescript" } });
+    } catch {
+      /* Malformed guide inputs deliberately remain malformed. */
+    }
     let out = "";
     const code = await main(["--no-update-check", ...args], async (t) => void (out = t), {
       collect: async () => snapshot(),
       currentRepository: async () => repo,
       estimation: { fs: fsWith(null), git: gitFor(remote), cwd: root },
-      guide: { fs: fsWith(raw), git: gitFor(remote), cwd: root },
+      guide: { fs: fsWith(guideConfig), git: gitFor(remote), cwd: root },
     });
     return { code, out };
   };

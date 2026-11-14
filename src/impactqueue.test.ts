@@ -145,6 +145,8 @@ const runtime = (config: string | null = null, issues: () => Issue[] = fixture) 
   currentRepository: async () => repo,
   now: () => new Date(time),
   estimation: { fs: files(config), git, cwd: root },
+  // Historical TypeScript queue contract remains exercised through the explicit rollback.
+  guide: { fs: files('schemaVersion = 1\n[briefing]\nengine = "typescript"\n'), git, cwd: root },
   rest: permissions,
   updateCheck: async () => ({ status: "skipped" as const, reason: "" }),
 });

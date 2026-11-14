@@ -135,6 +135,8 @@ type Output = (text: string) => Promise<void>;
 export const help = `Usage: github-triage [options]
        (from a source checkout: npm run triage -- [options])
 Read-only LLM action briefing. Requires authenticated gh and Node 26+.
+Next-action default: Datalog, implementer view; --role designer selects design work.
+Rollback: github-triage config set briefing.engine typescript.
   briefing [--last 24h | --since ISO | --checkpoint PATH]  Read-only repository catch-up:
                         what changed and what needs attention (briefing --help)
   deps N [--tree]       Read native upstream/downstream dependencies (deps --help)
