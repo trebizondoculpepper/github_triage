@@ -12,7 +12,7 @@ Create a transport-neutral read service around existing collection, dependency a
 
 ## Bounded-response replacement
 
-The owner-approved replacement for oversized full structured results is [mcp-bounded-results.md](mcp-bounded-results.md), tracked in #266. Its reviewed versioned response contract supersedes the full-intake defaults below when implemented. Claude Code acceptance remains conditional pending default-settings retest.
+The owner-approved replacement for oversized full structured results is [mcp-bounded-results.md](mcp-bounded-results.md), tracked in #266. Delivered: `triage_briefing`, `triage_issue` and `triage_dependencies` return the version-2 bounded envelope (`kind: "mcp-read-result"`, `data`, `presentation`) within 16,384 bytes for the whole result; `triage_issue` gains `section`/`offset`/`limit` and `triage_dependencies` gains `offset`/`limit`. The version-1 envelope and the table below describe the earlier full-intake behaviour, which `triage_events` alone keeps. Claude Code acceptance remains conditional pending default-settings retest.
 
 ## Three discoverable tools
 

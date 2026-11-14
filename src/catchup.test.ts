@@ -1001,7 +1001,11 @@ describe("repository catch-up aggregation (#169)", () => {
   describe("read-only MCP briefing mode (#171)", async () => {
     const { Client } = await import("@modelcontextprotocol/client");
     const { InMemoryTransport } = await import("@modelcontextprotocol/server");
-    const { createServer, envelope, mcpCheckpointPolicy } = await import("./mcp.js");
+    const {
+      createServer,
+      boundedEnvelope: envelope,
+      mcpCheckpointPolicy,
+    } = await import("./mcp.js");
     type McpRuntime = import("./mcp.js").McpRuntime;
     const merged = pr(60, [], "SUCCESS", {
       state: "MERGED",
@@ -1044,9 +1048,15 @@ describe("repository catch-up aggregation (#169)", () => {
       });
       await client.close();
       const body = envelope.parse(result.structuredContent);
-      expect(body).toMatchObject({ kind: "repository-briefing", status: "complete", error: null });
+      expect(body).toMatchObject({
+        schemaVersion: 2,
+        view: "repository-briefing",
+        status: "complete",
+        error: null,
+      });
+      expect(body.presentation.omitted).toEqual({});
       expect(seen).toEqual([`last:${inside(48)}`]);
-      const report = body.result as CatchUpReport & { offline: unknown };
+      const report = body.data as CatchUpReport & { offline: unknown };
       expect(report.kind).toBe("repository-briefing");
       expect(report.checkpoint).toEqual(mcpCheckpointPolicy);
       expect(report.offline).toBeNull();
@@ -1106,8 +1116,8 @@ describe("repository catch-up aggregation (#169)", () => {
       });
       const actions = await client.callTool({ name: "triage_briefing", arguments: {} });
       await client.close();
-      expect(envelope.parse(briefing.structuredContent).kind).toBe("repository-briefing");
-      expect(envelope.parse(actions.structuredContent).kind).toBe("briefing");
+      expect(envelope.parse(briefing.structuredContent).view).toBe("repository-briefing");
+      expect(envelope.parse(actions.structuredContent).view).toBe("briefing");
       expect(seen).toEqual([`default-last:${inside(24)}`, "plain"]);
     });
 
@@ -1148,7 +1158,7 @@ describe("repository catch-up aggregation (#169)", () => {
       await client.close();
       const body = envelope.parse(result.structuredContent);
       expect(body.status).toBe("incomplete");
-      expect((body.result as CatchUpReport).checkpoint.candidate).toBeNull();
+      expect((body.data as CatchUpReport).checkpoint.candidate).toBeNull();
       expect(textOf(result)).toContain("INCOMPLETE");
     });
 

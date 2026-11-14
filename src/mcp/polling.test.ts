@@ -11,7 +11,8 @@ import {
   Watcher,
 } from "./polling.js";
 import type { Clock, Collect, DomainEvent } from "./polling.js";
-import { bindPolling, createServer, envelope, mcpArguments } from "../mcp.js";
+import { bindPolling, boundedEnvelope, createServer, envelope, mcpArguments } from "../mcp.js";
+import { budgetBytes } from "./bounded.js";
 import { RateLimitError } from "../github/dependencies.js";
 import { closingPrEvidence } from "../ranking.js";
 import { rateLimitFailure } from "../github/github.js";
@@ -812,6 +813,59 @@ describe("optional polling and domain events (#32)", () => {
   });
 });
 
+it("caps a triage_events page to the response budget without skipping events (#266)", async () => {
+  const time = fakeClock();
+  const long = (n: number): Issue => ({
+    ...issue(n, ["attention:bo"]),
+    title: `Ticket ${n} ${"long title ".repeat(150)}`,
+  });
+  const many = Array.from({ length: 40 }, (_, i) => long(i + 1));
+  const { collect } = scripted([snap(), snap(many)]);
+  const w = watch(collect, time.clock, 1);
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await createServer(
+    { repo },
+    {
+      collect,
+      dependencyReport: async () => {
+        throw new Error("unused");
+      },
+      currentRepository: async () => repo,
+      watcher: w,
+    },
+  ).connect(serverSide);
+  const client = new Client({ name: "test", version: "1.0.0" });
+  await client.connect(clientSide);
+  w.start();
+  await time.advance(0);
+  await time.advance(minute);
+  const seen: string[] = [];
+  let cursor: string | undefined;
+  let pages = 0;
+  for (let guard = 0; guard < 100; guard++) {
+    pages++;
+    const raw = await client.callTool({
+      name: "triage_events",
+      arguments: { limit: 100, ...(cursor ? { cursor } : {}) },
+    });
+    expect(JSON.stringify(raw).length).toBeLessThanOrEqual(budgetBytes);
+    const result = envelope.parse(raw.structuredContent).result as {
+      items: { eventId: string }[];
+      nextCursor: string;
+      more: boolean;
+    };
+    seen.push(...result.items.map((item) => item.eventId));
+    cursor = result.nextCursor;
+    if (!result.more) break;
+  }
+  expect(seen.length).toBe(40);
+  expect(new Set(seen).size).toBe(40);
+  // The cap was exercised: one requested page of 40 events would not have fit.
+  expect(pages).toBeGreaterThan(1);
+  w.stop();
+  await client.close();
+});
+
 describe("polling startup binds only an explicit startup target (#271, #291)", () => {
   const daemonRepo = "daemon/unrelated-checkout";
   /** Injected boundaries recording every resolution, collection and timer the binding makes. */
@@ -861,7 +915,7 @@ describe("polling startup binds only an explicit startup target (#271, #291)", (
     await createServer({}, b.runtime).connect(serverSide);
     const client = new Client({ name: "test", version: "1.0.0" });
     await client.connect(clientSide);
-    const read = envelope.parse(
+    const read = boundedEnvelope.parse(
       (await client.callTool({ name: "triage_briefing", arguments: { repo } })).structuredContent,
     );
     expect(read.selection).toMatchObject({ repository: repo });

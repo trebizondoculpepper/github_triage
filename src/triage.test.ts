@@ -6549,8 +6549,9 @@ describe("estimation queue and briefing visibility from size labels (#122, #152)
 describe("read-only MCP adapter (#25)", async () => {
   const { Client } = await import("@modelcontextprotocol/client");
   const { InMemoryTransport } = await import("@modelcontextprotocol/server");
-  const { createServer, envelope, mcpArguments, redactLocalText, redactPaths } =
+  const { createServer, boundedEnvelope, mcpArguments, redactLocalText, redactPaths } =
     await import("./mcp.js");
+  const { flattenRelationships } = await import("./mcp/views.js");
   const { IssueUnavailable } = await import("./github/github.js");
   type Runtime = import("./mcp.js").McpRuntime;
   type Options = import("./mcp.js").McpOptions;
@@ -6579,7 +6580,7 @@ describe("read-only MCP adapter (#25)", async () => {
     return client;
   };
   const structured = (result: { structuredContent?: unknown }) =>
-    envelope.parse(result.structuredContent);
+    boundedEnvelope.parse(result.structuredContent);
   const text = (result: { content?: unknown }): string => {
     const first: unknown = Array.isArray(result.content) ? result.content[0] : undefined;
     return typeof first === "object" && first !== null && "text" in first ? String(first.text) : "";
@@ -6607,7 +6608,7 @@ describe("read-only MCP adapter (#25)", async () => {
       const client = await connect(runtime, { project, repo });
       const brief = structured(await client.callTool({ name: "triage_briefing", arguments: {} }));
       await client.close();
-      const mcpProcess = (brief.result as { process: unknown }).process;
+      const mcpProcess = (brief.data as { process: unknown }).process;
       expect(mcpProcess).toMatchObject({ enabled: false, source: "config", guide: null });
       let out = "";
       await main(
@@ -6674,7 +6675,7 @@ describe("read-only MCP adapter (#25)", async () => {
       expect(call.isError).not.toBe(true);
       // Clients that predate structuredContent (before 2025-06-18) still get usable text.
       expect(text(call)).toContain(repo);
-      expect(structured(call)).toMatchObject({ kind: "briefing", status: "complete" });
+      expect(structured(call)).toMatchObject({ view: "briefing", status: "complete" });
       await session.close();
     });
   }
@@ -6709,7 +6710,7 @@ describe("read-only MCP adapter (#25)", async () => {
     await client.close();
   });
 
-  it("returns the same versioned JSON as the CLI for briefing, issue and dependencies", async () => {
+  it("projects the CLI's versioned JSON for briefing, issue and dependencies (#266)", async () => {
     const runtime = fake();
     const client = await connect(runtime, { repo });
     const cli = async (args: string[]) => {
@@ -6719,15 +6720,24 @@ describe("read-only MCP adapter (#25)", async () => {
     };
     const brief = structured(await client.callTool({ name: "triage_briefing", arguments: {} }));
     expect(brief).toMatchObject({
-      schemaVersion: 1,
-      kind: "briefing",
+      schemaVersion: 2,
+      kind: "mcp-read-result",
+      tool: "triage_briefing",
+      view: "briefing",
       status: "complete",
       selection: { repository: repo, agent: null, identitySource: "unresolved" },
+      presentation: { omitted: {}, truncatedFields: [], next: null },
       error: null,
     });
     const { checkpoint: _, ...cliBrief } = await cli(["--repo", repo]);
-    // Identical except that local paths in diagnostics are redacted for the MCP client.
-    expect(brief.result).toEqual(redactPaths(cliBrief, [process.cwd()]));
+    const expected = redactPaths(cliBrief, [process.cwd()]);
+    // Carried fields keep their CLI values; local paths in diagnostics are redacted.
+    const data = brief.data as Record<string, unknown>;
+    for (const key of ["summary", "actions", "sections", "rankedActions", "estimation", "process"])
+      expect(data[key], key).toEqual(expected[key]);
+    expect(brief.freshness).toEqual(expected.freshness);
+    expect(brief.sourceCompleteness).toEqual(expected.completeness);
+    expect((data.subjects as unknown[]).length).toBe(expected.subjects.length);
     const intake = structured(
       await client.callTool({ name: "triage_issue", arguments: { number: 1, agent: "ana" } }),
     );
@@ -6740,18 +6750,33 @@ describe("read-only MCP adapter (#25)", async () => {
       "ana",
     ]);
     expect(intake).toMatchObject({
-      kind: "issue",
+      view: "issue",
+      subject: { type: "issue", number: 1 },
       selection: { agent: "ana", identitySource: "tool" },
     });
-    expect(intake.result).toEqual(redactPaths(cliIssue, [process.cwd()]));
+    const issueData = intake.data as {
+      issue: Record<string, unknown>;
+      counts: Record<string, number>;
+    };
+    expect(issueData.issue).toMatchObject({
+      number: cliIssue.detail.number,
+      title: cliIssue.detail.title,
+      state: cliIssue.detail.state,
+      labels: cliIssue.detail.labels.nodes.map((l: { name: string }) => l.name),
+    });
+    expect(issueData.counts.comments).toBe(cliIssue.detail.comments.nodes.length);
     const deps = structured(
       await client.callTool({ name: "triage_dependencies", arguments: { number: 1, tree: true } }),
     );
-    expect(deps.result).toEqual(await cli(["deps", "1", "--tree", "--repo", repo]));
+    const cliDeps = await cli(["deps", "1", "--tree", "--repo", repo]);
+    expect((deps.data as { relationships: unknown }).relationships).toEqual(
+      flattenRelationships(cliDeps, 1),
+    );
+    expect(deps.data).toMatchObject({ tree: true, cycles: cliDeps.cycles });
     await client.close();
   });
 
-  it("bounds triage_issue text to maxChars while structuredContent keeps the full intake", async () => {
+  it("bounds triage_issue text to maxChars and pages long discussion with visible shortening", async () => {
     const long = "x".repeat(4000);
     const comments = Array.from({ length: 30 }, (_, i) => ({
       author: { login: `user${i}` },
@@ -6770,8 +6795,23 @@ describe("read-only MCP adapter (#25)", async () => {
     });
     const body = text(result);
     expect(body.length).toBeLessThanOrEqual(2000);
-    expect(body).toContain("omitted from text; it is in structuredContent.result.detail");
-    expect(JSON.stringify(structured(result).result)).toContain(`comment 29 ${long}`);
+    expect(body).toContain("Bounded MCP result");
+    expect(JSON.stringify(result).length).toBeLessThanOrEqual(16_384);
+    expect(structured(result).data).toMatchObject({ counts: { comments: 30 } });
+    const seen: string[] = [];
+    let args: Record<string, unknown> | null = { number: 1, section: "discussion", limit: 100 };
+    while (args) {
+      const pageResult = structured(
+        await client.callTool({ name: "triage_issue", arguments: args }),
+      );
+      const rows = (pageResult.data as { rows: { url: string; body: string }[] }).rows;
+      expect(rows.length).toBeGreaterThan(0);
+      for (const row of rows) expect(row.body).toMatch(/… \[truncated\]$/);
+      expect(pageResult.presentation.truncatedFields.length).toBeGreaterThanOrEqual(rows.length);
+      seen.push(...rows.map((row) => row.url));
+      args = pageResult.presentation.next?.arguments ?? null;
+    }
+    expect(seen).toEqual(comments.map((c) => c.url));
     await client.close();
   });
 
@@ -6880,7 +6920,7 @@ describe("read-only MCP adapter (#25)", async () => {
         const envelope = structured(result);
         expect(envelope).toMatchObject({
           status: "error",
-          result: null,
+          data: null,
           selection: { repository: null },
           error: { code: "repository-unresolved" },
         });
@@ -7053,7 +7093,9 @@ describe("read-only MCP adapter (#25)", async () => {
         runtime,
       );
       const { checkpoint: _, ...cli } = JSON.parse(out);
-      expect(brief.result).toEqual(redactPaths(cli, [process.cwd()]));
+      const expected = redactPaths(cli, [process.cwd()]);
+      for (const key of ["actions", "sections", "rankedActions", "role"])
+        expect((brief.data as Record<string, unknown>)[key], key).toEqual(expected[key]);
       await client.close();
     });
 
@@ -7150,7 +7192,7 @@ describe("read-only MCP adapter (#25)", async () => {
     expect(unresolved.isError).toBe(true);
     expect(structured(unresolved)).toMatchObject({
       status: "error",
-      result: null,
+      data: null,
       error: { code: "repository-unresolved" },
     });
     const failed = await client.callTool({ name: "triage_briefing", arguments: { repo } });
@@ -7183,7 +7225,7 @@ describe("read-only MCP adapter (#25)", async () => {
     const denied = await client.callTool({ name: "triage_issue", arguments: { number: 9 } });
     expect(structured(denied)).toMatchObject({
       status: "incomplete",
-      result: { kind: "issue-unavailable", state: "forbidden" },
+      data: { kind: "issue-unavailable", state: "forbidden" },
     });
     expect(text(denied)).toMatch(/FORBIDDEN/);
     await client.close();
@@ -7341,7 +7383,9 @@ describe("read-only MCP adapter (#25)", async () => {
       const all = JSON.stringify(result.structuredContent) + text(result);
       expect(all, name).not.toContain(homedir());
       if (name === "triage_issue") {
-        const detail = JSON.stringify(structured(result).result);
+        const detail = JSON.stringify(
+          structured(await client.callTool({ name, arguments: { ...args, section: "body" } })).data,
+        );
         expect(detail).toContain(JSON.stringify(authored).slice(1, -1));
         expect(detail).toContain("Fix /api/v1/users");
         expect(detail).toContain("<local checkout>/private/notes.md");

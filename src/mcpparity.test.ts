@@ -13,7 +13,7 @@ import { TOML_CONFIG_PATH } from "./config/config.js";
 import type { ConfigFileSystem, GitRunner } from "./config/config.js";
 import { collect } from "./github/github.js";
 import type { Query } from "./github/github.js";
-import { createServer, envelope } from "./mcp.js";
+import { boundedEnvelope, createServer } from "./mcp.js";
 import type { McpRuntime } from "./mcp.js";
 import type { Issue, Page } from "./github/types.js";
 
@@ -121,7 +121,7 @@ async function cliResult(c: Case): Promise<Record<string, unknown>> {
 async function mcpResult(
   c: Case,
   omitLimit = false,
-): Promise<{ result: Record<string, unknown>; text: string }> {
+): Promise<{ result: Record<string, unknown>; text: string; omitted: Record<string, number> }> {
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   await createServer({ repo }, runtimeFor(c.config)).connect(serverSide);
   const client = new Client({ name: "parity", version: "1.0.0" });
@@ -136,18 +136,51 @@ async function mcpResult(
         ...(omitLimit ? {} : { limit: c.limit }),
       },
     });
-    const parsed = envelope.parse(raw.structuredContent);
+    const parsed = boundedEnvelope.parse(raw.structuredContent);
     expect(parsed.status).toBe("complete");
+    // Shared report fields keep their CLI values; only the byte budget (#266) may shorten lists.
+    expect(parsed.presentation.truncatedFields).toEqual([]);
     const first: unknown = Array.isArray(raw.content) ? raw.content[0] : undefined;
     const text =
       typeof first === "object" && first !== null && "text" in first ? String(first.text) : "";
-    return { result: parsed.result ?? {}, text };
+    return { result: parsed.data ?? {}, text, omitted: parsed.presentation.omitted };
   } finally {
     await client.close();
   }
 }
 
 const shared = ["actions", "role", "rankedActions", "estimation", "impactEstimation"] as const;
+
+type Listed = { total?: number; omitted?: number; items?: unknown[]; next?: unknown[] };
+/**
+ * CLI parity under the MCP byte budget (#266): a field equals the CLI's, except that a list the
+ * budget shortened is a prefix of the CLI list, with the same total and an exact omitted count
+ * that the presentation also reports.
+ */
+function expectParity(
+  mcp: { result: Record<string, unknown>; omitted: Record<string, number> },
+  cli: Record<string, unknown>,
+): void {
+  for (const key of shared) {
+    const shortened = Object.keys(mcp.omitted).filter((path) => path.startsWith(`${key}.`));
+    if (!shortened.length) {
+      expect(mcp.result[key], key).toEqual(cli[key]);
+      continue;
+    }
+    const ours = mcp.result[key] as Listed;
+    const theirs = cli[key] as Listed;
+    for (const list of ["items", "next"] as const) {
+      if (!theirs[list]) continue;
+      const shown = ours[list] ?? [];
+      expect(shown, `${key}.${list}`).toEqual(theirs[list]?.slice(0, shown.length));
+      expect((theirs[list]?.length ?? 0) - shown.length).toBe(mcp.omitted[`${key}.${list}`] ?? 0);
+    }
+    if (typeof theirs.total === "number") {
+      expect(ours.total).toBe(theirs.total);
+      expect(ours.omitted).toBe(theirs.total - (ours.items?.length ?? 0));
+    }
+  }
+}
 const kinds = (result: Record<string, unknown>): string[] =>
   ((result.rankedActions as { items: { kind: string; target: string }[] } | null)?.items ?? []).map(
     (i) => `${i.kind}#${i.target.split("/").pop()}`,
@@ -161,7 +194,7 @@ describe("CLI and MCP report identical blended queues (#260)", () => {
           const c: Case = { role, order, limit, config: null };
           const cli = await cliResult(c);
           const mcp = await mcpResult(c);
-          for (const key of shared) expect(mcp.result[key], key).toEqual(cli[key]);
+          expectParity(mcp, cli);
           // The compared objects exist, not two equally absent fields.
           // impactEstimation is designer-only (#246); the implementer gets estimation (#259).
           const present = shared.filter((k) => role === "designer" || k !== "impactEstimation");
@@ -174,8 +207,8 @@ describe("CLI and MCP report identical blended queues (#260)", () => {
           // Assessments appear in ordinary role views without --estimate.
           const assessment = role === "implementer" ? "estimate-complexity" : "assess-impact";
           if (limit === 20) expect(kinds(cli).some((k) => k.startsWith(assessment))).toBe(true);
-          // Rendered NEXT STEPS agree on order: every ranked target appears in both texts.
-          for (const target of (cli.actions as { items: string[] }).items)
+          // Rendered next steps agree: every returned action target appears in the text.
+          for (const target of (mcp.result.actions as { items: string[] }).items)
             expect(mcp.text).toContain(target);
         });
 
@@ -189,7 +222,7 @@ describe("CLI and MCP report identical blended queues (#260)", () => {
       nextCommand: `pdb claim 1 --repo ${repo} --agent me`,
     });
     expect(kinds(mcp.result)).not.toContain("implement#8");
-    expect(mcp.result.rankedActions).toEqual(cli.rankedActions);
+    expectParity(mcp, cli);
   });
 
   it("agrees when a metric is disabled", async () => {
@@ -197,7 +230,7 @@ describe("CLI and MCP report identical blended queues (#260)", () => {
     const c: Case = { role: "implementer", order: "impact", limit: 20, config };
     const cli = await cliResult(c);
     const mcp = await mcpResult(c);
-    for (const key of shared) expect(mcp.result[key], key).toEqual(cli[key]);
+    expectParity(mcp, cli);
     expect(kinds(cli).some((k) => k.startsWith("estimate-complexity"))).toBe(false);
   });
 
@@ -207,7 +240,7 @@ describe("CLI and MCP report identical blended queues (#260)", () => {
       kinds(result).filter((k) => k.startsWith("implement#"));
     const cli = await cliResult(c);
     const mcp = await mcpResult(c);
-    expect(pickup(mcp.result)).toEqual(pickup(cli));
+    expect(pickup(mcp.result)).toEqual(pickup(cli).slice(0, pickup(mcp.result).length));
     expect(pickup(cli)[0]).toBe("implement#7");
   });
 
@@ -235,13 +268,13 @@ describe("CLI and MCP report identical blended queues (#260)", () => {
     await createServer({ repo }, runtimeFor(null)).connect(serverSide);
     const client = new Client({ name: "parity", version: "1.0.0" });
     await client.connect(clientSide);
-    const plain = envelope.parse(
+    const plain = boundedEnvelope.parse(
       (await client.callTool({ name: "triage_briefing", arguments: { agent: "me", limit: 5 } }))
         .structuredContent,
     );
     await client.close();
-    expect(plain.result?.rankedActions).toEqual(mcp.result.rankedActions);
-    expect(plain.result?.decisionEngine).toMatchObject({
+    expect(plain.data?.rankedActions).toEqual(mcp.result.rankedActions);
+    expect(plain.data?.decisionEngine).toMatchObject({
       used: "datalog",
       role: { used: "implementer", source: "default" },
     });
@@ -253,7 +286,7 @@ it("uses ten MCP next actions when limit is omitted, matching the CLI default", 
   const c: Case = { role: "implementer", order: "impact", limit: 10, config: null };
   const mcp = await mcpResult(c, true),
     cli = await cliResult(c);
-  const ranked = mcp.result.rankedActions as { items: unknown[] };
+  const ranked = cli.rankedActions as { items: unknown[] };
   expect(ranked.items.length).toBe(10);
-  expect(mcp.result.rankedActions).toEqual(cli.rankedActions);
+  expectParity(mcp, cli);
 });

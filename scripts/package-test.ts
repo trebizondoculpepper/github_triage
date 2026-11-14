@@ -158,23 +158,44 @@ async function blendedParity(
   const client = new Client({ name: "package-test", version: "1.0.0" });
   await client.connect(transport);
   let mcp: Report;
+  let omitted: Record<string, number> = {};
   try {
     const result = await client.callTool({
       name: "triage_briefing",
       arguments: { role, order, limit: 10 },
     });
-    const structured = result.structuredContent as { status?: string; result?: Report } | undefined;
-    if (!structured?.result)
+    // Bounded version-2 envelope (#266): `data` carries the CLI fields; `presentation.omitted`
+    // names any list the response budget shortened.
+    const structured = result.structuredContent as
+      | { status?: string; data?: Report; presentation?: { omitted?: Record<string, number> } }
+      | undefined;
+    if (!structured?.data)
       throw new Error(`Installed MCP returned no ${role} briefing (${structured?.status}).`);
-    mcp = structured.result;
+    mcp = structured.data;
+    omitted = structured.presentation?.omitted ?? {};
   } finally {
     await client.close();
   }
-  for (const key of parityFields)
+  for (const key of parityFields) {
+    if (Object.keys(omitted).some((path) => path.startsWith(`${key}.`))) {
+      // A shortened list must be an exact prefix of the CLI's, with the same total.
+      const ours = mcp[key] as { total?: number; items?: unknown[] } | null;
+      const theirs = cli[key] as { total?: number; items?: unknown[] } | null;
+      const shown = ours?.items ?? [];
+      if (
+        ours?.total !== theirs?.total ||
+        JSON.stringify(shown) !== JSON.stringify(theirs?.items?.slice(0, shown.length))
+      )
+        throw new Error(
+          `Installed CLI and MCP disagree on shortened ${key} for ${role} (${order}).`,
+        );
+      continue;
+    }
     if (JSON.stringify(cli[key]) !== JSON.stringify(mcp[key]))
       throw new Error(
         `Installed CLI and MCP disagree on ${key} for ${role} (${order}): CLI ${JSON.stringify(cli[key])} MCP ${JSON.stringify(mcp[key])}.`,
       );
+  }
   return rankedKinds(cli);
 }
 
