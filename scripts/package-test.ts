@@ -133,6 +133,25 @@ try {
       )
     )
       throw new Error(`Installed bin does not document briefing mode in ${cwd}.`);
+    // Delivery records (#189): the installed help documents every deliverables command.
+    const deliverablesHelp = await cli(["deliverables", "--help"]);
+    if (
+      !help.stdout.includes("deliverables N attach") ||
+      ![
+        "attach",
+        "detach",
+        "retarget",
+        "handoff",
+        "membership",
+        "attest",
+        "reassign",
+        "reset",
+        "void",
+        "--legacy",
+        "TARGET_MISMATCH",
+      ].every((term) => deliverablesHelp.stdout.includes(term))
+    )
+      throw new Error(`Installed bin does not document deliverables commands in ${cwd}.`);
     const invalid = await cli(["--no-such-option"]).then(
       () => null,
       (error: { code?: unknown }) => error,
