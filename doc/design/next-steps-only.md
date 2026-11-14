@@ -10,6 +10,20 @@ do next? Background findings, repository statistics and evaluator information
 distract from that answer and consume agent context. Keep a useful shortlist by
 default; make broader context an explicit request.
 
+This is one unified to-do list, not separate queues by activity. It blends PR
+follow-up, complexity estimates, impact assessments, implementation, inspection
+and other supported role activities in approximate priority. Each item identifies
+the next activity, explains its placement, provides the appropriate action command
+and links to further detail. Claim commands apply only to activities that require
+a claim; assessment or inspection must not acquire a claim just to fit the layout.
+The product's central value is selecting and ranking useful next activities.
+
+The owner also proposed raising assessments because they are usually quick and
+provide intelligence for downstream choices. Current policy already places them
+above ordinary implementation, but below known easy wins. Evaluate whether to
+raise them above known easy wins in a separate ranking-policy change with concrete
+scenarios. This presentation contract does not silently change that ordering.
+
 ## Default text
 
 For both roles and both engines, render the ranked next-action list, preserving
