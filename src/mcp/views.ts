@@ -279,7 +279,11 @@ export function issueView(
   const subjectsByUrl = new Map(list(report.subjects).map((item) => [obj(item).url, obj(item)]));
   const pullRequests = list(detail.relatedPullRequests).map((prUrl) => {
     const known = subjectsByUrl.get(prUrl);
-    return known ? compactSubject(known) : { url: prUrl };
+    // The section the caller asked for keeps the collected PR evidence (head, checks, reviews,
+    // threads); absence is unknown, never "no checks".
+    return known
+      ? { ...compactSubject(known), pullRequest: known.pullRequest ?? null }
+      : { url: prUrl, pullRequest: null };
   });
   const issue = {
     number: detail.number ?? number,
@@ -510,9 +514,10 @@ export function dependenciesView(
       guidance: report.guidance,
     },
     protectedPaths: ["ticket.verdict"],
+    // Cycle metadata goes before the requested relationship rows.
     lists: () => [
-      { path: ["relationships"], available: rows.available, requireRow: true },
       { path: ["cycles"] },
+      { path: ["relationships"], available: rows.available, requireRow: true },
     ],
     next: (returned) => rows.next(returned["relationships"] ?? 0),
     text: (d) => [

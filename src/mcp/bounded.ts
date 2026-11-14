@@ -342,7 +342,12 @@ const presentationTruncated = (truncated: Path[], data: unknown): number =>
 /** Build the bounded result for one read; see the module comment for the pruning order. */
 export function boundedResult(view: BoundedView): ToolResult {
   const data = structuredClone(view.data);
-  const ordered = view.lists(data);
+  // The rows a caller paged for (requireRow) always go after every optional list.
+  const declared = view.lists(data);
+  const ordered = [
+    ...declared.filter((list) => !list.requireRow),
+    ...declared.filter((list) => list.requireRow),
+  ];
   const lists = ordered.filter((list) => Array.isArray(at(data, list.path)));
   const available = new Map(
     lists.map((list) => [
@@ -475,7 +480,8 @@ export function boundedResult(view: BoundedView): ToolResult {
     }
     const rows = at(data, list.path);
     if (!Array.isArray(rows)) continue;
-    while (rows.length > 0) {
+    // A requested page keeps its first row; remaining warnings are pruned before giving it up.
+    while (rows.length > (list.requireRow ? 1 : 0)) {
       rows.pop();
       result = build();
       if (fits(result)) return finish(result);
@@ -486,6 +492,14 @@ export function boundedResult(view: BoundedView): ToolResult {
     result = build();
     if (fits(result)) return finish(result);
   }
+  const paged = ordered.find(
+    (list) => list.requireRow && (available.get(pathText(list.path)) ?? 0) > 0,
+  );
+  if (paged)
+    return budgetExceeded(
+      view,
+      `The first row of ${pathText(paged.path)} at this offset cannot fit in the ${budgetBytes}-byte response budget, so this page cannot make progress.`,
+    );
   return budgetExceeded(
     view,
     `The essential fields of this ${view.view} result exceed the ${budgetBytes}-byte response budget even with every optional row omitted.`,

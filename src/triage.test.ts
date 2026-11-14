@@ -6776,6 +6776,33 @@ describe("read-only MCP adapter (#25)", async () => {
     await client.close();
   });
 
+  it("keeps collected PR evidence in an explicit pullRequests section (#266)", async () => {
+    const runtime = fake();
+    const client = await connect(runtime, { repo });
+    let out = "";
+    await main(
+      ["--repo", repo, "--issue", "1", "--json", "--no-update-check"],
+      async (t) => void (out = t),
+      runtime,
+    );
+    const cliIssue = JSON.parse(out) as {
+      subjects: { url: string; pullRequest?: unknown }[];
+    };
+    const expected = cliIssue.subjects.find((subject) => subject.url === pr().url)?.pullRequest;
+    expect(expected).toBeTruthy();
+    const result = structured(
+      await client.callTool({
+        name: "triage_issue",
+        arguments: { number: 1, section: "pullRequests" },
+      }),
+    );
+    const rows = (result.data as { rows: { url: string; pullRequest: unknown }[] }).rows;
+    expect(rows.map((row) => row.url)).toEqual([pr().url]);
+    expect(rows[0]?.pullRequest).toEqual(expected);
+    expect(JSON.stringify(rows[0]?.pullRequest)).toContain("verify");
+    await client.close();
+  });
+
   it("bounds triage_issue text to maxChars and pages long discussion with visible shortening", async () => {
     const long = "x".repeat(4000);
     const comments = Array.from({ length: 30 }, (_, i) => ({

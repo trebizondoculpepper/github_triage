@@ -617,6 +617,35 @@ describe("bounded MCP results (#266)", () => {
     }
   });
 
+  it("prunes cycle metadata before the last requested relationship row", async () => {
+    const rt = runtime();
+    rt.dependencyReport = (async () => {
+      const report = dependencyTree();
+      const root = report.nodes[0]!;
+      return {
+        ...report,
+        nodes: [{ ...root, upstream: root.upstream.slice(0, 1), downstream: [] }],
+        cycles: Array.from({ length: 100 }, (_, c) =>
+          Array.from({ length: 10 }, (_, i) => url(1000 + c * 10 + i)),
+        ),
+      };
+    }) as McpRuntime["dependencyReport"];
+    const client = await connect(rt);
+    try {
+      const { raw, bytes, structured } = await call(client, "triage_dependencies", {
+        number: 25,
+        tree: true,
+      });
+      expect(raw.isError).toBeFalsy();
+      expect(bytes).toBeLessThanOrEqual(budgetBytes);
+      expect((structured.data as { relationships: unknown[] }).relationships).toHaveLength(1);
+      expect(structured.presentation.omitted["cycles"]).toBeGreaterThan(0);
+      expect(structured.presentation.omitted["relationships"]).toBeUndefined();
+    } finally {
+      await client.close();
+    }
+  });
+
   it("keeps full intake available through the CLI", async () => {
     let out = "";
     const code = await main(
