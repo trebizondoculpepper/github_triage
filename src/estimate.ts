@@ -38,8 +38,8 @@ import {
   nodeGit,
   resolveRepositoryTarget,
   settingFor,
-} from "./config.js";
-import type { ConfigFileSystem, GitRunner } from "./config.js";
+} from "./config/config.js";
+import type { ConfigFileSystem, GitRunner } from "./config/config.js";
 import { ghGraphqlApi, isRecord, prop } from "./github.js";
 import type { GraphqlAnswer, GraphqlApi } from "./github.js";
 

@@ -1,5 +1,9 @@
-import { BriefingEngineError, resolveEngineSetting, defaultEngine } from "./engine-setting.js";
-import type { EngineSetting, DecisionEngineMetadata } from "./engine-setting.js";
+import {
+  BriefingEngineError,
+  resolveEngineSetting,
+  defaultEngine,
+} from "./config/engine-setting.js";
+import type { EngineSetting, DecisionEngineMetadata } from "./config/engine-setting.js";
 /**
  * Transport-neutral read service shared by the CLI and the MCP adapter (doc/design/mcp.md).
  *

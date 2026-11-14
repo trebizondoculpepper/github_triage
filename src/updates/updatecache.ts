@@ -13,7 +13,7 @@ import { randomBytes } from "node:crypto";
 import * as nodeFs from "node:fs/promises";
 import { join } from "node:path";
 import envPaths from "env-paths";
-import { acquireFileLock, type LockFs } from "../filelock.js";
+import { acquireFileLock, type LockFs } from "../config/filelock.js";
 import {
   checkForUpdate,
   type CheckOptions,
@@ -113,7 +113,7 @@ async function writeCache(fs: CacheFs, file: string, cache: UpdateCache): Promis
 /**
  * Take the cache lock, waiting at most `lockWaitMs` and breaking a lock older than
  * `lockStaleMs`. Returns a release function, or null when the lock could not be taken safely
- * (the caller then skips the optional check). Semantics: `src/filelock.ts`; the worst case of
+ * (the caller then skips the optional check). Semantics: `src/config/filelock.ts`; the worst case of
  * its accepted race here is a duplicate registry request and notice with last-writer-wins
  * atomic cache replacement.
  */

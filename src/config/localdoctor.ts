@@ -20,7 +20,7 @@ import {
   resolveRepositoryTarget,
 } from "./config.js";
 import type { ConfigFileSystem, GitRunner } from "./config.js";
-import { roleNames } from "./roles.js";
+import { roleNames } from "../roles.js";
 import { resolveEntry } from "./harness.js";
 import type { Environment } from "./harness.js";
 import { parseIdentityDocument, readIdentity, TRIAGE_ROLES } from "./identity.js";

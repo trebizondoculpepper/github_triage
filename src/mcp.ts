@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { BriefingEngineError } from "./engine-setting.js";
+import { BriefingEngineError } from "./config/engine-setting.js";
 /**
  * Read-only stdio MCP adapter (doc/design/mcp.md, #25). Three tools over the shared read
  * service; no mutation, shell, file-path, cache or checkpoint routes are registered.
@@ -30,12 +30,12 @@ import {
 } from "./mcp/polling.js";
 import type { Clock } from "./mcp/polling.js";
 import type { ReadRuntime } from "./service.js";
-import type { ConfigFileSystem, GitRunner } from "./config.js";
-import { validateHarness } from "./harness.js";
-import type { Environment } from "./harness.js";
-import { validateEntryKey } from "./identity.js";
-import { resolveReadIdentity } from "./readidentity.js";
-import type { ReadIdentity } from "./readidentity.js";
+import type { ConfigFileSystem, GitRunner } from "./config/config.js";
+import { validateHarness } from "./config/harness.js";
+import type { Environment } from "./config/harness.js";
+import { validateEntryKey } from "./config/identity.js";
+import { resolveReadIdentity } from "./config/readidentity.js";
+import type { ReadIdentity } from "./config/readidentity.js";
 import { installedVersion } from "./updates/updates.js";
 import { pickupOrders } from "./ranking.js";
 import { roleNames } from "./roles.js";

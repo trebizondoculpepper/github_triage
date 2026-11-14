@@ -5,7 +5,7 @@
  */
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { homedir } from "node:os";
-import type { ConfigFileSystem, GitRunner } from "../src/config.js";
+import type { ConfigFileSystem, GitRunner } from "../src/config/config.js";
 
 /** Synthetic checkout root; never a real path on the measuring machine. */
 export const SYNTHETIC_ROOT = "/synthetic/checkout";
