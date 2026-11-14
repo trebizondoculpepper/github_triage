@@ -130,6 +130,15 @@ export interface Snapshot {
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
+/** Describe a parsed JSON value for a diagnostic without invoking anything on it. */
+const safeDescribe = (v: unknown): string =>
+  typeof v === "number" || typeof v === "boolean" || v === null
+    ? `${v}`
+    : typeof v === "string"
+      ? JSON.stringify(v.slice(0, 40))
+      : Array.isArray(v)
+        ? "array"
+        : typeof v;
 const isTime = (v: unknown): v is string => typeof v === "string" && Number.isFinite(Date.parse(v));
 
 /** Structural check; returns a reason when the value is not a usable snapshot. */
@@ -141,11 +150,25 @@ export function shapeProblem(v: unknown): string | undefined {
   if (!isTime(v.observedAt) || !isTime(v.lastSuccessfulAt)) return "invalid timestamps";
   if (!isRecord(v.sourceCoverage)) return "missing sourceCoverage";
   for (const c of Object.values(v.sourceCoverage))
-    if (!isRecord(c) || !["complete", "partial", "unknown"].includes(String(c.status)))
+    if (
+      !isRecord(c) ||
+      typeof c.status !== "string" ||
+      !["complete", "partial", "unknown"].includes(c.status) ||
+      typeof c.pages !== "number" ||
+      !Number.isInteger(c.pages) ||
+      c.pages < 0 ||
+      typeof c.scope !== "string"
+    )
       return "invalid sourceCoverage";
   if (!Array.isArray(v.manifest) || !Array.isArray(v.records)) return "missing manifest/records";
   for (const m of v.manifest)
-    if (!isRecord(m) || typeof m.subject !== "string" || !isTime(m.updatedAt))
+    if (
+      !isRecord(m) ||
+      typeof m.subject !== "string" ||
+      typeof m.state !== "string" ||
+      !isTime(m.updatedAt) ||
+      (m.headOid !== undefined && typeof m.headOid !== "string")
+    )
       return "invalid manifest entry";
   for (const r of v.records)
     if (
@@ -214,6 +237,8 @@ export type LoadResult =
       freshness: "stored-unvalidated";
       ageMs: number;
       coverageComplete: boolean;
+      /** Records withheld because their own lastSeenAt is past the 24-hour retention. */
+      expiredOnLoad: string[];
     }
   | {
       /** A valid snapshot with no records. Authoritative only when every source was complete. */
@@ -222,6 +247,8 @@ export type LoadResult =
       freshness: "stored-unvalidated";
       ageMs: number;
       coverageComplete: boolean;
+      /** Records withheld because their own lastSeenAt is past the 24-hour retention. */
+      expiredOnLoad: string[];
     }
   | { status: "miss"; reason: MissReason; detail: string };
 
@@ -259,7 +286,7 @@ export function classifyText(
   if (typeof parsed.schemaVersion === "number" && parsed.schemaVersion > SCHEMA_VERSION)
     return miss("future-schema", `schemaVersion ${parsed.schemaVersion}`);
   if (parsed.schemaVersion !== SCHEMA_VERSION || parsed.kind !== SNAPSHOT_KIND)
-    return miss("schema-mismatch", `schemaVersion ${String(parsed.schemaVersion)}`);
+    return miss("schema-mismatch", `schemaVersion ${safeDescribe(parsed.schemaVersion)}`);
   const problem = shapeProblem(parsed);
   if (problem) return miss("corrupt", problem);
   const s = parsed as unknown as Snapshot;
@@ -277,16 +304,27 @@ export function classifyText(
   if (Math.max(observed, success) > now + CLOCK_SKEW_MS)
     return miss("future-timestamp", "stored time is ahead of the local clock (rollback?)");
   if (now - success > RETENTION_MS) return miss("expired", "older than 24-hour retention");
+  // Per-record retention: a partial refresh can move lastSuccessfulAt past records it kept, so
+  // each record's own listing time is checked too. Expired records are withheld and reported,
+  // and their absence makes the snapshot's coverage incomplete (it is no longer what was seen).
+  const expiredOnLoad: string[] = [];
+  const records = s.records.filter((r) => {
+    const keep = now - Date.parse(r.lastSeenAt) <= RETENTION_MS;
+    if (!keep) expiredOnLoad.push(r.subject);
+    return keep;
+  });
   const coverageComplete =
+    expiredOnLoad.length === 0 &&
     Object.keys(s.sourceCoverage).length > 0 &&
     Object.values(s.sourceCoverage).every((cv) => cv.status === "complete");
   const base = {
-    snapshot: s,
+    snapshot: { ...s, records },
     freshness: "stored-unvalidated" as const,
     ageMs: Math.max(0, now - success),
     coverageComplete,
+    expiredOnLoad,
   };
-  return s.records.length === 0 ? { status: "empty", ...base } : { status: "hit", ...base };
+  return records.length === 0 ? { status: "empty", ...base } : { status: "hit", ...base };
 }
 
 const miss = (reason: MissReason, detail: string): LoadResult => ({
@@ -353,6 +391,9 @@ export function applyObservation(
   const merged = new Map<string, EvidenceRecord>();
   for (const r of previous?.records ?? []) {
     if (complete && !listed.has(r.subject)) omissions.prunedUnseen.push(r.subject);
+    // Listed again by this successful manifest: renew its listing time only. Its facts,
+    // sourceTime and revalidatedAt are unchanged, so they are not claimed as revalidated.
+    else if (listed.has(r.subject)) merged.set(r.subject, { ...r, lastSeenAt: obs.observedAt });
     else merged.set(r.subject, r);
   }
   for (const r of obs.records) merged.set(r.subject, r);
@@ -432,6 +473,18 @@ export type WriteResult =
       previous: LoadResult["status"] | MissReason;
     }
   | {
+      /**
+       * The replacement is in place (the rename succeeded) but a later step failed, for
+       * example the directory fsync. Readers see the new snapshot; its durability across a
+       * power loss is not confirmed.
+       */
+      status: "committed-with-error";
+      reason: "post-commit-failure";
+      step: WriteStep;
+      detail: string;
+      omissions: Omissions;
+    }
+  | {
       status: "not-written";
       reason: "unknown-context" | "lock-timeout" | "lock-error" | "failed" | "declined";
       step?: WriteStep;
@@ -442,7 +495,8 @@ export type WriteResult =
  * Read-modify-write one context under its lock. `update` receives the previous load result
  * (read under the lock, so concurrent writers never lose each other's records) and returns the
  * observation to merge, or null to leave the snapshot unchanged. Never throws for filesystem
- * failures; the previous snapshot survives every failure.
+ * failures. Every failure before the rename leaves the previous snapshot in place
+ * ("not-written"); a failure after it is "committed-with-error", with the new snapshot in place.
  */
 export async function storeSnapshot(
   root: string,
@@ -517,6 +571,8 @@ export async function storeSnapshot(
   }
   const temp = join(dir, `${SNAPSHOT_FILE}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
   let tempCreated = false;
+  // Set once the rename has replaced the snapshot: failures after it are not "not-written".
+  let committed: Omissions | undefined;
   try {
     const previous = await run("read-previous", () =>
       loadSnapshot(root, context, { fs, now, access: "confirmed" }),
@@ -526,6 +582,8 @@ export async function storeSnapshot(
       return { status: "not-written", reason: "declined", detail: "update returned no change" };
     const prior = previous.status === "miss" ? undefined : previous.snapshot;
     const { snapshot, omissions } = applyObservation(prior, key, obs, now());
+    // Records withheld on load for age are dropped by this write; report them as expired.
+    if (previous.status !== "miss") omissions.expired.push(...previous.expiredOnLoad);
     const text = JSON.stringify(snapshot) + "\n";
     let handle: FileHandleLike | undefined;
     try {
@@ -547,6 +605,7 @@ export async function storeSnapshot(
       for (;;) {
         try {
           await fs.rename(temp, file);
+          committed = omissions;
           return;
         } catch (e) {
           const c = errorCode(e);
@@ -585,9 +644,19 @@ export async function storeSnapshot(
       previous: previous.status === "miss" ? previous.reason : previous.status,
     };
   } catch (e) {
+    if (committed) {
+      const f = failed(e);
+      return {
+        status: "committed-with-error",
+        reason: "post-commit-failure",
+        step,
+        detail: f.status === "not-written" ? f.detail : "",
+        omissions: committed,
+      };
+    }
     return failed(e);
   } finally {
-    if (tempCreated) await fs.unlink(temp).catch(() => {});
+    if (tempCreated && !committed) await fs.unlink(temp).catch(() => {});
     // Hooks may fail, but the release itself always runs once. A release that fails leaves the
     // lock in place: later writers time out (miss), never take over.
     step = "unlock";
@@ -615,7 +684,11 @@ export interface CleanupReport {
   kept: number;
   /** Contexts not examined because of the per-call bound. */
   deferred: number;
+  /** Where the next call starts (the last key examined); persisted in the root. */
+  nextCursor?: string;
 }
+
+export const CLEANUP_CURSOR_FILE = `${LAYOUT_DIR}.cleanup-cursor`;
 
 /**
  * Bounded cleanup of expired contexts and orphaned temporary files. Each context is cleaned only
@@ -625,7 +698,12 @@ export interface CleanupReport {
  */
 export async function cleanupExpired(
   root: string,
-  { fs = realFs, now = Date.now, limit = CLEANUP_LIMIT } = {},
+  {
+    fs = realFs,
+    now = Date.now,
+    limit = CLEANUP_LIMIT,
+    cursor,
+  }: { fs?: StorageFs; now?: () => number; limit?: number; cursor?: string } = {},
 ): Promise<CleanupReport> {
   const report: CleanupReport = {
     examined: 0,
@@ -641,8 +719,18 @@ export async function cleanupExpired(
   } catch {
     return report;
   }
-  report.deferred = Math.max(0, keys.length - limit);
-  for (const key of keys.slice(0, limit)) {
+  // Rotate: start after the cursor (given, or saved by the previous call) and wrap around, so
+  // contexts beyond the first `limit` are reached by later calls even if earlier ones persist.
+  const cursorFile = join(root, CLEANUP_CURSOR_FILE);
+  const after = cursor ?? (await fs.readFile(cursorFile, "utf8").catch(() => "")).trim();
+  const start = keys.findIndex((k) => k > after);
+  const rotated = start <= 0 ? keys : [...keys.slice(start), ...keys.slice(0, start)];
+  const batch = rotated.slice(0, limit);
+  report.deferred = Math.max(0, keys.length - batch.length);
+  report.nextCursor = batch.at(-1);
+  if (report.nextCursor !== undefined)
+    await fs.writeFile(cursorFile, report.nextCursor, {}).catch(() => {});
+  for (const key of batch) {
     report.examined++;
     const dir = join(root, LAYOUT_DIR, key);
     const release = await acquireFileLock(
@@ -661,7 +749,10 @@ export async function cleanupExpired(
       let expired = true;
       try {
         const parsed: unknown = JSON.parse(await fs.readFile(join(dir, SNAPSHOT_FILE), "utf8"));
-        const at = isRecord(parsed) ? Date.parse(String(parsed.lastSuccessfulAt)) : NaN;
+        const at =
+          isRecord(parsed) && typeof parsed.lastSuccessfulAt === "string"
+            ? Date.parse(parsed.lastSuccessfulAt)
+            : NaN;
         expired = !Number.isFinite(at) || now() - at > RETENTION_MS || at > now() + CLOCK_SKEW_MS;
       } catch (e) {
         // Missing snapshot with nothing else: removable. Unreadable: leave it.

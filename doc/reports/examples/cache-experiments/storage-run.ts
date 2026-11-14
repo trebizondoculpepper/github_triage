@@ -108,14 +108,27 @@ export function rewriteVerdict(
   return `${writer}; ${readers}`;
 }
 
-/** W verdict: every writer process must exit 0 having written all of its records. */
+/**
+ * W verdict: every writer process must exit 0 having written all of its records, and the run
+ * must show the writers really overlapped (all were writing at once, and the lock was found
+ * held at least once). A sequential run is inconclusive, not a pass.
+ */
 export function writersVerdict(
   each: number,
   results: { code: number | null; result: unknown }[],
 ): string {
-  return results.length > 0 && results.every((x) => completed(x.code, x.result, each))
-    ? `every writer exit 0 with ${each} written, none failed`
-    : `writers ${JSON.stringify(results)}`;
+  if (!(results.length > 1 && results.every((x) => completed(x.code, x.result, each))))
+    return `writers ${JSON.stringify(results)}`;
+  const t = results.map(
+    (x) => x.result as { lockBusy?: unknown; firstWriteAt?: unknown; lastWriteAt?: unknown },
+  );
+  const nums = (k: "lockBusy" | "firstWriteAt" | "lastWriteAt") =>
+    t.map((x) => (typeof x[k] === "number" ? x[k] : NaN));
+  const overlap = Math.min(...nums("lastWriteAt")) - Math.max(...nums("firstWriteAt"));
+  const busy = nums("lockBusy").reduce((a, b) => a + b, 0);
+  if (!(overlap > 0 && busy > 0))
+    return `inconclusive: overlap ${overlap} ms, lock found held ${busy} times`;
+  return `every writer exit 0 with ${each} written, none failed; overlapped`;
 }
 
 export async function runExperiment(base: string, iterations: number) {
@@ -430,23 +443,22 @@ export async function runExperiment(base: string, iterations: number) {
   ] as const) {
     const root = fresh();
     const t = performance.now();
-    // Each writer waits for a common start time 1.5 s ahead, after its process has started.
-    const startAt = String(Date.now() + 1500);
-    const results = await Promise.all(
-      Array.from(
-        { length: writers },
-        (_, i) =>
-          spawnWorker([
-            "write",
-            root,
-            JSON.stringify(ctx),
-            `w${i}`,
-            String(each),
-            String(i * 1000),
-            startAt,
-          ]).done,
-      ),
+    // Readiness barrier: every writer reports ready, then all start on one go file.
+    const go = join(root, "go");
+    const workers = Array.from({ length: writers }, (_, i) =>
+      spawnWorker([
+        "write",
+        root,
+        JSON.stringify(ctx),
+        `w${i}`,
+        String(each),
+        String(i * 1000),
+        go,
+      ]),
     );
+    await Promise.all(workers.map((w) => w.waitFor("ready")));
+    writeFileSync(go, "");
+    const results = await Promise.all(workers.map((w) => w.done));
     const wall = Math.round(performance.now() - t);
     const final = await confirmed(root);
     const tallies = results.map(
@@ -476,7 +488,7 @@ export async function runExperiment(base: string, iterations: number) {
     row(
       `W${writers}`,
       `${writers} processes x ${each} read-modify-writes`,
-      `${writers * each} records; every writer exit 0 with ${each} written, none failed`,
+      `${writers * each} records; every writer exit 0 with ${each} written, none failed; overlapped`,
       `${final.status === "miss" ? final.reason : final.snapshot.records.length} records; ${writersVerdict(
         each,
         results.map((x) => ({ code: x.code, result: x.result })),

@@ -5,6 +5,7 @@
  * (and "held" while holding a lock). Only touches the root it is given.
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -85,7 +86,7 @@ async function main(argv: string[]): Promise<void> {
 
   if (mode === "write") {
     // Each write adds one record of this writer's own, keeping everything already stored.
-    const [writer = "w", countText = "10", offsetText = "0", startAtText = "0"] = rest;
+    const [writer = "w", countText = "10", offsetText = "0", goFile = ""] = rest;
     const count = Number(countText);
     const offset = Number(offsetText);
     const tally = {
@@ -110,9 +111,12 @@ async function main(argv: string[]): Promise<void> {
         }
       },
     };
-    // Optional common start time so separately started processes overlap.
-    const wait = Number(startAtText) - Date.now();
-    if (wait > 0) await new Promise((ok) => setTimeout(ok, wait));
+    // Optional readiness barrier: report ready, then wait for the parent's go file, so every
+    // writer starts together however long process startup took.
+    if (goFile) {
+      process.stdout.write("ready\n");
+      while (!existsSync(goFile)) await new Promise((ok) => setTimeout(ok, 2));
+    }
     tally.firstWriteAt = Date.now();
     for (let i = 0; i < count; i++) {
       const at = ISO(Date.now());

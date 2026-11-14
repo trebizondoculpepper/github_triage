@@ -425,10 +425,12 @@ describe("locking", () => {
 describe("separate processes", () => {
   it("two concurrent writers lose no records", async () => {
     const root = newRoot();
-    // A common start time after both processes are up, so their writes overlap.
-    const startAt = String(Date.now() + 3000);
-    const a = spawnWorker(["write", root, JSON.stringify(ctx), "a", "15", "0", startAt]);
-    const b = spawnWorker(["write", root, JSON.stringify(ctx), "b", "15", "1000", startAt]);
+    // Readiness barrier: both report ready, then start together on the go file.
+    const go = join(root, "go");
+    const a = spawnWorker(["write", root, JSON.stringify(ctx), "a", "15", "0", go]);
+    const b = spawnWorker(["write", root, JSON.stringify(ctx), "b", "15", "1000", go]);
+    await Promise.all([a.waitFor("ready"), b.waitFor("ready")]);
+    writeFileSync(go, "");
     const [ra, rb] = await Promise.all([a.done, b.done]);
     expect(ra.code, ra.stderr).toBe(0);
     expect(rb.code, rb.stderr).toBe(0);
@@ -437,6 +439,10 @@ describe("separate processes", () => {
     const loaded = await loadSnapshot(root, ctx, { access: "confirmed" });
     expect(loaded.status).toBe("hit");
     if (loaded.status === "hit") expect(loaded.snapshot.records).toHaveLength(30);
+    // The pass needs evidence of real overlap, not just correct totals.
+    expect(writersVerdict(15, [ra, rb]), JSON.stringify([ra.result, rb.result])).toBe(
+      "every writer exit 0 with 15 written, none failed; overlapped",
+    );
     expect(readdirSync(join(file(root), ".."))).toEqual([SNAPSHOT_FILE]);
   }, 60_000);
 
@@ -572,13 +578,166 @@ describe("runner verdicts need completed workers", () => {
   });
 
   it("W passes only when every writer exited 0 with all writes done", () => {
-    const pass10 = "every writer exit 0 with 10 written, none failed";
-    const good = { code: 0, result: { written: 10, notWritten: {} } };
+    const pass10 = "every writer exit 0 with 10 written, none failed; overlapped";
+    const good = {
+      code: 0,
+      result: { written: 10, notWritten: {}, lockBusy: 2, firstWriteAt: 100, lastWriteAt: 200 },
+    };
     expect(writersVerdict(10, [good, good])).toBe(pass10);
     expect(writersVerdict(10, [good, { code: 1, result: undefined }])).not.toBe(pass10);
     expect(
       writersVerdict(10, [good, { code: 0, result: { written: 9, notWritten: { failed: 1 } } }]),
     ).not.toBe(pass10);
     expect(writersVerdict(10, [])).not.toBe(pass10);
+    // Sequential: complete and correct, but no evidence the writers ran at the same time.
+    const first = {
+      code: 0,
+      result: { ...good.result, lockBusy: 0, firstWriteAt: 0, lastWriteAt: 50 },
+    };
+    const second = {
+      code: 0,
+      result: { ...good.result, lockBusy: 0, firstWriteAt: 60, lastWriteAt: 90 },
+    };
+    expect(writersVerdict(10, [first, second])).toMatch(/^inconclusive/);
+    // Overlapping in time but the lock was never contended: still inconclusive.
+    const noBusy = { code: 0, result: { ...good.result, lockBusy: 0 } };
+    expect(writersVerdict(10, [noBusy, noBusy])).toMatch(/^inconclusive/);
+  });
+});
+
+describe("review fixes", () => {
+  const H = 3_600_000;
+  const obsOf = (
+    subjects: number[],
+    atMs: number,
+    coverage: CoverageStatus,
+    withRecords = true,
+  ) => {
+    const full = syntheticObservation(Math.max(...subjects), at(atMs), coverage);
+    const keep = new Set(subjects.map((n) => full.records[n - 1]!.subject));
+    return {
+      ...full,
+      manifest: full.manifest.filter((m) => keep.has(m.subject)),
+      records: withRecords ? full.records.filter((r) => keep.has(r.subject)) : [],
+    };
+  };
+
+  it("withholds records past 24 h on load even when lastSuccessfulAt is recent", async () => {
+    const root = newRoot();
+    await storeSnapshot(root, ctx, () => obsOf([1], T0, "partial"), { now: () => T0 });
+    await storeSnapshot(root, ctx, () => obsOf([2], T0 + 23 * H, "partial"), {
+      now: () => T0 + 23 * H,
+    });
+    const r = await read(root, ctx, T0 + 25 * H);
+    expect(r.status).toBe("hit");
+    if (r.status !== "hit") return;
+    expect(r.snapshot.records.map((x) => x.subject)).toEqual(["issue:2"]);
+    expect(r.expiredOnLoad).toEqual(["issue:1"]);
+    expect(r.coverageComplete).toBe(false);
+    // An all-expired snapshot with complete coverage is not an authoritative empty.
+    const done = newRoot();
+    await write(done, 2, ctx, T0);
+    const late = await loadSnapshot(done, ctx, {
+      now: () => T0 + 23 * H,
+      access: "confirmed",
+    });
+    expect(late.status).toBe("hit");
+    writeFileSync(
+      file(done),
+      readFileSync(file(done), "utf8").replace(
+        /"lastSuccessfulAt":"[^"]+"/,
+        `"lastSuccessfulAt":"${at(T0 + 20 * H)}"`,
+      ),
+    );
+    const empty = await read(done, ctx, T0 + 25 * H);
+    expect(empty).toMatchObject({ status: "empty", coverageComplete: false });
+  });
+
+  it("renews lastSeenAt when a manifest lists a kept record without new facts", async () => {
+    const root = newRoot();
+    await storeSnapshot(root, ctx, () => obsOf([1, 2], T0, "partial"), { now: () => T0 });
+    await storeSnapshot(root, ctx, () => obsOf([1, 2], T0 + 23 * H, "partial", false), {
+      now: () => T0 + 23 * H,
+    });
+    const r = await read(root, ctx, T0 + 25 * H);
+    expect(r.status).toBe("hit");
+    if (r.status !== "hit") return;
+    expect(r.snapshot.records).toHaveLength(2);
+    for (const rec of r.snapshot.records) {
+      expect(rec.lastSeenAt).toBe(at(T0 + 23 * H));
+      expect(rec.revalidatedAt).toBe(at(T0)); // facts are not claimed as revalidated
+    }
+  });
+
+  it("rejects coverage and manifest entries missing required fields, without throwing", async () => {
+    const root = newRoot();
+    await write(root, 0);
+    const good = JSON.parse(readFileSync(file(root), "utf8")) as Record<string, unknown>;
+    const cov = (c: unknown) => JSON.stringify({ ...good, sourceCoverage: { issues: c } });
+    const cases: [string, string][] = [
+      [cov({ status: "complete" }), "corrupt"],
+      [cov({ status: "complete", pages: 1 }), "corrupt"],
+      [cov({ status: "complete", scope: "all" }), "corrupt"],
+      [cov({ status: "complete", pages: -1, scope: "all" }), "corrupt"],
+      [cov({ status: { toString: null }, pages: 1, scope: "all" }), "corrupt"],
+      [JSON.stringify({ ...good, manifest: [{ subject: "issue:1", updatedAt: at() }] }), "corrupt"],
+      [
+        JSON.stringify({
+          ...good,
+          manifest: [{ subject: "issue:1", state: "OPEN", updatedAt: at(), headOid: 7 }],
+        }),
+        "corrupt",
+      ],
+      [JSON.stringify({ ...good, schemaVersion: { toString: null } }), "schema-mismatch"],
+      [JSON.stringify({ ...good, lastSuccessfulAt: { toString: null } }), "corrupt"],
+    ];
+    for (const [text, reason] of cases) {
+      writeFileSync(file(root), text);
+      expect(await read(root), text.slice(0, 80)).toMatchObject({ status: "miss", reason });
+    }
+  });
+
+  for (const [hook, step] of [
+    ["afterStep", "rename"],
+    ["beforeStep", "fsync-dir"],
+  ] as const)
+    it(`a failure at ${hook}(${step}) reports the committed replacement`, async () => {
+      const root = newRoot();
+      await write(root, 2);
+      const fail = (s: WriteStep) => {
+        if (s === step) throw new Error("injected");
+      };
+      const r = await storeSnapshot(root, ctx, () => syntheticObservation(5, at()), {
+        now: () => T0,
+        [hook]: fail,
+      });
+      expect(r).toMatchObject({ status: "committed-with-error", step });
+      expect(await read(root)).toMatchObject({ status: "hit" });
+      const loaded = await read(root);
+      expect(loaded.status === "hit" && loaded.snapshot.records.length).toBe(5);
+      expect(readdirSync(join(file(root), ".."))).toEqual([SNAPSHOT_FILE]);
+    });
+
+  it("bounded cleanup rotates past contexts that stay present", async () => {
+    const root = newRoot();
+    const now = Date.now();
+    // Find two contexts whose keys sort fresh-first, then expired.
+    const a = { ...ctx, repository: "example/a" };
+    const b = { ...ctx, repository: "example/b" };
+    const ka = contextKey(a);
+    const kb = contextKey(b);
+    if (!ka.ok || !kb.ok) throw new Error("keys");
+    const [fresh, old] = ka.key < kb.key ? [a, b] : [b, a];
+    await write(root, 1, fresh, now);
+    await write(root, 1, old, now - RETENTION_MS - 60_000);
+    const first = await cleanupExpired(root, { now: () => now, limit: 1 });
+    expect(first).toMatchObject({ examined: 1, removedContexts: [], deferred: 1 });
+    const second = await cleanupExpired(root, { now: () => now, limit: 1 });
+    expect(second.removedContexts).toHaveLength(1);
+    expect(existsSync(join(file(root, old), ".."))).toBe(false);
+    expect(existsSync(file(root, fresh))).toBe(true);
+    // Wraps around after the end.
+    const third = await cleanupExpired(root, { now: () => now, limit: 1 });
+    expect(third).toMatchObject({ examined: 1, kept: 1 });
   });
 });
