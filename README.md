@@ -2,6 +2,12 @@
 
 Presidential Daily Briefing turns GitHub issues, pull requests, review feedback and dependencies into a compact, evidence-linked action briefing. It helps coding agents and maintainers answer **“What should I do next to move this repository forward?”** without manually piecing together dozens of GitHub searches.
 
+It is a global command-line tool: install it once with `-g`, not as a project dependency.
+
+```sh
+npm install -g @trebizondoculpepper/presidential-daily-briefing
+```
+
 ## Why use it?
 
 Finding work is more than listing open issues. A ready-looking ticket might still be blocked; a completed contribution might need another review fix; an old claim might need inspection. Repeatedly reconstructing that context wastes time and agent tokens, and makes important follow-ups easy to miss.

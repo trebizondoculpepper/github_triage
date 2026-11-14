@@ -1105,7 +1105,7 @@ if (isEntryPoint(process.argv[1])) {
   try {
     process.exitCode = await main(process.argv.slice(2));
   } catch (error) {
-    console.error(`triage: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(`pdb: ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
   }
 }

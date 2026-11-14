@@ -1,4 +1,4 @@
-> Naming transition: [the Presidential Daily Briefing rename contract](design/pdb-rename.md) defines the one-time authenticated new-package bootstrap at 0.6.0. After that bootstrap, this normal explicit release workflow uses the new package publication history and canonical repository.
+> Naming transition: [the Presidential Daily Briefing rename contract](design/pdb-rename.md) defines the one-time authenticated new-package bootstrap, completed at 0.7.0. Since that bootstrap, this normal explicit release workflow uses the new package publication history and canonical repository.
 
 # npm distribution and releases
 

@@ -288,7 +288,7 @@ export async function runBriefing(
     if (options.json) await output(JSON.stringify(refusal, null, 2) + "\n");
     else
       stderr(
-        `triage: briefing refused: ${error.file} ${error.path}: ${error.reason}\nNext: ${error.next}\n`,
+        `pdb: briefing refused: ${error.file} ${error.path}: ${error.reason}\nNext: ${error.next}\n`,
       );
     return 1;
   }
@@ -426,7 +426,7 @@ async function deliver(
     } catch (error) {
       // The report is already on stdout; never append a second JSON object there.
       stderr(
-        `triage: checkpoint ${options.checkpoint} was not advanced (${describe(error)}). The previous checkpoint, if any, still applies; rerun the same command to retry.\n`,
+        `pdb: checkpoint ${options.checkpoint} was not advanced (${describe(error)}). The previous checkpoint, if any, still applies; rerun the same command to retry.\n`,
       );
       return 1;
     }
