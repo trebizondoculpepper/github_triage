@@ -368,21 +368,46 @@ const resetPlan = (as: DeliverablesRequest["as"]): { remove: string[]; add: stri
 /** The readiness labels a reset chooses between; exactly one is the target of any reset plan. */
 const readinessLabels: readonly string[] = [workflow.ready, claimPolicy.incomplete];
 
+/** The labels a reset's plan is judged against: readiness plus the review label it removes. */
+const resetRelevantLabels: readonly string[] = [...readinessLabels, claimPolicy.awaitingReview];
+/** The reset-relevant subset of a label list, sorted and de-duplicated, for comparison. */
+export const resetObserved = (labels: readonly string[]): string[] =>
+  [...new Set(labels.filter((l) => resetRelevantLabels.includes(l)))].sort();
+const sameSet = (a: readonly string[], b: readonly string[]): boolean =>
+  a.length === b.length && a.every((l) => b.includes(l));
+
+/** The reset-relevant labels a recorded plan leaves when applied to its observed starting state. */
+export const resetPlanResult = (
+  plan: { add: string[]; remove: string[] },
+  observed: readonly string[],
+): string[] =>
+  resetObserved([...resetObserved(observed).filter((l) => !plan.remove.includes(l)), ...plan.add]);
+
 /**
- * Whether a recorded reset's label plan is still pending, i.e. its single label write has not
- * happened yet. The plan is applied in one write, and its `add` is always one readiness label, so
- * an unapplied plan leaves the ticket with no readiness label at all. Accepted states:
- * - no readiness label is present (neither the planned addition nor any other one);
- * - the plan's removals may still be present or already absent (they predate the reset).
- * Every other state is not pending: the planned label present means the write happened (done or
- * later altered), and any other readiness label means someone changed readiness after the reset
- * finished, or before it without a record; either way the plan is stale and must not be replayed.
+ * Whether a recorded reset's label plan is still pending, judged against the reset-relevant labels
+ * the reset observed when it was planned (`observedLabels` in its record). Pending means the
+ * current relevant labels are the observed starting state, or that state with only some of the
+ * plan's removals made and its addition not yet made (the write was interrupted). A record without
+ * `observedLabels` (written before the field existed) cannot tell its starting state from later
+ * changes, so it is never pending: unknown refuses rather than guessing. Anything else, including
+ * readiness changed after the reset finished, is not pending and must not be replayed.
  */
 export const resetPlanPending = (
   plan: { add: string[]; remove: string[] },
+  observed: readonly string[] | undefined,
   labels: readonly string[],
-): boolean =>
-  !plan.add.some((l) => labels.includes(l)) && !labels.some((l) => readinessLabels.includes(l));
+): boolean => {
+  if (!observed) return false;
+  const start = resetObserved(observed);
+  const current = resetObserved(labels);
+  if (sameSet(current, start)) return true;
+  const missing = start.filter((l) => !current.includes(l));
+  return (
+    current.every((l) => start.includes(l)) &&
+    missing.every((l) => plan.remove.includes(l)) &&
+    !plan.add.some((l) => current.includes(l) && !start.includes(l))
+  );
+};
 
 /**
  * The fields that define each op: two records with equal values here are the same operation, so
@@ -393,7 +418,8 @@ export const resetPlanPending = (
  * `reason` and `evidence` (free text; rewording a retry must not post a second record), `opId`
  * and `issuedAt` (derived per attempt), `login` and `legacyRelease` (read from the authenticated
  * account and history, not chosen by the request), `responsible` (always the caller),
- * `expectedResponsibilityRecord` (the fold the record was planned against), `nodeId`/`headOid`
+ * `expectedResponsibilityRecord` (the fold the record was planned against), `observedLabels` (the
+ * labels a reset started from), `nodeId`/`headOid`
  * (live provenance that may move between attempts) and the evaluation fields.
  */
 const definingFields: Record<DeliveryOp, (keyof DeliveryRecord)[]> = {
@@ -868,26 +894,24 @@ export async function planDeliverables(
       const intervened = after.length
         ? ` Later record(s) ${after.map((a) => `${a.op} (comment ${a.comment})`).join(", ")} do not change responsibility, so the reset still stands.`
         : "";
+      const observed = ownRecord.observedLabels;
       const added = plan.add.filter((l) => labels.includes(l));
       const removed = plan.remove.filter((l) => !labels.includes(l));
-      const done = added.length === plan.add.length && removed.length === plan.remove.length;
+      const done = observed
+        ? sameSet(resetObserved(labels), resetPlanResult(plan, observed))
+        : added.length === plan.add.length && removed.length === plan.remove.length;
       if (done) return noop(`Reset already recorded (comment ${own.comment}) and applied.`);
-      // One label write applies the whole plan, so a half-applied plan was changed by others.
-      if (added.length || (removed.length && plan.add.length === 0))
+      // Completing the plan is allowed only while it is provably unapplied: the relevant labels
+      // are the reset's recorded starting state, or that state with only some removals made.
+      // Anything else means readiness changed after the reset (or the record predates the
+      // recorded starting state), so replaying the stale plan could revert others' changes.
+      if (!resetPlanPending(plan, observed, labels))
         return refuse(
           "DELIVERY_DIVERGED",
           facts,
-          `${where} but the labels now contradict its plan (${pending}); others' changes are never reverted.`,
-          [inspect, cmd(`who ${number}`)],
-        );
-      // Completing the plan is allowed only while it is provably unapplied. Another readiness
-      // label means the reset most likely finished and readiness was changed afterwards without a
-      // delivery record, so replaying the stale plan would leave contradictory labels.
-      if (!resetPlanPending(plan, labels))
-        return refuse(
-          "DELIVERY_DIVERGED",
-          facts,
-          `${where} but its plan (${pending}) is no longer pending: the ticket now carries readiness label(s) ${labels.filter((l) => readinessLabels.includes(l)).join(", ")}, so the reset was most likely applied and readiness changed afterwards without a delivery record. Its stale labels are not re-applied and others' changes are never reverted. Inspect the ticket; if a reset is still wanted, run it again deliberately so it is decided against the current labels.`,
+          observed
+            ? `${where} but its plan (${pending}) is no longer pending: the ticket now carries ${resetObserved(labels).join(", ") || "no readiness or review label"}, which is neither its recorded starting state (${resetObserved(observed).join(", ") || "none"}) nor a partial application of it, so readiness was most likely changed afterwards without a delivery record. Its stale labels are not re-applied and others' changes are never reverted. Inspect the ticket; if a reset is still wanted, run it again deliberately so it is decided against the current labels.`
+            : `${where} but its plan (${pending}) is not applied, and the record does not state the labels it started from, so a pending plan cannot be told apart from later changes. Its labels are not applied and others' changes are never reverted. Inspect the ticket and set the readiness labels by hand, or run a new reset deliberately.`,
           [inspect, cmd(`who ${number}`), retry],
         );
       // Finishing the plan is a write, so the reset's live prerequisites are checked again: a
@@ -1107,7 +1131,7 @@ export async function planDeliverables(
       if (blocked) return blocked;
       const { add, remove } = resetPlan(r.as);
       return accepted(
-        draft({ login, plan: { remove, add } }),
+        draft({ login, plan: { remove, add }, observedLabels: resetObserved(labels) }),
         `override by ${agent} (${login}): reset to ${r.as}`,
         { add, remove },
       );

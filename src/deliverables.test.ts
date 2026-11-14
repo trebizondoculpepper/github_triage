@@ -927,13 +927,99 @@ describe("deliverables maintainer overrides", () => {
     expect(state.writes).toHaveLength(writes);
     expect(state.labels).toEqual(["status:ready"]);
   });
-  it("resetPlanPending accepts only states with no readiness label", () => {
+  it("resetPlanPending accepts the recorded starting state or a partial application only", () => {
     const plan = { remove: ["status:awaiting-review"], add: ["status:ready"] };
-    expect(resetPlanPending(plan, ["status:awaiting-review"])).toBe(true);
-    expect(resetPlanPending(plan, [])).toBe(true);
-    expect(resetPlanPending(plan, ["status:ready"])).toBe(false);
-    expect(resetPlanPending(plan, ["status:incomplete"])).toBe(false);
-    expect(resetPlanPending(plan, ["status:awaiting-review", "status:incomplete"])).toBe(false);
+    const start = ["status:awaiting-review", "status:incomplete"];
+    expect(resetPlanPending(plan, start, ["status:incomplete", "status:awaiting-review"])).toBe(
+      true,
+    );
+    expect(resetPlanPending(plan, start, ["status:incomplete", "agent:bob"])).toBe(true);
+    expect(resetPlanPending(plan, start, ["status:incomplete", "status:ready"])).toBe(false);
+    expect(resetPlanPending(plan, start, ["status:awaiting-review"])).toBe(false);
+    expect(resetPlanPending(plan, start, [])).toBe(false);
+    expect(resetPlanPending(plan, ["status:awaiting-review"], ["status:incomplete"])).toBe(false);
+    expect(resetPlanPending(plan, [], [])).toBe(true);
+    // A record without its starting state is unknown, so it is never pending.
+    expect(resetPlanPending(plan, undefined, ["status:awaiting-review"])).toBe(false);
+  });
+  it("a fresh reset --as ready on a ticket already marked status:incomplete applies its labels", async () => {
+    const closed = fakePr(5, { state: "CLOSED" });
+    const { rt, state } = github({
+      comments: [submitted()],
+      prs: [closed],
+      labels: ["status:awaiting-review", "status:incomplete"],
+    });
+    const result = await applyDeliverables(
+      repo,
+      request("reset", { agent: "maint", as: "ready" }),
+      rt,
+    );
+    expect(result.exitCode).toBe(0);
+    expect(posted(state)[0]?.observedLabels).toEqual([
+      "status:awaiting-review",
+      "status:incomplete",
+    ]);
+    expect(state.labels).toContain("status:ready");
+    expect(state.labels).not.toContain("status:awaiting-review");
+  });
+  it("a reset from status:incomplete whose label write failed is completed by a retry", async () => {
+    const closed = fakePr(5, { state: "CLOSED" });
+    let fail = true;
+    const { rt, state } = github({
+      comments: [submitted()],
+      prs: [closed],
+      labels: ["status:awaiting-review", "status:incomplete"],
+      failRun: (args) => args[1] === "edit" && fail,
+    });
+    const req = request("reset", { agent: "maint", as: "ready" });
+    expect((await applyDeliverables(repo, req, rt)).exitCode).toBe(2);
+    fail = false;
+    expect((await applyDeliverables(repo, req, rt)).exitCode).toBe(0);
+    expect(posted(state)).toHaveLength(1);
+    expect(state.labels).toContain("status:ready");
+    expect(state.labels).not.toContain("status:awaiting-review");
+    // An exact retry after success is a no-op.
+    const writes = state.writes.length;
+    expect((await applyDeliverables(repo, req, rt)).exitCode).toBe(0);
+    expect(state.writes).toHaveLength(writes);
+  });
+  it("a completed reset from status:incomplete whose readiness was later removed is refused on retry", async () => {
+    const closed = fakePr(5, { state: "CLOSED" });
+    const { rt, state } = github({
+      comments: [submitted()],
+      prs: [closed],
+      labels: ["status:awaiting-review", "status:incomplete"],
+    });
+    const req = request("reset", { agent: "maint", as: "ready" });
+    expect((await applyDeliverables(repo, req, rt)).exitCode).toBe(0);
+    state.labels = ["status:awaiting-review"];
+    const writes = state.writes.length;
+    expect((await applyDeliverables(repo, req, rt)).exitCode).not.toBe(0);
+    refused(await planDeliverables(repo, req, rt), "DELIVERY_DIVERGED");
+    expect(state.labels).toEqual(["status:awaiting-review"]);
+    expect(state.writes).toHaveLength(writes);
+  });
+  it("an unapplied reset record without observedLabels is refused conservatively on resume", async () => {
+    const closed = fakePr(5, { state: "CLOSED" });
+    const reset = rec("reset", {
+      agent: "maint",
+      plan: { remove: ["status:awaiting-review"], add: ["status:ready"] },
+    });
+    const { rt, state } = github({
+      comments: [submitted(), post(reset)],
+      prs: [closed],
+      labels: ["status:awaiting-review"],
+    });
+    const refusal = refused(
+      await planDeliverables(
+        repo,
+        request("reset", { agent: "maint", as: "ready", reason: "because" }),
+        rt,
+      ),
+      "DELIVERY_DIVERGED",
+    );
+    expect(refusal.prerequisite).toMatch(/does not state the labels it started from/);
+    expect(state.labels).toEqual(["status:awaiting-review"]);
   });
   it("DELIVERY_DIVERGED: a recorded reset whose labels were changed by others is not re-applied", async () => {
     const closed = fakePr(5, { state: "CLOSED" });
@@ -1132,6 +1218,7 @@ describe("deliverables retry detection compares every defining field", () => {
             agent: "maint",
             login: "writer",
             plan: { remove: ["status:awaiting-review"], add: ["status:ready"] },
+            observedLabels: ["status:awaiting-review"],
           }),
         ),
       ],
