@@ -530,6 +530,20 @@ export async function runExperiment(base: string, iterations: number) {
       "256 kept, 44 evicted",
       `${big.snapshot.records.length} kept, ${big.omissions.evicted.length} evicted`,
     );
+    {
+      // The eviction must survive a write and a reload, not just appear in the write result.
+      const capRoot = fresh();
+      await put(capRoot, 300, ctx, t);
+      const back = await confirmed(capRoot, ctx, t);
+      row(
+        "E5",
+        "store 300, then reload",
+        "hit:256, coverage incomplete, 44 evicted on reload",
+        back.status === "miss"
+          ? describe(back)
+          : `${describe(back)}, coverage ${back.coverageComplete ? "complete" : "incomplete"}, ${back.storedOmissions.evicted.length} evicted on reload`,
+      );
+    }
     const prev = applyObservation(undefined, k, syntheticObservation(10, iso(t)), t).snapshot;
     const partial = applyObservation(prev, k, syntheticObservation(4, iso(t), "partial"), t);
     row(

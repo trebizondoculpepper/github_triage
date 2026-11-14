@@ -14,6 +14,7 @@ import {
   cleanupExpired,
   contextDir,
   contextKey,
+  dirSyncUnsupported,
   loadSnapshot,
   realFs,
   removeExperimentRoot,
@@ -739,5 +740,140 @@ describe("review fixes", () => {
     // Wraps around after the end.
     const third = await cleanupExpired(root, { now: () => now, limit: 1 });
     expect(third).toMatchObject({ examined: 1, kept: 1 });
+  });
+});
+
+describe("omissions persist and errors are not swallowed", () => {
+  it("a snapshot that hit the 256 cap reloads as incomplete with its evictions", async () => {
+    const root = newRoot();
+    const w = await write(root, 300);
+    expect(w.status === "written" && w.omissions.evicted.length).toBe(44);
+    const r = await read(root);
+    expect(r.status).toBe("hit");
+    if (r.status !== "hit") return;
+    expect(r.coverageComplete).toBe(false);
+    expect(r.storedOmissions.evicted).toHaveLength(44);
+    expect(r.unstored).toHaveLength(44);
+    expect(r.snapshot.records).toHaveLength(MAX_RECORDS);
+    // A later partial write keeps the eviction on record while the subjects stay listed.
+    const again = await storeSnapshot(root, ctx, () => syntheticObservation(300, at(), "partial"), {
+      now: () => T0,
+    });
+    expect(again.status).toBe("written");
+    const r2 = await read(root);
+    expect(r2.status === "hit" && r2.storedOmissions.evicted.length).toBe(44);
+    // Once no longer listed (complete manifest of 10), the eviction is cleared.
+    await write(root, 10);
+    const r3 = await read(root);
+    expect(r3).toMatchObject({ status: "hit", coverageComplete: true, unstored: [] });
+    expect(r3.status === "hit" && r3.storedOmissions.evicted).toEqual([]);
+  });
+
+  it("expired and pruned subjects are saved with the snapshot", async () => {
+    const H = 3_600_000;
+    const root = newRoot();
+    await write(root, 3, ctx, T0);
+    // Complete manifest of 1 subject at T0: two pruned.
+    await write(root, 1, ctx, T0);
+    let r = await read(root);
+    expect(r.status === "hit" && r.storedOmissions.prunedUnseen).toEqual(["issue:2", "pr:3"]);
+    // Expiry: a partial write at 23 h keeps the snapshot current without listing issue:1; a
+    // partial write at 25 h then drops issue:1 for age and records it.
+    await storeSnapshot(root, ctx, () => syntheticObservation(1, at(T0 + 23 * H), "partial", 20), {
+      now: () => T0 + 23 * H,
+    });
+    await storeSnapshot(root, ctx, () => syntheticObservation(1, at(T0 + 25 * H), "partial", 10), {
+      now: () => T0 + 25 * H,
+    });
+    r = await read(root, ctx, T0 + 25 * H);
+    expect(r.status === "hit" && r.storedOmissions.expired).toEqual(["issue:1"]);
+  });
+
+  it("a snapshot with malformed omissions is corrupt", async () => {
+    const root = newRoot();
+    await write(root, 1);
+    const good = JSON.parse(readFileSync(file(root), "utf8")) as Record<string, unknown>;
+    for (const omissions of [undefined, {}, { evicted: [1], expired: [], prunedUnseen: [] }]) {
+      writeFileSync(file(root), JSON.stringify({ ...good, omissions }));
+      expect(await read(root)).toMatchObject({ status: "miss", reason: "corrupt" });
+    }
+  });
+
+  const dirFs = (code: string): StorageFs => ({
+    ...realFs,
+    open: async (path, flags, mode) => {
+      const h = await realFs.open(path, flags, mode);
+      if (flags !== "r") return h;
+      return {
+        ...h,
+        writeFile: (d) => h.writeFile(d),
+        close: () => h.close(),
+        sync: async () => {
+          throw Object.assign(new Error("injected"), { code });
+        },
+      };
+    },
+  });
+
+  it("a real directory fsync error is committed-with-error, not ignored", async () => {
+    const root = newRoot();
+    await write(root, 1);
+    const r = await storeSnapshot(root, ctx, () => syntheticObservation(4, at()), {
+      fs: dirFs("EIO"),
+      now: () => T0,
+    });
+    expect(r).toMatchObject({ status: "committed-with-error", step: "fsync-dir" });
+    expect(r.status === "committed-with-error" && r.detail).toMatch(/EIO/);
+    expect(readdirSync(join(file(root), ".."))).toEqual([SNAPSHOT_FILE]);
+  });
+
+  it("an unsupported directory fsync is skipped and recorded", async () => {
+    const root = newRoot();
+    const r = await storeSnapshot(root, ctx, () => syntheticObservation(4, at()), {
+      fs: dirFs("EINVAL"),
+      now: () => T0,
+    });
+    expect(r).toMatchObject({ status: "written", dirSynced: false, dirSyncSkipped: "EINVAL" });
+    expect(dirSyncUnsupported("EPERM", "win32")).toBe(true);
+    expect(dirSyncUnsupported("EPERM", "linux")).toBe(false);
+    expect(dirSyncUnsupported("EIO", "win32")).toBe(false);
+  });
+
+  it("a temp file that cannot be removed after a failure is reported", async () => {
+    const root = newRoot();
+    const stuck: StorageFs = {
+      ...realFs,
+      unlink: async (p) => {
+        if (p.endsWith(".tmp")) throw Object.assign(new Error("denied"), { code: "EACCES" });
+        return realFs.unlink(p);
+      },
+    };
+    const r = await storeSnapshot(root, ctx, () => syntheticObservation(2, at()), {
+      fs: stuck,
+      now: () => T0,
+      beforeStep: (st) => {
+        if (st === "verify-temp") throw new Error("injected");
+      },
+    });
+    expect(r.status).toBe("not-written");
+    expect(r.status === "not-written" && r.cleanupErrors?.join()).toMatch(/temp left: EACCES/);
+  });
+
+  it("cleanup reports unexpected filesystem errors instead of dropping them", async () => {
+    const root = newRoot();
+    const old = { ...ctx, repository: "example/old" };
+    await write(root, 1, old, Date.now() - RETENTION_MS - 60_000);
+    const denied: StorageFs = {
+      ...realFs,
+      unlink: async (p) => {
+        if (p.endsWith(SNAPSHOT_FILE)) throw Object.assign(new Error("denied"), { code: "EACCES" });
+        return realFs.unlink(p);
+      },
+    };
+    const report = await cleanupExpired(root, { fs: denied });
+    expect(report.removedContexts).toEqual([]);
+    expect(report.kept).toBe(1);
+    expect(report.errors.join()).toMatch(/unlink: EACCES/);
+    expect(existsSync(file(root, old))).toBe(true);
   });
 });

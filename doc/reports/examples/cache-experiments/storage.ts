@@ -126,6 +126,12 @@ export interface Snapshot {
   sourceCoverage: Record<string, SourceCoverage>;
   manifest: ManifestEntry[];
   records: EvidenceRecord[];
+  /**
+   * What the last write left out, persisted so a later load can report it: `evicted` stays
+   * listed (in the manifest) but unstored until it is stored again; `expired` and
+   * `prunedUnseen` describe the last write.
+   */
+  omissions: Omissions;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
@@ -181,6 +187,14 @@ export function shapeProblem(v: unknown): string | undefined {
       !isTime(r.lastSeenAt)
     )
       return "invalid record";
+  const isList = (x: unknown) => Array.isArray(x) && x.every((y) => typeof y === "string");
+  if (
+    !isRecord(v.omissions) ||
+    !isList(v.omissions.evicted) ||
+    !isList(v.omissions.expired) ||
+    !isList(v.omissions.prunedUnseen)
+  )
+    return "invalid omissions";
   return undefined;
 }
 
@@ -207,6 +221,9 @@ export interface StorageFs {
   rmdir(path: string): Promise<void>;
 }
 export const realFs: StorageFs = nodeFs as unknown as StorageFs;
+
+const describeError = (e: unknown) =>
+  `${errorCode(e) ?? "error"}: ${e instanceof Error ? e.message : typeof e}`;
 
 export const errorCode = (e: unknown): string | undefined => {
   const c = typeof e === "object" && e !== null ? (e as { code?: unknown }).code : undefined;
@@ -239,6 +256,10 @@ export type LoadResult =
       coverageComplete: boolean;
       /** Records withheld because their own lastSeenAt is past the 24-hour retention. */
       expiredOnLoad: string[];
+      /** Manifest subjects with no stored record (any cause); non-empty means incomplete. */
+      unstored: string[];
+      /** Omissions persisted by the last write (evictions, expiries, pruned subjects). */
+      storedOmissions: Omissions;
     }
   | {
       /** A valid snapshot with no records. Authoritative only when every source was complete. */
@@ -249,6 +270,10 @@ export type LoadResult =
       coverageComplete: boolean;
       /** Records withheld because their own lastSeenAt is past the 24-hour retention. */
       expiredOnLoad: string[];
+      /** Manifest subjects with no stored record (any cause); non-empty means incomplete. */
+      unstored: string[];
+      /** Omissions persisted by the last write (evictions, expiries, pruned subjects). */
+      storedOmissions: Omissions;
     }
   | { status: "miss"; reason: MissReason; detail: string };
 
@@ -313,8 +338,14 @@ export function classifyText(
     if (!keep) expiredOnLoad.push(r.subject);
     return keep;
   });
+  // Listed subjects without a stored record (evicted at the cap, expired, or never stored) mean
+  // the snapshot does not hold everything its manifest covers.
+  const stored = new Set(records.map((r) => r.subject));
+  const unstored = s.manifest.map((m) => m.subject).filter((x) => !stored.has(x));
   const coverageComplete =
     expiredOnLoad.length === 0 &&
+    unstored.length === 0 &&
+    s.omissions.evicted.length === 0 &&
     Object.keys(s.sourceCoverage).length > 0 &&
     Object.values(s.sourceCoverage).every((cv) => cv.status === "complete");
   const base = {
@@ -323,6 +354,8 @@ export function classifyText(
     ageMs: Math.max(0, now - success),
     coverageComplete,
     expiredOnLoad,
+    unstored,
+    storedOmissions: s.omissions,
   };
   return records.length === 0 ? { status: "empty", ...base } : { status: "hit", ...base };
 }
@@ -382,8 +415,10 @@ export function applyObservation(
   key: ContextKey & { ok: true },
   obs: Observation,
   now: number,
+  /** Records already withheld for age when the previous snapshot was loaded. */
+  expiredBefore: string[] = [],
 ): { snapshot: Snapshot; omissions: Omissions } {
-  const omissions: Omissions = { prunedUnseen: [], evicted: [], expired: [] };
+  const omissions: Omissions = { prunedUnseen: [], evicted: [], expired: [...expiredBefore] };
   const complete =
     Object.keys(obs.sourceCoverage).length > 0 &&
     Object.values(obs.sourceCoverage).every((c) => c.status === "complete");
@@ -412,6 +447,13 @@ export function applyObservation(
   }
   records.sort((a, b) => a.subject.localeCompare(b.subject));
   const manifest = [...obs.manifest].sort((a, b) => a.subject.localeCompare(b.subject));
+  // Persisted eviction: this write's evictions plus earlier ones that are still listed and
+  // still unstored. A subject leaves the list only once it is stored or no longer listed.
+  const kept = new Set(records.map((r) => r.subject));
+  const listedNow = new Set(manifest.map((m) => m.subject));
+  const evicted = [...new Set([...(previous?.omissions.evicted ?? []), ...omissions.evicted])]
+    .filter((x) => listedNow.has(x) && !kept.has(x))
+    .sort();
   const c = key.canonical;
   return {
     snapshot: {
@@ -428,6 +470,11 @@ export function applyObservation(
       sourceCoverage: obs.sourceCoverage,
       manifest,
       records,
+      omissions: {
+        evicted,
+        expired: [...omissions.expired].sort(),
+        prunedUnseen: [...omissions.prunedUnseen].sort(),
+      },
     },
     omissions,
   };
@@ -435,6 +482,19 @@ export function applyObservation(
 
 // ---------------------------------------------------------------------------------------------
 // Writing
+
+/**
+ * Directory fsync outcomes that mean "not supported on this platform or filesystem". Windows
+ * cannot open or flush a directory handle through Node (EISDIR, EPERM or EACCES there); some
+ * filesystems reject the flush with EINVAL, ENOTSUP or EOPNOTSUPP. Anything else is real.
+ */
+export function dirSyncUnsupported(
+  code: string | undefined,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (code === "EINVAL" || code === "ENOTSUP" || code === "EOPNOTSUPP") return true;
+  return platform === "win32" && (code === "EISDIR" || code === "EPERM" || code === "EACCES");
+}
 
 export type WriteStep =
   | "mkdir"
@@ -470,7 +530,11 @@ export type WriteResult =
       omissions: Omissions;
       renameRetries: number;
       dirSynced: boolean;
+      /** Error code when the platform cannot fsync a directory (e.g. Windows); not a failure. */
+      dirSyncSkipped?: string;
       previous: LoadResult["status"] | MissReason;
+      /** Errors after the outcome was decided (temp removal, unlock hooks); empty normally. */
+      cleanupErrors: string[];
     }
   | {
       /**
@@ -483,12 +547,14 @@ export type WriteResult =
       step: WriteStep;
       detail: string;
       omissions: Omissions;
+      cleanupErrors: string[];
     }
   | {
       status: "not-written";
       reason: "unknown-context" | "lock-timeout" | "lock-error" | "failed" | "declined";
       step?: WriteStep;
       detail: string;
+      cleanupErrors?: string[];
     };
 
 /**
@@ -554,8 +620,11 @@ export async function storeSnapshot(
     );
     if (release) await afterStep?.("lock");
   } catch (e) {
-    if (release) await release().catch(() => {});
-    return failed(e);
+    let detail = "";
+    if (release)
+      await release().catch((r: unknown) => (detail = `; release failed: ${describeError(r)}`));
+    const f = failed(e);
+    return f.status === "not-written" ? { ...f, detail: f.detail + detail } : f;
   }
   if (!release) {
     // acquireFileLock returns null both on timeout and on an unexpected error; tell them apart.
@@ -571,6 +640,7 @@ export async function storeSnapshot(
   }
   const temp = join(dir, `${SNAPSHOT_FILE}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
   let tempCreated = false;
+  const cleanupErrors: string[] = [];
   // Set once the rename has replaced the snapshot: failures after it are not "not-written".
   let committed: Omissions | undefined;
   try {
@@ -579,11 +649,21 @@ export async function storeSnapshot(
     );
     const obs = update(previous);
     if (!obs)
-      return { status: "not-written", reason: "declined", detail: "update returned no change" };
+      return {
+        status: "not-written",
+        reason: "declined",
+        detail: "update returned no change",
+        cleanupErrors,
+      };
     const prior = previous.status === "miss" ? undefined : previous.snapshot;
-    const { snapshot, omissions } = applyObservation(prior, key, obs, now());
     // Records withheld on load for age are dropped by this write; report them as expired.
-    if (previous.status !== "miss") omissions.expired.push(...previous.expiredOnLoad);
+    const { snapshot, omissions } = applyObservation(
+      prior,
+      key,
+      obs,
+      now(),
+      previous.status === "miss" ? [] : previous.expiredOnLoad,
+    );
     const text = JSON.stringify(snapshot) + "\n";
     let handle: FileHandleLike | undefined;
     try {
@@ -621,8 +701,11 @@ export async function storeSnapshot(
     });
     tempCreated = false;
     let dirSynced = false;
+    let dirSyncSkipped: string | undefined;
     await run("fsync-dir", async () => {
-      // POSIX: persist the rename. Windows cannot open a directory this way; skip and record.
+      // POSIX: persist the rename. Only "not supported here" outcomes are skipped (and
+      // recorded); any other error, such as EIO, propagates and the result is
+      // committed-with-error.
       try {
         const h = await fs.open(dir, "r");
         try {
@@ -631,8 +714,9 @@ export async function storeSnapshot(
         } finally {
           await h.close();
         }
-      } catch {
-        dirSynced = false;
+      } catch (e) {
+        if (!dirSyncUnsupported(errorCode(e))) throw e;
+        dirSyncSkipped = errorCode(e);
       }
     });
     return {
@@ -641,7 +725,9 @@ export async function storeSnapshot(
       omissions,
       renameRetries,
       dirSynced,
+      ...(dirSyncSkipped ? { dirSyncSkipped } : {}),
       previous: previous.status === "miss" ? previous.reason : previous.status,
+      cleanupErrors,
     };
   } catch (e) {
     if (committed) {
@@ -652,24 +738,31 @@ export async function storeSnapshot(
         step,
         detail: f.status === "not-written" ? f.detail : "",
         omissions: committed,
+        cleanupErrors,
       };
     }
-    return failed(e);
+    return { ...failed(e), cleanupErrors } as WriteResult;
   } finally {
-    if (tempCreated && !committed) await fs.unlink(temp).catch(() => {});
-    // Hooks may fail, but the release itself always runs once. A release that fails leaves the
-    // lock in place: later writers time out (miss), never take over.
+    // Errors here cannot change the outcome already decided, but they are not hidden: they are
+    // appended to `cleanupErrors`, the same array the returned result carries.
+    if (tempCreated && !committed)
+      await fs.unlink(temp).catch((e: unknown) => {
+        if (errorCode(e) !== "ENOENT") cleanupErrors.push(`temp left: ${describeError(e)}`);
+      });
+    // The release itself always runs once, even if the unlock hooks fail. (filelock's release
+    // swallows its own errors; a lock it fails to remove stays in place and later writers
+    // time out, never take over.)
     step = "unlock";
-    const quietly = async (f: () => unknown) => {
+    const noting = async (what: string, f: () => unknown) => {
       try {
         await f();
-      } catch {
-        // reported nowhere: the write result is already decided
+      } catch (e) {
+        cleanupErrors.push(`${what}: ${describeError(e)}`);
       }
     };
-    await quietly(() => beforeStep?.("unlock"));
-    await quietly(() => release());
-    await quietly(() => afterStep?.("unlock"));
+    await noting("before unlock", () => beforeStep?.("unlock"));
+    await noting("release", () => release());
+    await noting("after unlock", () => afterStep?.("unlock"));
   }
 }
 
@@ -686,6 +779,8 @@ export interface CleanupReport {
   deferred: number;
   /** Where the next call starts (the last key examined); persisted in the root. */
   nextCursor?: string;
+  /** Unexpected filesystem errors, each with the context or file it concerns. */
+  errors: string[];
 }
 
 export const CLEANUP_CURSOR_FILE = `${LAYOUT_DIR}.cleanup-cursor`;
@@ -712,24 +807,36 @@ export async function cleanupExpired(
     busy: [],
     kept: 0,
     deferred: 0,
+    errors: [],
   };
+  const note = (where: string, e: unknown) => report.errors.push(`${where}: ${describeError(e)}`);
   let keys: string[];
   try {
     keys = (await fs.readdir(join(root, LAYOUT_DIR))).sort();
-  } catch {
+  } catch (e) {
+    if (errorCode(e) !== "ENOENT") note("root", e);
     return report;
   }
   // Rotate: start after the cursor (given, or saved by the previous call) and wrap around, so
   // contexts beyond the first `limit` are reached by later calls even if earlier ones persist.
   const cursorFile = join(root, CLEANUP_CURSOR_FILE);
-  const after = cursor ?? (await fs.readFile(cursorFile, "utf8").catch(() => "")).trim();
+  const after =
+    cursor ??
+    (
+      await fs.readFile(cursorFile, "utf8").catch((e: unknown) => {
+        if (errorCode(e) !== "ENOENT") note("cursor read", e);
+        return "";
+      })
+    ).trim();
   const start = keys.findIndex((k) => k > after);
   const rotated = start <= 0 ? keys : [...keys.slice(start), ...keys.slice(0, start)];
   const batch = rotated.slice(0, limit);
   report.deferred = Math.max(0, keys.length - batch.length);
   report.nextCursor = batch.at(-1);
   if (report.nextCursor !== undefined)
-    await fs.writeFile(cursorFile, report.nextCursor, {}).catch(() => {});
+    await fs.writeFile(cursorFile, report.nextCursor, {}).catch((e: unknown) => {
+      note("cursor write", e);
+    });
   for (const key of batch) {
     report.examined++;
     const dir = join(root, LAYOUT_DIR, key);
@@ -747,6 +854,7 @@ export async function cleanupExpired(
     let removed = false;
     try {
       let expired = true;
+      let names: string[] = [];
       try {
         const parsed: unknown = JSON.parse(await fs.readFile(join(dir, SNAPSHOT_FILE), "utf8"));
         const at =
@@ -755,17 +863,37 @@ export async function cleanupExpired(
             : NaN;
         expired = !Number.isFinite(at) || now() - at > RETENTION_MS || at > now() + CLOCK_SKEW_MS;
       } catch (e) {
-        // Missing snapshot with nothing else: removable. Unreadable: leave it.
-        if (errorCode(e) !== "ENOENT" && !(e instanceof SyntaxError)) expired = false;
-      }
-      for (const name of await fs.readdir(dir))
-        if (name.endsWith(".tmp")) {
-          await fs.unlink(join(dir, name));
-          report.removedTemps.push(join(key, name));
+        // Missing or unparseable snapshot: removable. Unreadable: leave it and report it.
+        if (errorCode(e) !== "ENOENT" && !(e instanceof SyntaxError)) {
+          expired = false;
+          note(`${key} read`, e);
         }
+      }
+      try {
+        names = await fs.readdir(dir);
+      } catch (e) {
+        note(`${key} list`, e);
+        expired = false;
+      }
+      for (const name of names)
+        if (name.endsWith(".tmp"))
+          try {
+            await fs.unlink(join(dir, name));
+            report.removedTemps.push(join(key, name));
+          } catch (e) {
+            if (errorCode(e) !== "ENOENT") note(`${key}/${name}`, e);
+          }
       if (expired) {
-        await fs.unlink(join(dir, SNAPSHOT_FILE)).catch(() => {});
-        removed = true;
+        try {
+          await fs.unlink(join(dir, SNAPSHOT_FILE));
+          removed = true;
+        } catch (e) {
+          if (errorCode(e) === "ENOENT") removed = true;
+          else {
+            note(`${key} unlink`, e);
+            report.kept++;
+          }
+        }
       } else report.kept++;
     } finally {
       await release();
@@ -776,8 +904,11 @@ export async function cleanupExpired(
       try {
         await fs.rmdir(dir);
         report.removedContexts.push(key);
-      } catch {
+      } catch (e) {
         report.kept++;
+        // Not empty: a writer arrived after we released (expected). Anything else is reported.
+        if (!["ENOTEMPTY", "EEXIST", "ENOENT"].includes(errorCode(e) ?? ""))
+          note(`${key} rmdir`, e);
       }
     }
   }
