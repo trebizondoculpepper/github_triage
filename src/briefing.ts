@@ -14,7 +14,7 @@ import type { SubjectAssessments } from "./assessments.js";
 import { labelEstimationReport } from "./estimation/complexitylabels.js";
 import type { LabelEstimationInput } from "./estimation/complexitylabels.js";
 import type { Action, Dependency, Issue, PullRequest, Snapshot } from "./github/types.js";
-import { headReviewed } from "./reviewevidence.js";
+import { headReviewed } from "./workflow/reviewevidence.js";
 
 export { urgencyBand };
 /** Briefing default for stale-claim signals (doc/design/briefings.md): two days. */

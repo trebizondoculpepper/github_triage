@@ -19,7 +19,7 @@ import type { CompletePlan, CompleteResult, DeliveryFacts, MemberEvidence } from
 import type { DeliverablesRuntime } from "./deliverables.js";
 import { deliveryMarker, markerTrust, parseDeliveryComment, readDeliveryFold } from "./delivery.js";
 import type { Deliverable, DeliveryComment, DeliveryRecord } from "./delivery.js";
-import type { RepositoryPermission } from "./github/github.js";
+import type { RepositoryPermission } from "../github/github.js";
 
 const repo = "example/project";
 const other = "example/library";
@@ -278,7 +278,7 @@ const complete = (rt: DeliverablesRuntime, agent = "bob") =>
 describe("completion rule records", () => {
   it("render exactly the contract's completion predicates (EDN-style cross-check)", () => {
     const doc = readFileSync(
-      new URL("../doc/design/delivery-lifecycle.md", import.meta.url),
+      new URL("../../doc/design/delivery-lifecycle.md", import.meta.url),
       "utf8",
     );
     const block = /```text\n(% Negative member states[\s\S]*?)```/.exec(doc)?.[1] ?? "";

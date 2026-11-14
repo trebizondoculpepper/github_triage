@@ -91,14 +91,14 @@ import {
   type Rest,
 } from "./github/github.js";
 import { clauseFor, hedged, listWideHedge, planMigration } from "./github/migration.js";
-import { applyPlan, claimText, planClaim, planNeedsHuman, planRelease } from "./claims.js";
-import type { ReworkAuthority } from "./claims.js";
-import type { ClaimAccepted, ClaimPlan, ClaimRefusal } from "./claims.js";
-import { teamText, teamView } from "./team.js";
-import { ticketOwnership, ticketOwnershipText } from "./who.js";
-import { ticketDoctor, ticketDoctorText } from "./ticketdoctor.js";
-import { shellQuote } from "./doctorplans.js";
-import type { CorrectionStep } from "./doctorplans.js";
+import { applyPlan, claimText, planClaim, planNeedsHuman, planRelease } from "./workflow/claims.js";
+import type { ReworkAuthority } from "./workflow/claims.js";
+import type { ClaimAccepted, ClaimPlan, ClaimRefusal } from "./workflow/claims.js";
+import { teamText, teamView } from "./workflow/team.js";
+import { ticketOwnership, ticketOwnershipText } from "./workflow/who.js";
+import { ticketDoctor, ticketDoctorText } from "./workflow/ticketdoctor.js";
+import { shellQuote } from "./workflow/doctorplans.js";
+import type { CorrectionStep } from "./workflow/doctorplans.js";
 import {
   generateName,
   IDENTITY_FILE,
@@ -2186,7 +2186,7 @@ describe("claim and needs-human review fixes", () => {
     blocked.repository.issueOrPullRequest.issueDependenciesSummary.blockedBy = 1;
     const plan = await planClaim(repo, { number: 7, agent: "kavya" }, async () => blocked);
     expect(refused(plan).recovery[0]).toBe(`pdb deps 7 --repo ${repo}`);
-    const { shellQuote } = await import("./claims.js");
+    const { shellQuote } = await import("./workflow/claims.js");
     expect(shellQuote("$(rm -rf x)")).toBe("'$(rm -rf x)'");
     expect(shellQuote("it's")).toBe("'it'\\''s'");
     expect(shellQuote("--add-label")).toBe("--add-label");
@@ -2442,7 +2442,7 @@ describe("pr status: why is a PR not progressing (#59)", () => {
     ...o.pr,
   });
   it("computes head acceptance over every receipt before the display limit (#192)", async () => {
-    const { prStatus } = await import("./prstatus.js");
+    const { prStatus } = await import("./workflow/prstatus.js");
     const bots = [1, 2, 3, 4].map((n) => ({
       author: { login: "coderabbitai[bot]" },
       createdAt: `2026-11-12T10:0${n}:00Z`,
@@ -2463,7 +2463,7 @@ describe("pr status: why is a PR not progressing (#59)", () => {
   });
 
   it("classifies checks: passed, pending, cancelled, failed, unknown", async () => {
-    const { classifyCheck } = await import("./prstatus.js");
+    const { classifyCheck } = await import("./workflow/prstatus.js");
     expect(classifyCheck(run("a"))).toBe("passed");
     expect(classifyCheck(run("a", { status: "IN_PROGRESS", conclusion: null }))).toBe("pending");
     expect(classifyCheck({ context: "x", state: "PENDING" })).toBe("pending");
@@ -2472,7 +2472,7 @@ describe("pr status: why is a PR not progressing (#59)", () => {
     expect(classifyCheck(run("a", { conclusion: "WEIRD" }))).toBe("unknown");
   });
   it("lists every blocker at once, distinguishing missing, pending and cancelled verification", async () => {
-    const { prStatus } = await import("./prstatus.js");
+    const { prStatus } = await import("./workflow/prstatus.js");
     const r = prStatus(
       repo,
       pull({
@@ -2526,7 +2526,7 @@ describe("pr status: why is a PR not progressing (#59)", () => {
     expect(pending.blockers[0]).toMatch(/not reported yet .*other checks still pending/);
   });
   it("tracks which commit each reviewer reviewed and whether Codex covered the head", async () => {
-    const { prStatus } = await import("./prstatus.js");
+    const { prStatus } = await import("./workflow/prstatus.js");
     const reviews = [
       {
         author: { login: "codex" },
@@ -2575,7 +2575,7 @@ describe("pr status: why is a PR not progressing (#59)", () => {
     expect(running.reviewRequest!.status).toMatch(/in progress/);
   });
   it("an automatically started Codex review still running is a blocker without any request", async () => {
-    const { prStatus } = await import("./prstatus.js");
+    const { prStatus } = await import("./workflow/prstatus.js");
     const auto = prStatus(repo, pull({ comments: [codexComment(head, "running")] }));
     expect(auto.reviewRequest).toBeNull();
     expect(auto.blockers).toEqual([
@@ -2584,7 +2584,7 @@ describe("pr status: why is a PR not progressing (#59)", () => {
     expect(auto.verdict).toMatch(/^Blocked/);
   });
   it("text output shows each receipt's summary and source URL", async () => {
-    const { prStatus, prStatusText } = await import("./prstatus.js");
+    const { prStatus, prStatusText } = await import("./workflow/prstatus.js");
     const receipt = {
       author: { login: "coderabbitai" },
       body: "Actionable comments posted: 2. Please fix the null check.",
@@ -2597,7 +2597,7 @@ describe("pr status: why is a PR not progressing (#59)", () => {
     );
   });
   it("green evidence is only a merge consideration, and closed PRs report only their state", async () => {
-    const { prStatus } = await import("./prstatus.js");
+    const { prStatus } = await import("./workflow/prstatus.js");
     const green = prStatus(
       repo,
       pull({
@@ -3174,14 +3174,14 @@ describe("pr status: truncation and requested-reviewer matching", () => {
     closingIssuesReferences: { nodes: [], pageInfo: { hasNextPage: !!o.moreIssues } },
   });
   it("reports truncated comments, reviews and linked issues as incomplete", async () => {
-    const { prStatus } = await import("./prstatus.js");
+    const { prStatus } = await import("./workflow/prstatus.js");
     expect(prStatus(repo, base()).completeness.complete).toBe(true);
     const r = prStatus(repo, base({ moreComments: true, moreReviews: true, moreIssues: true }));
     expect(r.completeness.complete).toBe(false);
     expect(r.completeness.warnings).toHaveLength(3);
   });
   it("counts only the requested service as answering a review request", async () => {
-    const { prStatus } = await import("./prstatus.js");
+    const { prStatus } = await import("./workflow/prstatus.js");
     const request = {
       author: { login: "kavya" },
       body: "@codex review",
@@ -3472,7 +3472,7 @@ describe("Ticket Doctor v1 (#66, doc/design/diagnostics.md)", () => {
 
 describe("Ticket Doctor review fixes", () => {
   it("reports every ticket on overlapping blocker cycles", async () => {
-    const { blockerCycles } = await import("./ticketdoctor.js");
+    const { blockerCycles } = await import("./workflow/ticketdoctor.js");
     // Blocked-by edges 1 -> 2, 1 -> 3, 2 -> 1, 3 -> 2: tickets 1, 2 and 3 are all on a cycle.
     const edges = new Map([
       ["1", ["2", "3"]],
@@ -3819,7 +3819,7 @@ describe("briefing attention covers open pull requests (#169)", () => {
 
 describe("pr status: formal reviews and in-progress reviews", () => {
   it("counts a formal review by the requested service and blocks while Codex is running", async () => {
-    const { prStatus } = await import("./prstatus.js");
+    const { prStatus } = await import("./workflow/prstatus.js");
     const head = "a".repeat(40);
     const pr = (comments: any[], reviews: any[]) => ({
       number: 12,
@@ -3950,7 +3950,7 @@ describe("pr status: required approvals, verify success and review scoping", () 
     url: "m",
   });
   it("reports missing approvals, a merge block and a non-successful verify", async () => {
-    const { prStatus } = await import("./prstatus.js");
+    const { prStatus } = await import("./workflow/prstatus.js");
     expect(prStatus(repo, make({ decision: "REVIEW_REQUIRED" })).blockers).toContain(
       "a required approving review is missing",
     );
@@ -3962,14 +3962,14 @@ describe("pr status: required approvals, verify success and review scoping", () 
     );
   });
   it("blocks a branch whose merge state is outside the registered current states", async () => {
-    const { prStatus } = await import("./prstatus.js");
+    const { prStatus } = await import("./workflow/prstatus.js");
     const behind = prStatus(repo, make({ mergeState: "BEHIND" }));
     expect(behind.blockers).toContain("branch is behind main: update it before merging");
     expect(behind.verdict).toMatch(/^Blocked/);
     expect(prStatus(repo, make({ mergeState: "UNSTABLE" })).blockers).toEqual([]);
   });
   it("reports receipts omitted by the presentation limit in JSON and text", async () => {
-    const { prStatus, prStatusText } = await import("./prstatus.js");
+    const { prStatus, prStatusText } = await import("./workflow/prstatus.js");
     const bot = (i: number) => ({
       author: { login: "codecov[bot]" },
       body: `coverage ${i}`,
@@ -3983,7 +3983,7 @@ describe("pr status: required approvals, verify success and review scoping", () 
     expect(prStatus(repo, make()).omittedReceipts).toBe(0);
   });
   it("does not let a Codex marker answer a CodeRabbit request, and accepts a current formal Codex review", async () => {
-    const { prStatus } = await import("./prstatus.js");
+    const { prStatus } = await import("./workflow/prstatus.js");
     const rabbit = {
       author: { login: "kavya" },
       body: "@coderabbitai review",
@@ -4013,7 +4013,7 @@ describe("pr status: required approvals, verify success and review scoping", () 
 
 describe("pr status: bot instructions are not review requests", () => {
   it("keeps the human request answered when the bot reply quotes the request syntax", async () => {
-    const { prStatus } = await import("./prstatus.js");
+    const { prStatus } = await import("./workflow/prstatus.js");
     const head = "a".repeat(40);
     const pr = {
       number: 12,
@@ -8036,7 +8036,7 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
     expect(first.exitCode).toBe(2);
     expect(first.steps!.map((s) => s.status)).toEqual(["done", "failed"]);
     expect(env.s.labels).toEqual(["agent:kavya", "status:ready"]);
-    const { claimText } = await import("./claims.js");
+    const { claimText } = await import("./workflow/claims.js");
     expect(claimText(first)).toMatch(
       /Retry \(safe.*pdb release 7 --agent kavya --as incomplete --note half --repo/,
     );
@@ -8682,7 +8682,7 @@ describe("pr review history: why does this keep failing review (#60)", () => {
   });
 
   it("matches rounds to commits and classifies a fix/review loop with evidence", async () => {
-    const { reviewHistory, reviewHistoryText } = await import("./reviewhistory.js");
+    const { reviewHistory, reviewHistoryText } = await import("./workflow/reviewhistory.js");
     const r = reviewHistory(
       repo,
       history({
@@ -8729,7 +8729,7 @@ describe("pr review history: why does this keep failing review (#60)", () => {
   });
 
   it("reports a clean re-review, a stale head, disagreement and missing history honestly", async () => {
-    const { reviewHistory } = await import("./reviewhistory.js");
+    const { reviewHistory } = await import("./workflow/reviewhistory.js");
     const marker = (commit: string, unresolved: boolean) => ({
       author: bot,
       createdAt: "2026-11-15T00:00:00Z",
@@ -8784,7 +8784,7 @@ describe("pr review history: why does this keep failing review (#60)", () => {
   });
 
   it("bounds output and reports truncation", async () => {
-    const { reviewHistory, historyLimits } = await import("./reviewhistory.js");
+    const { reviewHistory, historyLimits } = await import("./workflow/reviewhistory.js");
     const many = Array.from({ length: 15 }, (_, i) => thread(c1, `Finding ${i}`));
     const r = reviewHistory(
       repo,
@@ -8802,7 +8802,7 @@ describe("pr review history: why does this keep failing review (#60)", () => {
   });
 
   it("never counts an unsubmitted (PENDING) review as coverage of the head", async () => {
-    const { reviewHistory } = await import("./reviewhistory.js");
+    const { reviewHistory } = await import("./workflow/reviewhistory.js");
     const draft = { ...review(c4, "PENDING", { login: "alice" }), submittedAt: null };
     const r = reviewHistory(repo, history({ reviews: [review(c1), draft] }), status);
     expect(r.headReviewed).toBe(false);
@@ -8816,7 +8816,7 @@ describe("pr review history: why does this keep failing review (#60)", () => {
   });
 
   it("does not claim a recurrence order that only current resolution suggests", async () => {
-    const { reviewHistory, reviewHistoryText } = await import("./reviewhistory.js");
+    const { reviewHistory, reviewHistoryText } = await import("./workflow/reviewhistory.js");
     const r = reviewHistory(
       repo,
       history({
@@ -8855,7 +8855,7 @@ describe("pr review history: why does this keep failing review (#60)", () => {
   });
 
   it("retries once, then refuses to combine status and history for different heads", async () => {
-    const { pullRequestReviewHistory } = await import("./reviewhistory.js");
+    const { pullRequestReviewHistory } = await import("./workflow/reviewhistory.js");
     const live = (heads: string[]) => {
       const calls: string[] = [];
       let i = 0;

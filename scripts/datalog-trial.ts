@@ -8,7 +8,7 @@ import { cachedSnapshot } from "../src/cli.js";
 import { readSnapshotAssessments } from "../src/assessments.js";
 import { collectLabelEstimationInput, metricStatus } from "../src/estimation/complexitylabels.js";
 import { impactMetric } from "../src/estimation/metrics.js";
-import { markerTrust } from "../src/delivery.js";
+import { markerTrust } from "../src/workflow/delivery.js";
 import { ghRest, permissionLookup } from "../src/github/github.js";
 import { briefing } from "../src/briefing.js";
 import { compactBriefing } from "../src/compact.js";

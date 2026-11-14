@@ -26,7 +26,7 @@ import {
 import type { DeliverablesRuntime } from "./deliverables.js";
 import { deliverableLabel, parseDeliveryComment, readDeliveryFold } from "./delivery.js";
 import type { DeliveryComment, TrustDecision } from "./delivery.js";
-import type { Issue, Snapshot } from "./github/types.js";
+import type { Issue, Snapshot } from "../github/types.js";
 
 /** Open tickets whose delivery is evaluated live per Doctor run; more are reported, not read. */
 export const deliveryDoctorTicketCap = 20;
@@ -104,7 +104,7 @@ const commitUrl = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/commit\/([0-9a-f]
 const commitForm = /^[\w.-]+\/[\w.-]+@[0-9a-f]{7,40}$/i;
 
 /**
- * The agent and deliverable a v1 release comment names. `planRelease` (src/claims.ts) records the
+ * The agent and deliverable a v1 release comment names. `planRelease` (src/workflow/claims.ts) records the
  * agent in the marker JSON and writes the deliverable only as a visible line of the same trusted
  * comment: `Pull request: URL (STATE)` for --pr or `Change: VALUE` for --change.
  */

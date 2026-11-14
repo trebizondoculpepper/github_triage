@@ -346,7 +346,7 @@ export function roleCandidates(input: CandidateInput): ActionFacts[] {
     const claim = `pdb claim ${s.number} --repo ${input.repository} --agent ${agent}${
       restricted && input.platform ? ` --platform ${input.platform}` : ""
     }`;
-    // One active claim per agent (src/claims.ts OTHER_ACTIVE_CLAIM): a claim on another ticket is
+    // One active claim per agent (src/workflow/claims.ts OTHER_ACTIVE_CLAIM): a claim on another ticket is
     // refused until the viewer's current claim is released, so show that handoff first
     // (doc/design/blended-action-queues.md "existing own implementation claim").
     const otherClaims = kind === "implement" ? ownActive.filter((n) => n !== s.number) : [];

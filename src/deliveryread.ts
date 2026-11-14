@@ -10,16 +10,20 @@
  * an unread or unverifiable record is never "no responsibility" and an unevaluated ticket is
  * never "not delivered". Read-only: `next` lists supported commands, never runs them.
  */
-import { closureOf, diagnoseDelivery } from "./deliverydoctor.js";
-import { deliveryCommentFields, readDeliveryComments } from "./deliverables.js";
-import type { TrustDecision } from "./delivery.js";
+import { closureOf, diagnoseDelivery } from "./workflow/deliverydoctor.js";
+import { deliveryCommentFields, readDeliveryComments } from "./workflow/deliverables.js";
+import type { TrustDecision } from "./workflow/delivery.js";
 import type { Query, Rest } from "./github/github.js";
-import type { Closure, DeliveryDiagnosis, IssueDeliveryDiagnosis } from "./deliverydoctor.js";
-import type { MemberState, TicketDelivery } from "./completion.js";
+import type {
+  Closure,
+  DeliveryDiagnosis,
+  IssueDeliveryDiagnosis,
+} from "./workflow/deliverydoctor.js";
+import type { MemberState, TicketDelivery } from "./workflow/completion.js";
 import type { Issue, PullRequest, Snapshot } from "./github/types.js";
 import { prChecks, workflow } from "./briefing.js";
-import type { PrStatusReport } from "./prstatus.js";
-import { codexMarker, headCodexFindings, headReviewed } from "./reviewevidence.js";
+import type { PrStatusReport } from "./workflow/prstatus.js";
+import { codexMarker, headCodexFindings, headReviewed } from "./workflow/reviewevidence.js";
 
 /**
  * Follow-up for one required deliverable: `waiting` on checks or review (attention released,

@@ -4,14 +4,14 @@
  * "Legacy attestation" and "Maintainer override").
  *
  * Each command reads the issue and its whole comment history live, folds the delivery records
- * (src/delivery.ts), checks the contract's prerequisites and either refuses with a stable error
+ * (src/workflow/delivery.ts), checks the contract's prerequisites and either refuses with a stable error
  * ID, facts, the failed prerequisite and recovery commands, or plans its writes. Writes go through
  * the injected `gh` boundary in contract order: the delivery record first, then any label change.
  * Before every write the issue is read and folded again and the plan recomputed, so a write is
  * only ever made on fresh evidence and a retry completes only what is missing.
  */
 import { parseArgs } from "node:util";
-import { workflow } from "./briefing.js";
+import { workflow } from "../briefing.js";
 import { claimPolicy, shellQuote } from "./claims.js";
 import type { Comment, GhRun, GraphQuery, PlanStep, ReworkAuthority } from "./claims.js";
 import {
@@ -33,7 +33,7 @@ import type {
   MemberObservation,
   TrustDecision,
 } from "./delivery.js";
-import type { Rest } from "./github/github.js";
+import type { Rest } from "../github/github.js";
 
 export const deliverablesActions = [
   "attach",
