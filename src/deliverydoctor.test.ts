@@ -28,6 +28,7 @@ import {
   reportFollowUpFacts,
   teamResponsibilities,
   teamResponsibilityLines,
+  withDeliveryCompleteness,
 } from "./deliveryread.js";
 import { readBriefing } from "./service.js";
 import type { PrStatusReport } from "./prstatus.js";
@@ -1316,6 +1317,62 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
       expect(read.report.delivery?.tickets).toEqual([
         expect.objectContaining({ number: last, delivery: "submitted" }),
       ]);
+    });
+
+    const cli = async (snap: Snapshot, fake: ReturnType<typeof live>, args: string[]) => {
+      let out = "";
+      const code = await main(
+        args,
+        async (t) => {
+          out += t;
+        },
+        {
+          ...runtime(snap, fake),
+          currentRepository: async () => repo,
+          updateCheck: async () => ({ status: "skipped" }) as never,
+        },
+      );
+      return { code, out };
+    };
+
+    it("who N evaluates the requested issue even past the cap", async () => {
+      const count = deliveryDoctorTicketCap + 5;
+      const last = 200 + count - 1;
+      const { code, out } = await cli(snapshot(many(count)), fakeFor(count), [
+        "who",
+        String(last),
+        "--repo",
+        repo,
+        "--json",
+      ]);
+      const who = JSON.parse(out);
+      expect(who.delivery).toMatchObject({ number: last, delivery: "submitted" });
+      expect(who.completeness.complete).toBe(true);
+      expect(code).toBe(0);
+    });
+
+    it("team carries the evaluation cap into its completeness and exit code", async () => {
+      const count = deliveryDoctorTicketCap + 1;
+      const { code, out } = await cli(snapshot(many(count)), fakeFor(count), [
+        "team",
+        "--repo",
+        repo,
+        "--json",
+      ]);
+      const team = JSON.parse(out);
+      expect(team.completeness.complete).toBe(false);
+      expect(team.completeness.warnings.join(" ")).toContain("1 more with delivery records");
+      expect(code).toBe(2);
+      const text = await cli(snapshot(many(count)), fakeFor(count), ["team", "--repo", repo]);
+      expect(text.out).toContain("INCOMPLETE (delivery):");
+    });
+
+    it("pr N carries unreadable linked issues into its completeness", () => {
+      const status = { completeness: { complete: true, warnings: [] } };
+      expect(
+        withDeliveryCompleteness(status, { complete: false, omissions: ["#9: unreadable"] }),
+      ).toEqual({ completeness: { complete: false, warnings: ["#9: unreadable"] } });
+      expect(withDeliveryCompleteness(status, { complete: true, omissions: [] })).toBe(status);
     });
 
     it("binds delivery requests to the request's cancellation signal", async () => {

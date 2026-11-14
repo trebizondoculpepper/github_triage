@@ -33,8 +33,10 @@ import {
   deliveryRead,
   prDelivery,
   prDeliveryLines,
+  omissionLines,
   readIssuesDelivery,
   reportFollowUpFacts,
+  withDeliveryCompleteness,
   teamResponsibilities,
   teamResponsibilityLines,
 } from "./deliveryread.js";
@@ -904,20 +906,23 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
         deliveryBoundaries(runtime, snapshot.repository, !!values.offline),
       ),
     );
-    const report = read.tickets.length
-      ? { ...view, agents: teamResponsibilities(view.agents, read), delivery: read }
-      : view;
+    const report = withDeliveryCompleteness(
+      read.tickets.length || !read.complete
+        ? { ...view, agents: teamResponsibilities(view.agents, read), delivery: read }
+        : view,
+      read,
+    );
     await output(
       values.json
         ? JSON.stringify(report, null, 2) + "\n"
-        : appendLines(
-            teamText(view),
-            read.tickets.length
+        : appendLines(teamText(view), [
+            ...(read.tickets.length
               ? teamResponsibilityLines(report.agents, read, runtime.now?.() ?? new Date())
-              : [],
-          ),
+              : []),
+            ...omissionLines(read),
+          ]),
     );
-    return view.completeness.complete ? 0 : 2;
+    return report.completeness.complete ? 0 : 2;
   }
   if (args[0] === "who") {
     const { values, positionals } = parseArgs({
@@ -953,20 +958,28 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
       offline: !!values.offline,
     });
     // #192: delivery, responsibility and closure from the shared fold and evaluator.
+    // Only the requested issue is evaluated, so the evaluation cap can never skip it.
+    const scoped = { ...snapshot, issues: snapshot.issues.filter((i) => i.number === number) };
     const read = deliveryRead(
-      snapshot,
+      scoped,
       await diagnoseDelivery(
-        snapshot,
+        scoped,
         deliveryBoundaries(runtime, snapshot.repository, !!values.offline),
       ),
     );
     const view = read.tickets.find((t) => t.number === number) ?? null;
-    const issue = snapshot.issues.find((i) => i.number === number);
-    const report = issue ? { ...ownership, ...deliveryFields(issue, view) } : ownership;
+    const issue = scoped.issues[0];
+    const report = withDeliveryCompleteness(
+      issue ? { ...ownership, ...deliveryFields(issue, view) } : ownership,
+      read,
+    );
     await output(
       values.json
         ? JSON.stringify(report, null, 2) + "\n"
-        : appendLines(ticketOwnershipText(ownership), deliveryLines(view)),
+        : appendLines(ticketOwnershipText(ownership), [
+            ...deliveryLines(view),
+            ...omissionLines(read),
+          ]),
     );
     return report.completeness.complete ? 0 : 2;
   }
@@ -1057,13 +1070,13 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
             foreign,
           )
         : null;
-    const report = delivery ? { ...status, delivery } : status;
+    const report = withDeliveryCompleteness(delivery ? { ...status, delivery } : status, delivery);
     await output(
       values.json
         ? JSON.stringify(report, null, 2) + "\n"
         : appendLines(prStatusText(status), delivery ? prDeliveryLines(delivery) : []),
     );
-    return status.completeness.complete ? 0 : 2;
+    return report.completeness.complete ? 0 : 2;
   }
   if (args[0] === "deps") {
     const values = depsArgumentsFor(args.slice(1));

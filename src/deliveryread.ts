@@ -606,3 +606,25 @@ export function teamResponsibilityLines(
     );
   return lines;
 }
+
+/**
+ * Carries delivery omissions (the evaluation cap, unreadable issues) into a report's own
+ * completeness, so a skipped evaluation never reads as a complete answer (#192).
+ */
+export function withDeliveryCompleteness<
+  R extends { completeness: { complete: boolean; warnings: string[] } },
+>(report: R, read: { complete: boolean; omissions: string[] } | null): R {
+  if (!read || read.complete) return report;
+  return {
+    ...report,
+    completeness: {
+      ...report.completeness,
+      complete: false,
+      warnings: [...report.completeness.warnings, ...read.omissions],
+    },
+  };
+}
+
+/** Text lines for delivery omissions, appended to a surface's text output. */
+export const omissionLines = (read: { omissions: string[] } | null): string[] =>
+  (read?.omissions ?? []).map((o) => `INCOMPLETE (delivery): ${o}`);
