@@ -348,7 +348,10 @@ export function evaluateDatalog(
       };
       const fillCommand = (key: string) =>
         commandTemplates[key].replace(/\{(\w+)\}/g, (_, k: string) => commandFacts[k]);
-      let nextCommand = fillCommand(commandKinds[definition.kind] ?? "detail");
+      const commandKey = commandKinds[definition.kind] ?? "detail";
+      let nextCommand = fillCommand(
+        commandKey === "detail" && "headRefOid" in subject ? "pr" : commandKey,
+      );
       let thenCommand: string | null = null;
       if (definition.kind === "implement") {
         const others = query(db, otherClaimsQuery)

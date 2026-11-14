@@ -307,3 +307,12 @@ it("returns rule-specific matched failed-check and incomplete-evidence bindings"
   const inspection = run([a]).items.find((x) => x.kind === "inspect")!;
   expect(inspection.why.facts.uncertainty).toContain("native dependencies incomplete");
 });
+
+it("routes PR attention and designer duties to PR inspection", () => {
+  for (const label of ["attention:me", "design:decision-needed", "design:documentation-needed"]) {
+    const p = pr(1, ["IN_PROGRESS"]);
+    p.labels = page([{ name: label }]);
+    const row = run([], new Map(), { agent: "me", role: "designer" }, [p]).items[0];
+    expect(row.nextCommand).toBe("github-triage pr 1 --repo o/r");
+  }
+});
