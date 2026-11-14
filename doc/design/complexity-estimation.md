@@ -27,6 +27,10 @@ Recognized sizes are `complexity:XS`, `complexity:S`, `complexity:M`, `complexit
 
 With complete label evidence: no recognized size is unestimated, one is estimated, and more than one is a conflict requiring inspection. Incomplete or inaccessible labels mean unknown, never unestimated. A conflict is not resolved by choosing the largest, smallest or newest label. Ordinary read-only commands never create labels or change ticket state. Native issue fields and provenance comments are not competing authorities for current size; the recognized label set is authoritative. The provenance can be stale when a manual label change disagrees with it.
 
+## Provenance trust consistency
+
+[complexity-provenance-trust.md](complexity-provenance-trust.md) (#269) is the reviewed replacement for unchecked complexity history when implemented. Current labels remain size authority; only verified-author explanation/freshness/idempotency evidence is trusted. This is separate from the already-delivered impact writer.
+
 ## Recording and revising an estimate
 
 Keep the explicit `estimate N --size SIZE --rationale TEXT [--assumption TEXT]...` operation. Require a justification for the newly assigned size. An agent may disagree with another estimate and replace it; it need not explain or defend the prior agent's reasoning. Do not require a separate change-reason argument or mandatory agreement from the previous estimator. If an optional expected-old-value guard is retained, it is an explicit caller choice, never required merely because a prior estimate exists.
