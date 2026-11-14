@@ -26,7 +26,7 @@ All inputs are strict objects: unknown properties fail validation. Shared option
 
 Use short descriptions explaining when to call each tool. All advertise `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true`; annotations are hints, not access controls. Remote evidence may change between identical calls.
 
-Do not add mutation tools, generic shell/GitHub request tools, arbitrary URLs, file paths, cache/checkpoint writes, offline loading, migrations, team view or role flags to this baseline. Newly shipped CLI capabilities are not automatically new MCP tools. `since` supports owner catch-up without persisting hidden per-agent checkpoints. Dedicated role views follow #1; the baseline must not claim to compute an unimplemented owner/designer policy.
+Do not add mutation tools, generic shell/GitHub request tools, arbitrary URLs, file paths, cache/checkpoint writes, offline loading, migrations or team view to this baseline; role and order arguments are added only as specified under Role views (#260) below. Newly shipped CLI capabilities are not automatically new MCP tools. `since` supports owner catch-up without persisting hidden per-agent checkpoints. Dedicated role views follow #1; the baseline must not claim to compute an unimplemented owner/designer policy.
 
 ## Selection and identity
 
@@ -76,3 +76,11 @@ Pack/install the exact archive into a temporary global prefix; launch its MCP bi
 No live claims, hooks, watchers, credential changes or npm publication are acceptance tests. Mutation/role features and automatic identity writes remain outside this ticket. Missing host evidence is a stated limitation, not silently inferred compatibility.
 
 Briefing mode (#171): `triage_briefing` also accepts `mode: "actions" | "briefing"` (default `actions`, unchanged) and, for briefing mode only, `last`. Briefing mode returns envelope kind `repository-briefing` with the CLI `briefing --json` report; it exposes no checkpoint, cache, path or offline input and never advances a checkpoint. See [briefing-mode.md](briefing-mode.md#slice-4-implementation-notes-171).
+
+## Role views (#260)
+
+Blended role queues ([blended-action-queues.md](blended-action-queues.md)) require that CLI and MCP consume the same policy result, so `triage_briefing` in actions mode gains two additive, strict optional arguments: `role` (a registered role name: `implementer` or `designer`) and `order` (`impact`, `oldest` or `newest`, default `impact`). They mean exactly what CLI `--role` and `--order` mean. Both are rejected in `mode: "briefing"`. No `estimate`, `full`, checkpoint, cache or offline argument is added; ordinary role views already include assessment actions without `--estimate`.
+
+For the same repository, agent, since, limit, role, order, collected facts, configuration and clock, the envelope `result` carries the same compact report fields as CLI `--json` with those flags: `actions`, `role` (including `role.next`), `rankedActions`, `estimation` and `impactEstimation` are equal, including order, reasons, counts and omissions. Without `role` the result is unchanged. Role is not inferred from the identity entry's `triage_role`; the selection reports `triageRole` so a client can pass it explicitly. The envelope stays `schemaVersion: 1`; only additive fields appear in `result`, and the advertised input schema gains the two optional properties.
+
+`limit` applies to `rankedActions` after ranking, as in the CLI. Size follows the response contract in force: today's version-1 envelope until #266 ships, then [mcp-bounded-results.md](mcp-bounded-results.md), whose byte budget, rank-before-limit and explicit omission rules apply to role views as to any briefing. A role view never bypasses that cap.
