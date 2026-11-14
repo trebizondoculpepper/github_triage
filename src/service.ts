@@ -19,6 +19,7 @@ import { readSnapshotAssessments } from "./assessments.js";
 import { collectLabelEstimationInput, metricStatus } from "./complexitylabels.js";
 import type { LabelEstimationRuntime } from "./complexitylabels.js";
 import type { Snapshot } from "./types.js";
+import type { PickupOrder } from "./ranking.js";
 import { briefingProcess, resolveGuideSetting } from "./process.js";
 import type { BriefingProcess, GuideRuntime } from "./process.js";
 
@@ -126,6 +127,10 @@ export interface BriefingRequest {
   since?: string;
   limit: number;
   maxChars: number;
+  /** Registered role view (#260): the same blended queue as CLI --role. */
+  role?: string;
+  /** Pickup order (#260), as CLI --order. */
+  order?: PickupOrder;
   /** Cancellation: stops collection and terminates running gh child processes. */
   signal?: AbortSignal;
 }
@@ -172,6 +177,8 @@ export async function readBriefing(
       maxChars: request.maxChars,
       agent: request.agent,
       issue: request.issue,
+      ...(request.role ? { role: request.role } : {}),
+      ...(request.order ? { order: request.order } : {}),
       process,
     },
     runtime.estimation,

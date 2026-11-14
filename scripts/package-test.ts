@@ -9,9 +9,9 @@
  * Direct source or dist execution alone is not enough (#11).
  */
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
@@ -56,6 +56,103 @@ function parsePack(stdout: string): PackResult {
     return { filename: first.filename, name: first.name, files };
   }
   throw new Error("npm pack --json returned an unexpected result.");
+}
+
+/**
+ * A credential-free stand-in for `gh` (#260): answers every GraphQL read with one fixed
+ * repository state, so the installed CLI and MCP server collect identical facts.
+ */
+const fakeGh = `#!/usr/bin/env node
+const time = "2026-11-12T10:00:00.000Z";
+const page = (nodes) => ({ nodes, pageInfo: { hasNextPage: false, endCursor: null } });
+const issue = (number, labels, createdAt) => ({
+  number, title: "Ticket " + number, body: "", url: "https://github.com/example/parity/issues/" + number,
+  state: "OPEN", stateReason: null, createdAt, updatedAt: time,
+  issueDependenciesSummary: { blockedBy: 0, totalBlockedBy: 0, blocking: 0, totalBlocking: 0 },
+  blockedBy: page([]), blocking: page([]), labels: page(labels.map((name) => ({ name }))), comments: page([]),
+});
+const args = process.argv.slice(2);
+if (args[0] !== "api" || args[1] !== "graphql") { process.stderr.write("unsupported"); process.exit(1); }
+const query = (args.find((a) => a.startsWith("query=")) || "");
+const issues = query.includes("issues(first") ? [
+  issue(1, ["status:ready", "impact:L", "complexity:S"], "2026-11-01T00:00:00Z"),
+  issue(2, ["status:ready", "impact:XL"], "2026-11-02T00:00:00Z"),
+  issue(3, ["status:needs-design", "complexity:XS"], "2026-11-03T00:00:00Z"),
+  issue(4, ["status:ready", "impact:S", "complexity:M"], "2026-10-01T00:00:00Z"),
+] : [];
+process.stdout.write(JSON.stringify({ data: { repository: { issues: page(issues), pullRequests: page([]) } } }));
+`;
+const parityFields = [
+  "actions",
+  "role",
+  "rankedActions",
+  "estimation",
+  "impactEstimation",
+] as const;
+type Report = Record<string, unknown>;
+const rankedKinds = (report: Report): string[] => {
+  const ranked = report.rankedActions as { items?: { kind: string; target: string }[] } | null;
+  return (ranked?.items ?? []).map((i) => `${i.kind}#${i.target.split("/").pop()}`);
+};
+
+/**
+ * Installed CLI and installed MCP server must report the same blended role queue (#260,
+ * doc/design/mcp.md "Role views"). Returns the ranked kinds for the evidence log.
+ */
+async function blendedParity(
+  cliBin: string,
+  mcpCommand: { command: string; args: string[] },
+  repository: string,
+  role: string,
+  order: string,
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+): Promise<string[]> {
+  const cliRun = await run(
+    windows ? `"${cliBin}"` : cliBin,
+    [
+      "--repo",
+      repository,
+      "--role",
+      role,
+      "--order",
+      order,
+      "--limit",
+      "10",
+      "--json",
+      "--no-update-check",
+    ],
+    { cwd, env, shell: windows, maxBuffer: 64 * 1024 * 1024 },
+  );
+  const cli = JSON.parse(cliRun.stdout) as Report;
+  const transport = new StdioClientTransport({
+    command: mcpCommand.command,
+    args: [...mcpCommand.args, "--repo", repository],
+    cwd,
+    env: env as Record<string, string>,
+    stderr: "pipe",
+  });
+  const client = new Client({ name: "package-test", version: "1.0.0" });
+  await client.connect(transport);
+  let mcp: Report;
+  try {
+    const result = await client.callTool({
+      name: "triage_briefing",
+      arguments: { role, order, limit: 10 },
+    });
+    const structured = result.structuredContent as { status?: string; result?: Report } | undefined;
+    if (!structured?.result)
+      throw new Error(`Installed MCP returned no ${role} briefing (${structured?.status}).`);
+    mcp = structured.result;
+  } finally {
+    await client.close();
+  }
+  for (const key of parityFields)
+    if (JSON.stringify(cli[key]) !== JSON.stringify(mcp[key]))
+      throw new Error(
+        `Installed CLI and MCP disagree on ${key} for ${role} (${order}): CLI ${JSON.stringify(cli[key])} MCP ${JSON.stringify(mcp[key])}.`,
+      );
+  return rankedKinds(cli);
 }
 
 const work = await mkdtemp(join(tmpdir(), "triage-package-"));
@@ -237,6 +334,67 @@ try {
   console.log(
     "ok   installed github-triage-mcp completes a stdio round trip (four read-only tools)",
   );
+  // #260: installed CLI and MCP produce identical blended role queues from the same facts.
+  const mcpCommand = windows
+    ? { command: process.execPath, args: [join(packageDir, "dist", "mcp.mjs")] }
+    : { command: mcpBin, args: [] };
+  if (windows)
+    // execFile("gh") resolves only gh.exe on Windows, so a script stand-in cannot be found.
+    console.log("skip installed blended-queue parity with a fake gh (not supported on Windows)");
+  else {
+    // A checkout of the fixture repository, so repository configuration resolves (absent).
+    const checkout = join(work, "parity-checkout");
+    await mkdir(checkout);
+    await run("git", ["init", "-q"], { cwd: checkout });
+    await run("git", ["remote", "add", "origin", "https://github.com/example/parity.git"], {
+      cwd: checkout,
+    });
+    const fakeDir = join(work, "fake-gh");
+    await mkdir(fakeDir);
+    await writeFile(join(fakeDir, "gh"), fakeGh);
+    await chmod(join(fakeDir, "gh"), 0o755);
+    const env = {
+      ...process.env,
+      PATH: `${fakeDir}${delimiter}${process.env.PATH ?? ""}`,
+      GITHUB_TRIAGE_NO_UPDATE_CHECK: "1",
+    };
+    const want: Record<string, string> = {
+      implementer: "estimate-complexity",
+      designer: "assess-impact",
+    };
+    for (const role of ["implementer", "designer"])
+      for (const order of ["impact", "oldest"]) {
+        const kinds = await blendedParity(
+          bin,
+          mcpCommand,
+          "example/parity",
+          role,
+          order,
+          env,
+          checkout,
+        );
+        if (!kinds.some((k) => k.startsWith(want[role]!)))
+          throw new Error(
+            `Installed ${role} queue has no ${want[role]} action: ${kinds.join(", ")}.`,
+          );
+        console.log(`ok   installed CLI = MCP ${role} (${order}): ${kinds.join(", ")}`);
+      }
+  }
+  // Optional read-only live smoke (#260): GITHUB_TRIAGE_PACKAGE_LIVE_REPO=owner/name uses the
+  // real authenticated gh from this checkout. No labels, claims or other writes are made.
+  const live = process.env.GITHUB_TRIAGE_PACKAGE_LIVE_REPO;
+  if (live) {
+    const revision = (await run("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
+    const version = (
+      await run(windows ? `"${bin}"` : bin, ["version", "--no-update-check"], { shell: windows })
+    ).stdout.split("\n")[0];
+    console.log(`live source revision ${revision}; executable ${bin} (${version})`);
+    const env = { ...process.env, GITHUB_TRIAGE_NO_UPDATE_CHECK: "1" };
+    for (const role of ["implementer", "designer"]) {
+      const kinds = await blendedParity(bin, mcpCommand, live, role, "impact", env, root);
+      console.log(`ok   live ${live} installed CLI = MCP ${role}: ${kinds.join(", ")}`);
+    }
+  }
   console.log("Package test passed.");
 } finally {
   await rm(work, { recursive: true, force: true });
