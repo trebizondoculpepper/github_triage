@@ -10,6 +10,10 @@ Use the official **`@modelcontextprotocol/server` v2** and Zod v4 with TypeScrip
 
 Create a transport-neutral read service around existing collection, dependency and presentation functions, with injected GitHub/clock/project/filesystem boundaries. CLI and MCP call it directly; do not invoke the CLI in a subprocess or parse terminal text. Reuse authenticated `gh` via the existing argument-array runner. No new credential store or token arguments. Keep mutation imports/routes separate and unavailable through this tool registry.
 
+## Bounded-response replacement
+
+The owner-approved replacement for oversized full structured results is [mcp-bounded-results.md](mcp-bounded-results.md), tracked in #266. Its reviewed versioned response contract supersedes the full-intake defaults below when implemented. Claude Code acceptance remains conditional pending default-settings retest.
+
 ## Three discoverable tools
 
 All inputs are strict objects: unknown properties fail validation. Shared optional `repo` follows the existing owner/name validator. Positive issue numbers are safe integers. `agent` is a persistent name used for read presentation, not authentication. Validate dates with the existing ISO-with-time semantics. Defaults and bounds below are public MCP argument constraints, not silent truncation of source evidence.
