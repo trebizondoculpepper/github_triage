@@ -13,7 +13,7 @@
 import { parseArgs } from "node:util";
 import { workflow } from "./briefing.js";
 import { claimPolicy, shellQuote } from "./claims.js";
-import type { Comment, GhRun, GraphQuery, PlanStep } from "./claims.js";
+import type { Comment, GhRun, GraphQuery, PlanStep, ReworkAuthority } from "./claims.js";
 import {
   attestApplicability,
   deliverableKey,
@@ -50,7 +50,8 @@ export type DeliverablesAction = (typeof deliverablesActions)[number];
 
 export interface DeliverablesRequest {
   number: number;
-  action: DeliverablesAction;
+  /** A `deliverables` action, or `submit` (the top-level `submit N` command, #190). */
+  action: DeliverablesAction | "submit";
   agent: string;
   /** Pull request URLs (`attach` may name several; the others exactly one). */
   prs: string[];
@@ -67,6 +68,8 @@ export interface DeliverablesRequest {
   comment: string | null;
   /** `reset --as ready|incomplete`. */
   as: "ready" | "incomplete" | null;
+  /** `membership open` written by `claim --rework` after the claim (doc "Rework authority"). */
+  rework?: boolean;
 }
 
 /** Injected boundaries: GraphQL reads, `gh` writes, REST reads, the authority rule and a clock. */
@@ -385,7 +388,11 @@ const opFor = (r: DeliverablesRequest): DeliveryOp =>
 
 /** The exact command line for a request, as shown in retries and recoveries. */
 export function deliverablesCommand(repository: string, r: DeliverablesRequest): string {
-  const parts = [`github-triage deliverables ${r.number} ${r.action}`];
+  const parts = [
+    r.action === "submit"
+      ? `github-triage submit ${r.number}`
+      : `github-triage deliverables ${r.number} ${r.action}`,
+  ];
   if (r.action === "membership" && r.membership) parts.push(r.membership);
   parts.push(`--agent ${r.agent}`);
   if (r.legacy) parts.push("--legacy");
@@ -402,6 +409,14 @@ export function deliverablesCommand(repository: string, r: DeliverablesRequest):
   return parts.join(" ");
 }
 const targetText = (t: DeliveryTarget): string => `${t.repository}:${t.branch ?? ""}`;
+
+/** The label plan a submit records and applies: release only the caller's claim (doc D3). */
+const submitPlan = (agent: string): { remove: string[]; add: string[] } => ({
+  remove: [claimPolicy.owner(agent)],
+  add: [claimPolicy.awaitingReview],
+});
+/** The reason `claim --rework` gives its `membership open` record (doc "Rework authority"). */
+export const reworkReason = "rework claim";
 
 /** The label plan a reset `--as` writes, shared by the reset step and retry detection. */
 const resetPlan = (as: DeliverablesRequest["as"]): { remove: string[]; add: string[] } => ({
@@ -505,7 +520,7 @@ function intended(
     agent: r.agent,
     deliverables: op === "legacy-attest" ? [] : deliverables,
     membership:
-      op === "legacy-attach"
+      op === "legacy-attach" || op === "submit"
         ? (r.membership ?? "complete")
         : op === "legacy-attest"
           ? "complete"
@@ -694,7 +709,7 @@ export async function planDeliverables(
   // Deliverables named by the request, checked live (attach-time link checks).
   const deliverables: Deliverable[] = [];
   const checkTarget = r.target ?? { repository, branch: null };
-  const linkChecked = ["attach", "retarget"].includes(r.action);
+  const linkChecked = ["attach", "retarget", "submit"].includes(r.action);
   for (const url of r.prs) {
     const m = prUrl.exec(url);
     if (!m)
@@ -765,6 +780,20 @@ export async function planDeliverables(
     )
       notes.push(
         `Warning: ${url} has no closing reference to ${repository}#${number}; membership is what the record says.`,
+      );
+    if (live.state === "CLOSED" && !live.merged && r.action === "submit")
+      // Contract: every submitted PR is open or merged. A closed one is never handed over.
+      return refuse(
+        "PR_CLOSED_UNMERGED",
+        { ...facts, pullRequests: [url] },
+        `${url} is closed without merge; submit hands over only open or merged pull requests. Reopen it or submit its replacement; nothing is recorded.`,
+        [
+          deliverablesCommand(repository, {
+            ...r,
+            prs: r.prs.map((p) => (p === url ? "REPLACEMENT_PR_URL" : p)),
+          }),
+          cmd(`who ${number}`),
+        ],
       );
     if (live.state === "CLOSED" && !live.merged)
       notes.push(`Warning: ${url} is closed unmerged; it is not delivered while required.`);
@@ -842,7 +871,9 @@ export async function planDeliverables(
     labelPlan?: { add: string[]; remove: string[] },
   ): DeliverablesAccepted => {
     const body = [
-      `Delivery record by \`${agent}\`${record.login ? ` (${record.login})` : ""} with \`github-triage deliverables ${r.action}${r.legacy ? " --legacy" : ""}\`: **${describe}**.`,
+      r.action === "submit"
+        ? `Submitted by \`${agent}\` with \`github-triage submit\`: **${describe}**. Releasing the claim; ${agent} stays responsible for follow-up until completion or a recorded handoff.`
+        : `Delivery record by \`${agent}\`${record.login ? ` (${record.login})` : ""} with \`github-triage deliverables ${r.action}${r.legacy ? " --legacy" : ""}\`: **${describe}**.`,
       "",
       ...(record.reason ? [`**Reason:** ${record.reason}`, ""] : []),
       ...(record.evidence ? [`Evidence: ${record.evidence}`, ""] : []),
@@ -912,7 +943,69 @@ export async function planDeliverables(
       `The record posted by this run (opId ${resume.opId}) is not applied; nothing more is written.`,
     );
 
+  if (op === "submit" && own && ownRecord) {
+    const plan = ownRecord.plan ?? submitPlan(agent);
+    const where = `A submit is recorded (comment ${own.comment})`;
+    // A later `membership open` rework record by the caller starts a new cycle: its claim is a
+    // new one, so a fresh submit is planned below instead of completing the old plan.
+    const reworked = after.some((a) => {
+      const c = trustedRecords.find((t) => String(t.comment.databaseId) === a.comment);
+      return (
+        a.op === "membership" &&
+        a.agent === agent &&
+        c?.record.membership === "open" &&
+        c.record.reason === reworkReason
+      );
+    });
+    if (resume || !(holds && reworked)) {
+      // The plan removes the caller's claim label in the same write that adds the review label,
+      // so once the claim label is gone the label step completed; whatever happened to the
+      // labels since belongs to others and is never restored from the plan (as release does).
+      if (!holds) {
+        if (!labels.includes(claimPolicy.awaitingReview))
+          notes.push(
+            `${claimPolicy.awaitingReview} is not on #${number} now; it was changed after the submit and is not re-added.`,
+          );
+        return noop(
+          `Submit already recorded (comment ${own.comment}) and ${agent}'s claim released.`,
+        );
+      }
+      if (after.length)
+        return refuse(
+          "DELIVERY_DIVERGED",
+          facts,
+          `${where} but ${agent}'s claim was not released, and later record(s) intervened: ${after.map((a) => `${a.op} (comment ${a.comment}) by ${a.agent} (${a.login})`).join("; ")}. The recorded plan no longer describes the ticket, so its labels are not applied and no second submit is posted. Inspect the ticket; release or submit again deliberately so the decision is made against the current records.`,
+          [
+            inspect,
+            cmd(`who ${number}`),
+            cmd(`release ${number} --agent ${agent} --as incomplete --note TEXT`),
+          ],
+        );
+      // Completing the plan is a write, so its live prerequisites are checked again.
+      if (item.state !== "OPEN")
+        return refuse(
+          "TICKET_CLOSED",
+          facts,
+          `${where} but #${number} is now closed, so the claim is not released by submit; inspect it and release the claim deliberately.`,
+          [inspect, cmd(`release ${number} --agent ${agent} --as done --note TEXT`)],
+        );
+      return {
+        ok: true,
+        noop: false,
+        reason: `Submit already recorded (comment ${own.comment}); releasing the claim with its recorded label plan.`,
+        facts,
+        changes: labelStep(plan),
+        notes,
+        retry,
+      };
+    }
+  }
+
+  // A rework membership request has its own idempotence check (its reason must be the rework
+  // reason), so an ordinary `membership open` record never counts as its retry.
   if (
+    op !== "submit" &&
+    !(r.rework && !resume) &&
     own &&
     ownRecord &&
     (after.length === 0 ||
@@ -985,6 +1078,60 @@ export async function planDeliverables(
   if (resume) return noop(`Already recorded as comment ${own!.comment}; nothing to change.`);
 
   switch (r.action) {
+    case "submit": {
+      if (!holds)
+        return refuse(
+          "NOT_CLAIMED",
+          facts,
+          `${agent} holds no claim on #${number}${claims.length ? ` (claimed by ${claims.join(", ")})` : ""}; submit hands over only the caller's own active claim.`,
+          [
+            cmd(`who ${number}`),
+            ...(ticketResponsible
+              ? [cmd(`claim ${number} --agent ${agent} --rework`)]
+              : [cmd(`claim ${number} --agent ${agent}`)]),
+          ],
+        );
+      if (item.state !== "OPEN")
+        return refuse(
+          "TICKET_CLOSED",
+          facts,
+          `#${number} is closed; submit hands over open tickets only, so nothing is recorded.`,
+          [inspect, cmd(`release ${number} --agent ${agent} --as done --note TEXT`)],
+        );
+      if (!deliverables.length) {
+        // Resubmitting the current set is allowed only to finish a rework claim on the delivery-
+        // record path, which reopened membership with a `membership open` record by the caller.
+        const latestMembership = [...fold.applied]
+          .reverse()
+          .map((a) => trustedRecords.find((t) => String(t.comment.databaseId) === a.comment))
+          .find((c) => c && (c.record.op === "membership" || c.record.membership));
+        const rework =
+          ticketResponsible &&
+          fold.membership === "open" &&
+          latestMembership?.record.op === "membership" &&
+          latestMembership.record.agent === agent &&
+          latestMembership.record.reason === reworkReason;
+        if (!rework)
+          return refuse(
+            "SUBMIT_NEEDS_PR",
+            facts,
+            `submit without --pr resubmits the current required set and applies only to a rework claim by the ticket-responsible agent (membership reopened by its "${reworkReason}" record). ${agent} has no such rework on #${number}; name the pull request(s) being submitted.`,
+            [cmd(`submit ${number} --agent ${agent} --pr PR_URL`), cmd(`who ${number}`)],
+          );
+      }
+      if (fold.ticketResponsible && fold.ticketResponsible !== agent)
+        notes.push(
+          `Ticket responsibility moves from ${fold.ticketResponsible} to ${agent}, the claim holder submitting.`,
+        );
+      const membership = r.membership ?? "complete";
+      return accepted(
+        draft({ responsible: agent, membership, plan: submitPlan(agent) }),
+        deliverables.length
+          ? `submitted ${deliverables.map(deliverableLabel).join(", ")} (membership ${membership})`
+          : `resubmitted the current required set (membership ${membership})`,
+        submitPlan(agent),
+      );
+    }
     case "attach": {
       if (r.legacy) {
         const legacy = await legacyPrerequisites();
@@ -1083,6 +1230,35 @@ export async function planDeliverables(
       );
     }
     case "membership": {
+      if (r.rework) {
+        if (!fold.hasTrustedRecord)
+          return noop(
+            "Legacy rework: no delivery record exists, so there is no membership to reopen.",
+          );
+        if (!holds)
+          return refuse(
+            "NOT_CLAIMED",
+            facts,
+            `${agent} holds no claim on #${number}; the rework membership record follows the claim.`,
+            [cmd(`claim ${number} --agent ${agent} --rework`)],
+          );
+        if (!ticketResponsible)
+          return notResponsible(
+            "is not ticket-responsible, so it cannot reopen membership for rework",
+          );
+        const last = fold.applied.at(-1);
+        const lastRecord = last
+          ? trustedRecords.find((t) => String(t.comment.databaseId) === last.comment)?.record
+          : undefined;
+        if (
+          lastRecord?.op === "membership" &&
+          lastRecord.agent === agent &&
+          lastRecord.membership === "open" &&
+          lastRecord.reason === reworkReason
+        )
+          return noop(`Rework membership already recorded (comment ${last!.comment}).`);
+        return accepted(draft({ membership: "open" }), "membership open (rework claim)");
+      }
       const override = !holds && !ticketResponsible;
       if (others.length)
         return claimHeld(others, "membership cannot change under another agent's claim");
@@ -1262,6 +1438,103 @@ export async function planDeliverables(
     return null;
   }
 }
+
+/**
+ * `claim --rework` authority from the delivery records (doc "Rework authority"): legacy rules
+ * only while no trusted delivery record exists; otherwise only the ticket-responsible agent. An
+ * unknown fold refuses MARKER_UNVERIFIED and never falls back to the v1 done handoff.
+ */
+export async function reworkAuthority(
+  repository: string,
+  number: number,
+  agent: string,
+  rt: DeliverablesRuntime,
+): Promise<ReworkAuthority> {
+  const cmd = (text: string): string => `github-triage ${text} --repo ${repository}`;
+  const refusal = (error: string, prerequisite: string, recovery: string[]): ReworkAuthority => ({
+    refusal: { error, prerequisite, recovery },
+  });
+  let read: Awaited<ReturnType<typeof readIssue>>;
+  try {
+    read = await readIssue(repository, number, rt.query);
+  } catch (error) {
+    return refusal(
+      "EVIDENCE_INCOMPLETE",
+      `The delivery records of #${number} could not be read (${error instanceof Error ? error.message : "unknown error"}), so rework authority is unknown; nothing is changed.`,
+      [cmd(`--issue ${number}`), cmd(`claim ${number} --agent ${agent} --rework`)],
+    );
+  }
+  const item = read.item;
+  // Not an issue (or missing): the claim's own checks refuse it.
+  if (!item || item.__typename !== "Issue") return { path: "legacy" };
+  const history = await readDeliveryComments(repository, number, item.comments, rt.query);
+  const { fold } = await readDeliveryFold(
+    history.comments,
+    history.complete,
+    { repository, issue: number },
+    rt.trust,
+  );
+  if (fold.recordsUnknown)
+    return refusal(
+      "MARKER_UNVERIFIED",
+      `The delivery records of #${number} cannot all be verified (${fold.unknownBecause.join("; ")}), so rework authority is unknown; it never falls back to an older record. Nothing is changed.`,
+      [cmd(`who ${number}`), cmd(`--issue ${number}`)],
+    );
+  if (!fold.hasTrustedRecord) return { path: "legacy" };
+  if (fold.ticketResponsible !== agent)
+    return refusal(
+      "NOT_RESPONSIBLE",
+      `${agent} is not ticket-responsible for #${number} (responsible: ${fold.ticketResponsible ?? "none"}); once a delivery record exists, only the ticket-responsible agent may claim rework, and a v1 done handoff no longer authorises it.`,
+      [
+        cmd(`who ${number}`),
+        ...(fold.ticketResponsible
+          ? [
+              cmd(
+                `deliverables ${number} handoff --agent ${fold.ticketResponsible} --to ${agent} --reason TEXT`,
+              ),
+            ]
+          : []),
+        cmd(`deliverables ${number} reassign --agent MAINTAINER --to ${agent} --reason TEXT`),
+        cmd(`deliverables ${number} reset --agent MAINTAINER --as ready --reason TEXT`),
+      ],
+    );
+  // The claim is followed by a delivery record, so the account must be able to write one.
+  const self: Comment = {
+    body: "",
+    author: read.viewer ?? undefined,
+    lastEditedAt: null,
+    includesCreatedEdit: false,
+    editor: null,
+  };
+  const authority = read.viewer?.login
+    ? await rt.trust(self)
+    : { status: "unknown" as const, why: "the authenticated account could not be read" };
+  if (authority.status !== "trusted")
+    return refusal(
+      "MARKER_UNVERIFIED",
+      `The authenticated account ${read.viewer?.login ?? "(unknown)"} must have write, maintain or admin permission on ${repository} to record the rework (${authority.why}); nothing is changed.`,
+      [cmd(`who ${number}`)],
+    );
+  return { path: "delivery" };
+}
+
+/** The membership request `claim --rework` applies after its claim on the delivery path. */
+export const reworkMembershipRequest = (number: number, agent: string): DeliverablesRequest => ({
+  number,
+  action: "membership",
+  agent,
+  prs: [],
+  commits: [],
+  target: null,
+  reason: reworkReason,
+  to: null,
+  membership: "open",
+  legacy: false,
+  evidence: null,
+  comment: null,
+  as: null,
+  rework: true,
+});
 
 /**
  * Apply a plan one write at a time. Before every write the issue is re-read, re-folded and
@@ -1552,6 +1825,89 @@ export function deliverablesArguments(args: string[]) {
     evidence,
     comment: values.comment ?? null,
     as: (values.as as "ready" | "incomplete" | undefined) ?? null,
+  };
+  return { request, repo: values.repo, json: !!values.json, dryRun: !!values["dry-run"] };
+}
+
+export const submitUsage =
+  "Usage: github-triage submit N --agent NAME [--pr URL...] [--target owner/name:branch] [--membership open] [--dry-run] [--json] [--repo owner/name]";
+
+export const submitHelp = `${submitUsage}
+Hand over finished implementation work (#190, doc/design/delivery-lifecycle.md D3): record the
+pull requests issue N requires, then release only your own claim and set status:awaiting-review.
+You stay responsible for the submitted PRs (answer reviews, fix findings and checks on their
+branches) without holding a claim, so you may claim other work meanwhile. Nothing is merged or
+closed; completion is a separate, verified step (complete --help).
+  --pr URL          A pull request being submitted (repeatable). Each is read live: it must be
+                    open or merged (PR_CLOSED_UNMERGED otherwise), and its base repository and
+                    branch must match the target (the issue repository's default branch unless
+                    --target names one), else TARGET_MISMATCH; unreadable is EVIDENCE_INCOMPLETE.
+                    Omit it only to finish a rework claim, which resubmits the current required
+                    set (SUBMIT_NEEDS_PR otherwise)
+  --target          Intended integration target owner/name:branch for every --pr
+  --membership open More deliverables are expected; the ticket cannot be delivered until a later
+                    record closes membership (default: the required set is complete)
+Writes, in order: one delivery record (op submit, carrying the label plan), then remove
+agent:NAME and add status:awaiting-review. A retry of the same command never posts a second
+record: it completes the recorded label plan, or refuses DELIVERY_DIVERGED when later records
+contradict it. Labels changed by others after the claim was released are never restored.
+The authenticated account must have write, maintain or admin permission (MARKER_UNVERIFIED).
+Refusals: NOT_CLAIMED, TICKET_CLOSED, PR_CLOSED_UNMERGED, TARGET_MISMATCH, SUBMIT_NEEDS_PR,
+EVIDENCE_INCOMPLETE, DELIVERY_DIVERGED, MARKER_UNVERIFIED, RECORD_MALFORMED, RECORD_UNSUPPORTED,
+each with recovery commands.
+Exit: 0 done (or nothing to do); 2 partly done, conflict or unverified; 1 refused or nothing done.
+`;
+
+/** Arguments for `submit N ...`; throws a usage error for anything invalid. */
+export function submitArguments(args: string[]) {
+  const { values, positionals } = parseArgs({
+    args,
+    allowPositionals: true,
+    options: {
+      repo: { type: "string" },
+      json: { type: "boolean" },
+      "dry-run": { type: "boolean" },
+      agent: { type: "string" },
+      pr: { type: "string", multiple: true },
+      target: { type: "string" },
+      membership: { type: "string" },
+    },
+  });
+  const usage = submitUsage;
+  const fail = (why: string): never => {
+    throw new Error(`${why}\n${usage}`);
+  };
+  const [n, ...extra] = positionals;
+  const number = /^[1-9]\d*$/.test(n ?? "") ? Number(n) : null;
+  if (!number || extra.length || !values.agent || !/^[A-Za-z0-9][\w.-]*$/.test(values.agent))
+    throw new Error(usage);
+  if (values.repo && !/^[\w.-]+\/[\w.-]+$/.test(values.repo))
+    throw new Error("--repo must be owner/name.");
+  const prs = (values.pr ?? []).map((p) => p.trim());
+  for (const p of prs) if (!prUrl.test(p)) fail(`--pr must be a GitHub pull request URL: ${p}`);
+  let target: DeliveryTarget | null = null;
+  if (values.target !== undefined) {
+    const m = /^([\w.-]+\/[\w.-]+):(\S+)$/.exec(values.target);
+    if (!m) fail("--target must be owner/name:branch.");
+    target = { repository: m![1], branch: m![2] };
+    if (!prs.length) fail("--target applies only with --pr.");
+  }
+  if (values.membership !== undefined && values.membership !== "open")
+    fail("--membership takes only open (complete is the default).");
+  const request: DeliverablesRequest = {
+    number,
+    action: "submit",
+    agent: values.agent,
+    prs,
+    commits: [],
+    target,
+    reason: null,
+    to: null,
+    membership: values.membership === "open" ? "open" : null,
+    legacy: false,
+    evidence: null,
+    comment: null,
+    as: null,
   };
   return { request, repo: values.repo, json: !!values.json, dryRun: !!values["dry-run"] };
 }

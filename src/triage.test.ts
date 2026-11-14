@@ -92,6 +92,7 @@ import {
 } from "./github.js";
 import { clauseFor, hedged, listWideHedge, planMigration } from "./migration.js";
 import { applyPlan, claimText, planClaim, planNeedsHuman, planRelease } from "./claims.js";
+import type { ReworkAuthority } from "./claims.js";
 import type { ClaimAccepted, ClaimPlan, ClaimRefusal } from "./claims.js";
 import { teamText, teamView } from "./team.js";
 import { ticketOwnership, ticketOwnershipText } from "./who.js";
@@ -7904,6 +7905,17 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
     expect(u.facts.target).toBeNull();
     expect(u.notes!.join(" ")).toMatch(/UNKNOWN/);
   });
+  it("done --pr is deprecated: it names the equivalent submit command; other outcomes do not", async () => {
+    const env = live({ labels: ["agent:kavya"], prState: "OPEN" });
+    const plan = accepted(await release(env, { outcome: "done", pr }));
+    expect(plan.notes).toContain(
+      `Deprecated: release --as done --pr writes a release record only, never a delivery record. Use: github-triage submit 7 --agent kavya --pr ${pr} --repo ${repo}`,
+    );
+    const noPr = accepted(await release(live({ labels: ["agent:kavya"] }), { outcome: "done" }));
+    expect(noPr.notes!.join(" ")).not.toMatch(/Deprecated/);
+    const ready = accepted(await release(live({ labels: ["agent:kavya"] }), { outcome: "ready" }));
+    expect(ready.notes!.join(" ")).not.toMatch(/Deprecated/);
+  });
   it("refuses when the caller holds no claim or another agent owns it; keeps other owners", async () => {
     const other = live({ labels: ["agent:other", "status:ready"], labelledAt: undefined });
     expect(await release(other)).toMatchObject({ ok: false, error: "NOT_CLAIMED" });
@@ -8346,6 +8358,69 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
     const rework = (env: ReturnType<typeof live>, permission: PermissionLookup = env.permission) =>
       planClaim(repo, { number: 7, agent: "kavya", rework: true }, env.query, permission);
 
+    const withAuthority = (env: ReturnType<typeof live>, authority: ReworkAuthority) => {
+      let calls = 0;
+      const plan = planClaim(
+        repo,
+        { number: 7, agent: "kavya", rework: true },
+        env.query,
+        env.permission,
+        async () => {
+          calls++;
+          return authority;
+        },
+      );
+      return { plan, calls: () => calls };
+    };
+    it("S21/S29: the ticket-responsible agent claims rework with no open PR and no v1 handoff", async () => {
+      const env = live({ labels: ["status:awaiting-review"], labelledAt: undefined });
+      const plan = accepted(await withAuthority(env, { path: "delivery" }).plan);
+      expect(plan.notes!.join(" ")).toMatch(/membership open, reason "rework claim"/);
+      await applyPlan(repo, plan, env);
+      expect(env.s.labels).toEqual(["agent:kavya"]);
+    });
+    it("S30/S65: a delivery-record refusal is final; a valid v1 done handoff never authorises", async () => {
+      const env = awaiting([handoff({}, later(1))]);
+      const plan = await withAuthority(env, {
+        refusal: {
+          error: "NOT_RESPONSIBLE",
+          prerequisite: "kavya is not ticket-responsible",
+          recovery: [`github-triage who 7 --repo ${repo}`],
+        },
+      }).plan;
+      expect(plan).toMatchObject({ ok: false, error: "NOT_RESPONSIBLE" });
+      expect(env.writes).toEqual([]);
+    });
+    it("S31: unknown record authority refuses MARKER_UNVERIFIED with no fallback", async () => {
+      const env = awaiting([handoff({}, later(1))]);
+      const plan = await withAuthority(env, {
+        refusal: {
+          error: "MARKER_UNVERIFIED",
+          prerequisite: "unknown",
+          recovery: [`github-triage who 7 --repo ${repo}`],
+        },
+      }).plan;
+      expect(plan).toMatchObject({ ok: false, error: "MARKER_UNVERIFIED" });
+    });
+    it("rework refuses a closed issue before consulting delivery records", async () => {
+      const env = live({
+        labels: ["status:awaiting-review"],
+        state: "CLOSED",
+        labelledAt: undefined,
+      });
+      const run = withAuthority(env, { path: "delivery" });
+      expect(await run.plan).toMatchObject({ ok: false, error: "TICKET_CLOSED" });
+      expect(run.calls()).toBe(0);
+    });
+    it("legacy authority keeps the v1 rule unchanged", async () => {
+      const env = awaiting([handoff({}, later(1))]);
+      expect((await withAuthority(env, { path: "legacy" }).plan).ok).toBe(true);
+      const none = awaiting([]);
+      expect(await withAuthority(none, { path: "legacy" }).plan).toMatchObject({
+        ok: false,
+        error: "REWORK_NOT_AUTHORISED",
+      });
+    });
     it("(a) a forged done marker from a read-only author does not authorise rework", async () => {
       const env = awaiting([handoff({}, later(1), mallory)]);
       const plan = await rework(env);

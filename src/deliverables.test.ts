@@ -6,6 +6,9 @@ import {
   planDeliverables,
   readDeliveryComments,
   resetPlanPending,
+  reworkAuthority,
+  reworkMembershipRequest,
+  submitArguments,
 } from "./deliverables.js";
 import type { DeliverablesPlan, DeliverablesRequest, DeliverablesRuntime } from "./deliverables.js";
 import { deliveryMarker, markerTrust, parseDeliveryComment } from "./delivery.js";
@@ -1253,4 +1256,361 @@ describe("deliverables retry detection compares every defining field", () => {
           false,
         ]);
     });
+});
+
+describe("submit (#190)", () => {
+  const submitReq = (fields: Partial<DeliverablesRequest> = {}) =>
+    request("submit", { reason: null, ...fields });
+  const reworkOpen = () => post(rec("membership", { membership: "open", reason: "rework claim" }));
+
+  it("records the PRs first, then releases only the caller's claim and sets awaiting-review", async () => {
+    const pr = fakePr(9);
+    const { rt, state } = github({ labels: ["agent:alice", "question"], prs: [pr] });
+    const result = await applyDeliverables(repo, submitReq({ prs: [pr.url] }), rt);
+    expect(result.exitCode).toBe(0);
+    expect(state.writes.map((w) => w[1])).toEqual(["comment", "edit"]);
+    expect(posted(state)[0]).toMatchObject({
+      op: "submit",
+      agent: "alice",
+      responsible: "alice",
+      membership: "complete",
+      plan: { remove: ["agent:alice"], add: ["status:awaiting-review"] },
+      deliverables: [{ number: 9, nodeId: "PR_9", headOid: "head9" }],
+    });
+    expect(state.labels.sort()).toEqual(["question", "status:awaiting-review"]);
+    // The submitted record's opId is the one the record carries, and a re-run is a no-op.
+    const again = await applyDeliverables(repo, submitReq({ prs: [pr.url] }), rt);
+    expect(again.ok && again.noop).toBe(true);
+    expect(posted(state)).toHaveLength(1);
+  });
+  it("S18/S2: responsibility survives the release, so follow-up needs no claim", async () => {
+    const pr = fakePr(9);
+    const next = fakePr(10);
+    const { rt } = github({ labels: ["agent:alice"], prs: [pr, next] });
+    await applyDeliverables(repo, submitReq({ prs: [pr.url] }), rt);
+    const plan = await planDeliverables(
+      repo,
+      request("attach", { prs: [next.url], reason: null }),
+      rt,
+    );
+    expect(plan.ok).toBe(true);
+    expect(plan.facts.ticketResponsible).toBe("alice");
+  });
+  it("--membership open is recorded; dry run writes nothing and shows the commands", async () => {
+    const pr = fakePr(9);
+    const { rt, state } = github({ labels: ["agent:alice"], prs: [pr] });
+    const plan = await planDeliverables(repo, submitReq({ prs: [pr.url], membership: "open" }), rt);
+    expect(plan.ok && plan.record?.membership).toBe("open");
+    expect(deliverablesText(plan, true)).toMatch(
+      /DRY RUN[\s\S]*gh issue comment 42[\s\S]*gh issue edit 42/,
+    );
+    expect(plan.ok && plan.retry).toBe(
+      `github-triage submit 42 --agent alice --pr ${pr.url} --membership open --repo ${repo}`,
+    );
+    expect(state.writes).toEqual([]);
+  });
+  it("NOT_CLAIMED: only the caller's own active claim can be submitted", async () => {
+    const pr = fakePr(9);
+    const { rt, state } = github({ labels: ["agent:bob"], prs: [pr] });
+    refused(await applyDeliverables(repo, submitReq({ prs: [pr.url] }), rt), "NOT_CLAIMED");
+    expect(state.writes).toEqual([]);
+  });
+  it("PR_CLOSED_UNMERGED: a closed PR is never submitted; a merged one is", async () => {
+    const closed = fakePr(9, { state: "CLOSED" });
+    const merged = fakePr(10, { state: "MERGED", merged: true, mergeCommit: { oid: "m10" } });
+    const { rt, state } = github({ labels: ["agent:alice"], prs: [closed, merged] });
+    refused(
+      await planDeliverables(repo, submitReq({ prs: [closed.url] }), rt),
+      "PR_CLOSED_UNMERGED",
+    );
+    expect((await planDeliverables(repo, submitReq({ prs: [merged.url] }), rt)).ok).toBe(true);
+    expect(state.writes).toEqual([]);
+  });
+  it("S7: a PR on another base branch is TARGET_MISMATCH unless --target states it", async () => {
+    const pr = fakePr(9, { baseRefName: "feature" });
+    const { rt } = github({ labels: ["agent:alice"], prs: [pr] });
+    const plan = refused(
+      await planDeliverables(repo, submitReq({ prs: [pr.url] }), rt),
+      "TARGET_MISMATCH",
+    );
+    expect(plan.recovery[0]).toMatch(/^github-triage submit 42 .*--target/);
+    const explicit = await planDeliverables(
+      repo,
+      submitReq({ prs: [pr.url], target: { repository: repo, branch: "feature" } }),
+      rt,
+    );
+    expect(explicit.ok).toBe(true);
+  });
+  it("EVIDENCE_INCOMPLETE: an unreadable PR is refused and nothing is recorded", async () => {
+    const { rt, state } = github({ labels: ["agent:alice"] });
+    refused(
+      await applyDeliverables(repo, submitReq({ prs: [prLink(9)] }), rt),
+      "EVIDENCE_INCOMPLETE",
+    );
+    expect(state.writes).toEqual([]);
+  });
+  it("record-state refusals block submit: unknown authority is MARKER_UNVERIFIED", async () => {
+    const pr = fakePr(9);
+    const { rt, state } = github({
+      labels: ["agent:alice"],
+      prs: [pr],
+      comments: [post(rec("attach", { deliverables: [member(5)] }), "flaky")],
+    });
+    refused(await applyDeliverables(repo, submitReq({ prs: [pr.url] }), rt), "MARKER_UNVERIFIED");
+    expect(state.writes).toEqual([]);
+  });
+  it("SUBMIT_NEEDS_PR: without --pr only a rework claim resubmits the current set", async () => {
+    const { rt } = github({ labels: ["agent:alice"], comments: [submitted()] });
+    refused(await planDeliverables(repo, submitReq(), rt), "SUBMIT_NEEDS_PR");
+    // Another agent's rework record does not authorise alice's resubmit.
+    const other = github({
+      labels: ["agent:alice"],
+      comments: [
+        submitted(),
+        post(rec("membership", { agent: "bob", membership: "open", reason: "rework claim" })),
+      ],
+    });
+    refused(await planDeliverables(repo, submitReq(), other.rt), "SUBMIT_NEEDS_PR");
+  });
+  it("S59: after a rework claim, submit without --pr closes membership and releases the claim", async () => {
+    const { rt, state } = github({
+      labels: ["agent:alice"],
+      comments: [submitted(), reworkOpen()],
+    });
+    const result = await applyDeliverables(repo, submitReq(), rt);
+    expect(result.exitCode).toBe(0);
+    expect(posted(state)[0]).toMatchObject({
+      op: "submit",
+      deliverables: [],
+      membership: "complete",
+    });
+    expect(state.labels).toEqual(["status:awaiting-review"]);
+    const after = await planDeliverables(
+      repo,
+      request("membership", { membership: "complete" }),
+      rt,
+    );
+    expect(after.facts.membership).toBe("complete");
+    expect(after.facts.members?.map((m) => m.deliverable)).toEqual([`${repo}#5`]);
+  });
+  it("a new cycle after rework re-submits the same PR with a fresh record", async () => {
+    const pr = fakePr(5);
+    const { rt, state } = github({
+      labels: ["agent:alice"],
+      prs: [pr],
+      comments: [submitted(), reworkOpen()],
+    });
+    const plan = await planDeliverables(repo, submitReq({ prs: [pr.url] }), rt);
+    expect(plan.ok && !plan.noop && plan.record?.op).toBe("submit");
+    expect(state.writes).toEqual([]);
+  });
+  it("S11: a failed label write is completed by a retry without a second record", async () => {
+    const pr = fakePr(9);
+    let fail = true;
+    const { rt, state } = github({
+      labels: ["agent:alice"],
+      prs: [pr],
+      failRun: (args) => args[1] === "edit" && fail,
+    });
+    const req = submitReq({ prs: [pr.url] });
+    const first = await applyDeliverables(repo, req, rt);
+    expect(first.exitCode).toBe(2);
+    expect(state.labels).toEqual(["agent:alice"]);
+    fail = false;
+    const retry = await applyDeliverables(repo, req, rt);
+    expect(retry.exitCode).toBe(0);
+    expect(retry.ok && retry.reason).toMatch(/already recorded/);
+    expect(posted(state)).toHaveLength(1);
+    expect(state.labels).toEqual(["status:awaiting-review"]);
+  });
+  it("S11: DELIVERY_DIVERGED when a later record intervened before the claim was released", async () => {
+    const pr = fakePr(9);
+    let fail = true;
+    const { rt, state } = github({
+      labels: ["agent:alice"],
+      prs: [pr],
+      failRun: (args) => args[1] === "edit" && fail,
+    });
+    const req = submitReq({ prs: [pr.url] });
+    expect((await applyDeliverables(repo, req, rt)).exitCode).toBe(2);
+    state.comments.push(
+      comment(
+        deliveryMarker(rec("membership", { agent: "maint", membership: "open" })),
+        "writer",
+        state.nextId++,
+      ),
+    );
+    fail = false;
+    const writes = state.writes.length;
+    refused(await applyDeliverables(repo, req, rt), "DELIVERY_DIVERGED");
+    expect(state.writes.length).toBe(writes);
+    expect(state.labels).toEqual(["agent:alice"]);
+  });
+  it("race: a record landing between the submit record and its label write stops the labels", async () => {
+    const pr = fakePr(9);
+    const { rt, state } = github({
+      labels: ["agent:alice"],
+      prs: [pr],
+      onRun: (args, s) => {
+        if (args[1] === "comment")
+          queueMicrotask(() =>
+            s.comments.push(
+              comment(
+                deliveryMarker(rec("membership", { agent: "maint", membership: "open" })),
+                "writer",
+                9500,
+              ),
+            ),
+          );
+      },
+    });
+    const result = await applyDeliverables(repo, submitReq({ prs: [pr.url] }), rt);
+    expect(result.exitCode).toBe(2);
+    expect(result.ok ? "ok" : result.error).toBe("DELIVERY_DIVERGED");
+    expect(posted(state)).toHaveLength(1);
+    expect(state.labels).toEqual(["agent:alice"]);
+  });
+  it("a claim released by someone else after the record is not restored or re-labelled", async () => {
+    const pr = fakePr(9);
+    let fail = true;
+    const { rt, state } = github({
+      labels: ["agent:alice"],
+      prs: [pr],
+      failRun: (args) => args[1] === "edit" && fail,
+    });
+    const req = submitReq({ prs: [pr.url] });
+    await applyDeliverables(repo, req, rt);
+    state.labels = ["status:ready"];
+    fail = false;
+    const retry = await applyDeliverables(repo, req, rt);
+    expect(retry.ok && retry.noop).toBe(true);
+    expect(retry.ok && retry.notes.join(" ")).toMatch(/not re-added/);
+    expect(state.labels).toEqual(["status:ready"]);
+  });
+  it("parses submit arguments and rejects misplaced options", () => {
+    const parsed = submitArguments([
+      "7",
+      "--agent",
+      "alice",
+      "--pr",
+      prLink(3),
+      "--membership",
+      "open",
+      "--json",
+    ]);
+    expect(parsed.request).toMatchObject({
+      number: 7,
+      action: "submit",
+      prs: [prLink(3)],
+      membership: "open",
+    });
+    expect(parsed.json).toBe(true);
+    expect(submitArguments(["7", "--agent", "alice"]).request.prs).toEqual([]);
+    expect(() => submitArguments(["7", "--agent", "alice", "--membership", "complete"])).toThrow(
+      /open/,
+    );
+    expect(() => submitArguments(["7", "--agent", "alice", "--target", `${repo}:main`])).toThrow(
+      /--pr/,
+    );
+    expect(() => submitArguments(["7", "--agent", "alice", "--pr", "nope"])).toThrow(
+      /pull request URL/,
+    );
+    expect(() => submitArguments(["--agent", "alice"])).toThrow(/Usage/);
+  });
+});
+
+describe("claim --rework authority and membership record (#190)", () => {
+  const handoffTo = (from: string, to: string, expected: string) =>
+    rec("handoff", { agent: from, to, scope: "ticket", expectedResponsibilityRecord: expected });
+  const authority = async (comments: DeliveryComment[], agent: string) =>
+    reworkAuthority(repo, N, agent, github({ comments }).rt);
+  it("S21: the submitter is authorised on the delivery path; no records means legacy", async () => {
+    expect(await authority([submitted()], "alice")).toEqual({ path: "delivery" });
+    expect(await authority([v1Done()], "alice")).toEqual({ path: "legacy" });
+  });
+  it("S29/S30: only the current ticket-responsible agent after handoffs is authorised", async () => {
+    const s = submitted();
+    const ab = post(handoffTo("alice", "bob", String(s.databaseId)));
+    expect(await authority([s, ab], "bob")).toEqual({ path: "delivery" });
+    expect(await authority([s, ab], "alice")).toMatchObject({
+      refusal: { error: "NOT_RESPONSIBLE" },
+    });
+    const bc = post(handoffTo("bob", "carol", String(ab.databaseId)));
+    for (const who of ["alice", "bob"])
+      expect(await authority([s, ab, bc], who)).toMatchObject({
+        refusal: { error: "NOT_RESPONSIBLE" },
+      });
+    expect(await authority([s, ab, bc], "carol")).toEqual({ path: "delivery" });
+  });
+  it("S31: a handoff whose author permission is unknown refuses MARKER_UNVERIFIED", async () => {
+    const s = submitted();
+    const ab = post(handoffTo("alice", "bob", String(s.databaseId)), "flaky");
+    for (const who of ["alice", "bob"])
+      expect(await authority([s, ab], who)).toMatchObject({
+        refusal: { error: "MARKER_UNVERIFIED" },
+      });
+  });
+  it("S65: after attach --legacy and a handoff, the v1 author is refused; unknown records never fall back", async () => {
+    const v1 = v1Done();
+    const la = post(
+      rec("legacy-attach", {
+        deliverables: [member(5)],
+        login: "writer",
+        legacyRelease: String(v1.databaseId),
+      }),
+    );
+    const hb = post(handoffTo("alice", "bob", String(la.databaseId)));
+    expect(await authority([v1, la, hb], "alice")).toMatchObject({
+      refusal: { error: "NOT_RESPONSIBLE" },
+    });
+    expect(await authority([v1, la, hb], "bob")).toEqual({ path: "delivery" });
+    const unknown = post(rec("attach", { deliverables: [member(6)] }), "flaky");
+    expect(await authority([v1, unknown], "alice")).toMatchObject({
+      refusal: { error: "MARKER_UNVERIFIED" },
+    });
+  });
+  it("S21/S58/S59: the rework record is written once after the claim, and submit without --pr finishes it", async () => {
+    const { rt, state } = github({ labels: ["agent:alice"], comments: [submitted()] });
+    const first = await applyDeliverables(repo, reworkMembershipRequest(N, "alice"), rt);
+    expect(first.exitCode).toBe(0);
+    expect(posted(state)[0]).toMatchObject({
+      op: "membership",
+      membership: "open",
+      reason: "rework claim",
+    });
+    const retry = await applyDeliverables(repo, reworkMembershipRequest(N, "alice"), rt);
+    expect(retry.ok && retry.noop).toBe(true);
+    expect(posted(state)).toHaveLength(1);
+    const submit = await applyDeliverables(repo, request("submit", { reason: null }), rt);
+    expect(submit.exitCode).toBe(0);
+    expect(posted(state)[1]).toMatchObject({
+      op: "submit",
+      deliverables: [],
+      membership: "complete",
+    });
+    expect(state.labels).toEqual(["status:awaiting-review"]);
+  });
+  it("an ordinary membership-open record is not mistaken for the rework record", async () => {
+    const { rt, state } = github({
+      labels: ["agent:alice"],
+      comments: [submitted(), post(rec("membership", { membership: "open", reason: "more PRs" }))],
+    });
+    expect((await applyDeliverables(repo, reworkMembershipRequest(N, "alice"), rt)).exitCode).toBe(
+      0,
+    );
+    expect(posted(state)[0]).toMatchObject({ op: "membership", reason: "rework claim" });
+    const submit = await planDeliverables(repo, request("submit", { reason: null }), rt);
+    expect(submit.ok).toBe(true);
+  });
+  it("a legacy rework writes no delivery record; a non-responsible claimant is refused", async () => {
+    const legacy = github({ labels: ["agent:alice"], comments: [v1Done()] });
+    const l = await applyDeliverables(repo, reworkMembershipRequest(N, "alice"), legacy.rt);
+    expect(l.ok && l.noop).toBe(true);
+    expect(legacy.state.writes).toEqual([]);
+    const other = github({ labels: ["agent:bob"], comments: [submitted()] });
+    refused(
+      await planDeliverables(repo, reworkMembershipRequest(N, "bob"), other.rt),
+      "NOT_RESPONSIBLE",
+    );
+  });
 });

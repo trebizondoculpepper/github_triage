@@ -122,6 +122,17 @@ export interface ClaimRequest {
    */
   rework?: boolean;
 }
+/**
+ * How `claim --rework` is authorised (doc/design/delivery-lifecycle.md "Rework authority"),
+ * decided from the delivery records by an injected reader: `legacy` when the issue has no trusted
+ * delivery record (the v1 done-handoff rule applies), `delivery` when the caller is
+ * ticket-responsible on the trusted fold, or a refusal (never a fallback to the v1 rule).
+ */
+export type ReworkAuthority =
+  | { path: "legacy" }
+  | { path: "delivery" }
+  | { refusal: { error: string; prerequisite: string; recovery: string[] } };
+
 export type ReleaseOutcome = (typeof claimPolicy.outcomes)[number];
 export interface ReleaseRequest {
   number: number;
@@ -538,6 +549,7 @@ export async function planClaim(
   request: ClaimRequest,
   query: GraphQuery = ghQuery,
   permission: PermissionLookup = permissionLookup(repository),
+  reworkAuthority?: () => Promise<ReworkAuthority>,
 ): Promise<ClaimPlan> {
   const { number, agent, branch = null, platform = null, rework = false } = request;
   const { item, claims, repoLabels } = await readTicket(repository, number, agent, query);
@@ -682,7 +694,21 @@ export async function planClaim(
   let lastRelease = rework ? null : latestRelease(item.comments.nodes);
   let claimedSince: string | null = rework ? null : (lastRelease?.claimedAt ?? null);
   let ignored: string[] = [];
-  if (rework) {
+  // With delivery records, rework authority comes only from ticket responsibility; the v1 done
+  // handoff is consulted only while the issue has no trusted delivery record (#190).
+  let deliveryPath = false;
+  if (rework && reworkAuthority) {
+    const authority = await reworkAuthority();
+    if ("refusal" in authority)
+      return refuse(
+        authority.refusal.error,
+        { ...facts, pullRequests: openPrs.map((p) => p.url) },
+        authority.refusal.prerequisite,
+        authority.refusal.recovery,
+      );
+    deliveryPath = authority.path === "delivery";
+  }
+  if (rework && !deliveryPath) {
     // The rework reclaim is authorised only by the caller's own done handoff for the claim it
     // released (#212): that claim began when the caller's label was last added, and its handoff
     // was posted after that, so the comments since then hold every record that can authorise it.
@@ -724,13 +750,14 @@ export async function planClaim(
   // Conservative authorisation: awaiting review, an open PR, and the caller's own done handoff
   // for the claim it released is the latest trusted release on this issue.
   const reworkable =
-    label(item, claimPolicy.awaitingReview) &&
-    openPrs.length > 0 &&
-    lastRelease?.agent === agent &&
-    lastRelease.outcome === "done" &&
-    // A handoff with no recorded claim time, or another claim's, is never the caller's claim.
-    !!lastRelease.claimedAt &&
-    lastRelease.claimedAt === claimedSince;
+    deliveryPath ||
+    (label(item, claimPolicy.awaitingReview) &&
+      openPrs.length > 0 &&
+      lastRelease?.agent === agent &&
+      lastRelease.outcome === "done" &&
+      // A handoff with no recorded claim time, or another claim's, is never the caller's claim.
+      !!lastRelease.claimedAt &&
+      lastRelease.claimedAt === claimedSince);
   const reworkCommand = command(
     `claim ${number} --agent ${agent}${branch ? ` --branch ${branch}` : ""} --rework`,
   );
@@ -869,7 +896,18 @@ export async function planClaim(
     facts,
     changes,
     recheck: { agent },
-    ...(ignored.length ? { notes: ignoredNote(ignored) } : {}),
+    ...(ignored.length || deliveryPath
+      ? {
+          notes: [
+            ...ignoredNote(ignored),
+            ...(deliveryPath
+              ? [
+                  `Rework by the ticket-responsible agent: after the claim, a delivery record reopens membership (membership open, reason "rework claim"); finish with github-triage submit ${number} --agent ${agent} --repo ${repository}.`,
+                ]
+              : []),
+          ],
+        }
+      : {}),
   };
 }
 
@@ -1245,6 +1283,10 @@ export async function planRelease(
   if (pr && !prState)
     notes.push(
       `Pull request state is UNKNOWN (${pr} could not be verified); not treated as open or merged.`,
+    );
+  if (outcome === "done" && pr)
+    notes.push(
+      `Deprecated: release --as done --pr writes a release record only, never a delivery record. Use: ${command(`submit ${number} --agent ${agent} --pr ${shellQuote(pr)}`)}`,
     );
   if (outcome === "done" && !deliverable && !linkedOpen.length)
     notes.push("Done without a PR or change link; inspect the ticket to confirm the deliverable.");
