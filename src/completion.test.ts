@@ -88,6 +88,8 @@ function github(
     /** Runs after each write: the place to inject a concurrent actor. */
     onRun?: (args: string[], state: State) => void;
     pageSize?: number;
+    /** Makes a read fail: the place to inject a paging failure. */
+    failQuery?: (q: string, state: State) => boolean;
   } = {},
 ) {
   const state: State = {
@@ -122,6 +124,7 @@ function github(
   };
   const query = async (q: string, v: Record<string, string | number>): Promise<unknown> => {
     state.queries++;
+    if (setup.failQuery?.(q, state)) throw new Error("page read failed");
     if (q.includes("viewer{"))
       return {
         viewer: { __typename: "User", login: viewer },
@@ -846,6 +849,55 @@ describe("complete: write order, races and retries", () => {
     expect(second.exitCode).toBe(0);
     expect(posted(state).filter((r) => r?.op === "complete")).toHaveLength(1);
     expect(state.issueState).toBe("CLOSED");
+  });
+  it("a failed label removal after the close is finished by a retry, without a second record", async () => {
+    let fail = true;
+    const { rt, state } = github({ ...ready(), failRun: (a) => a[1] === "edit" && fail });
+    const first = await complete(rt);
+    expect(first.exitCode).toBe(2);
+    expect(state.issueState).toBe("CLOSED");
+    expect(state.labels).toEqual(["status:awaiting-review"]);
+    fail = false;
+    const second = await complete(rt);
+    expect(second.exitCode).toBe(0);
+    expect(second.steps?.map((st) => `${st.step}:${st.status}`)).toEqual(["labels:done"]);
+    expect(state.labels).toEqual([]);
+    expect(posted(state).filter((r) => r?.op === "complete")).toHaveLength(1);
+    expect(kinds(state).filter((k) => k === "issue close")).toHaveLength(1);
+    // Once cleaned up, a further retry is a no-op.
+    const third = await complete(rt);
+    expect(third.ok && third.noop).toBe(true);
+    expect(state.writes).toHaveLength(3);
+  });
+  it("label cleanup is not resumed for a completion record that is no longer effective", async () => {
+    let fail = true;
+    const { rt, state } = github({ ...ready(), failRun: (a) => a[1] === "edit" && fail });
+    await complete(rt);
+    // A later membership-open record makes the completion inert.
+    state.comments.push(post(rec("membership", { membership: "open", reason: "rework claim" })));
+    state.comments.at(-1)!.createdAt = "2026-11-14T14:00:00.000Z";
+    fail = false;
+    await complete(rt);
+    expect(state.labels).toEqual(["status:awaiting-review"]);
+    expect(state.writes.some((w) => w[1] === "edit")).toBe(false);
+  });
+  it("a comment-page failure on the post-record re-read reports the written record, exit 2", async () => {
+    const older = Array.from({ length: 3 }, () => comment("chatter"));
+    const { rt, state } = github({
+      ...ready(),
+      comments: [...older, submitted(member(5))],
+      pageSize: 2,
+      failQuery: (q, s) => q.includes("comments(last:100,before") && s.writes.length > 0,
+    });
+    const result = refused(await complete(rt), "EVIDENCE_INCOMPLETE");
+    expect((result as CompleteResult).exitCode).toBe(2);
+    expect(result.prerequisite).toContain("Completion record written");
+    expect(result.prerequisite).toContain("page read failed");
+    expect((result as CompleteResult).closeSkipped).toBe(
+      "completion record written, close skipped",
+    );
+    expect(kinds(state)).toEqual(["issue comment"]);
+    expect(state.issueState).toBe("OPEN");
   });
   it("S56: an effective completion ends ticket and deliverable responsibility", async () => {
     const { rt, state } = github(ready());

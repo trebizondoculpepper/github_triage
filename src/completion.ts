@@ -855,13 +855,27 @@ export async function planComplete(
       [cmd(`who ${number}`), retry],
     );
 
-  const history = await readDeliveryComments(repository, number, item.comments, rt.query);
-  const { records, fold } = await readDeliveryFold(
-    history.comments,
-    history.complete,
-    { repository, issue: number },
-    rt.trust,
-  );
+  // After this run's record is posted, any failure re-reading the history (an older comment
+  // page, a permission lookup) must still report the written record, never escape as a throw.
+  let history: Awaited<ReturnType<typeof readDeliveryComments>>;
+  let folded: Awaited<ReturnType<typeof readDeliveryFold>>;
+  try {
+    history = await readDeliveryComments(repository, number, item.comments, rt.query);
+    folded = await readDeliveryFold(
+      history.comments,
+      history.complete,
+      { repository, issue: number },
+      rt.trust,
+    );
+  } catch (error) {
+    return refuse(
+      "EVIDENCE_INCOMPLETE",
+      base,
+      `${resume ? `Completion record written (opId ${resume.opId}), close skipped: ` : ""}evidence incomplete: the comment history of #${number} could not be read (${error instanceof Error ? error.message : "unknown error"}); nothing ${resume ? "more is closed or changed" : "is changed"}.`,
+      [retry, inspect],
+    );
+  }
+  const { records, fold } = folded;
   const trusted = records.filter(
     (r): r is ClassifiedRecord & { status: "trusted" } => r.status === "trusted",
   );
@@ -922,6 +936,41 @@ export async function planComplete(
         ...claims.map((h) => cmd(`release ${number} --agent ${h} --as ready --note TEXT`)),
       ],
     );
+
+  // A retry after a close whose label cleanup failed: the durable evidence is an effective
+  // complete record whose recorded plan still has labels present on the closed issue. Finish that
+  // cleanup only; no second record, no close.
+  if (!resume && closed) {
+    const effectiveIds = new Set(effects.filter((e) => e.effective).map((e) => e.comment));
+    const pending = trusted
+      .filter((r) => r.record.op === "complete" && effectiveIds.has(String(r.comment.databaseId)))
+      .map((r) => ({ r, remove: (r.record.plan?.remove ?? []).filter((l) => labels.includes(l)) }))
+      .filter((p) => p.remove.length)
+      .at(-1);
+    if (pending)
+      return {
+        ok: true,
+        noop: false,
+        reason: `Completion recorded (comment ${pending.r.comment.databaseId}) and #${number} is closed; finishing the recorded label cleanup: removing ${pending.remove.join(", ")}.`,
+        facts,
+        opId: pending.r.record.opId,
+        changes: [
+          {
+            step: "labels",
+            command: [
+              "issue",
+              "edit",
+              String(number),
+              "--repo",
+              repository,
+              ...pending.remove.flatMap((l) => ["--remove-label", l]),
+            ],
+          },
+        ],
+        notes,
+        retry,
+      };
+  }
 
   // Step 3 after this run closed the issue: only the recorded label plan remains. Delivery was
   // re-evaluated before the close; it is not re-read again for a label removal.
@@ -1199,11 +1248,29 @@ export async function applyComplete(
   let fresh = true;
   // The record's identity comes only from what this run wrote or found (#263's posted opId).
   let opId = initial.record ? undefined : initial.opId;
-  let closedByRun = false;
+  // A plan that starts with the label step resumes cleanup after an earlier run's close.
+  let closedByRun = initial.changes[0]?.step === "labels";
   let last: CompleteAccepted = initial;
   for (let i = 0; i < 5; i++) {
-    if (!fresh)
-      plan = await planComplete(repository, request, rt, opId ? { opId, closedByRun } : undefined);
+    if (!fresh) {
+      try {
+        plan = await planComplete(
+          repository,
+          request,
+          rt,
+          opId ? { opId, closedByRun } : undefined,
+        );
+      } catch (error) {
+        // A write has happened: report it with the structured partial result, never a bare throw.
+        plan = {
+          ok: false,
+          error: "EVIDENCE_INCOMPLETE",
+          facts: last.facts,
+          prerequisite: `${opId && !closedByRun ? `Completion record written (opId ${opId}), close skipped: ` : ""}evidence incomplete: the re-read after the write failed (${error instanceof Error ? error.message : "unknown error"}).`,
+          recovery: [last.retry, `github-triage --issue ${request.number} --repo ${repository}`],
+        };
+      }
+    }
     fresh = false;
     const done = steps.some((s) => s.status === "done");
     if (!plan.ok) {
