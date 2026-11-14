@@ -169,7 +169,8 @@ export function reportFollowUpFacts(r: PrStatusReport): FollowUpFacts {
     failing: count("failed") + count("cancelled") > 0,
     pending: count("pending") > 0,
     unknownChecks: count("unknown") > 0,
-    verified: r.checks.required?.class === "passed",
+    // As the snapshot rule and prstatus: only a successful verify, never SKIPPED or NEUTRAL.
+    verified: workflow.verifySuccess.includes(r.checks.required?.outcome ?? ""),
     changesRequested: workflow.changesRequested.includes(r.pullRequest.reviewDecision ?? ""),
     unresolvedThreads: r.threads.unresolved.length + r.threads.omitted > 0,
     mergeable: r.pullRequest.mergeable,
@@ -252,8 +253,9 @@ export function deliveryView(
   warnings: string[] = [],
 ): DeliveryView {
   const known = d.fold === "known";
+  const legacyUnknown = d.fold === "known" && !d.trustedRecord && d.legacy?.status === "unknown";
   const delivery: DeliveryView["delivery"] =
-    d.fold !== "known" || (!d.trustedRecord && d.legacy?.status === "unknown")
+    d.fold !== "known" || legacyUnknown
       ? "unknown"
       : !d.trustedRecord && d.legacy?.status === "trusted"
         ? "legacy"
@@ -263,7 +265,7 @@ export function deliveryView(
   const because =
     d.fold !== "known"
       ? d.unknownBecause
-      : delivery === "unknown"
+      : legacyUnknown
         ? [
             "a legacy v1 done handoff exists but its author's authority could not be verified",
             ...(d.legacy?.unverified ?? []),

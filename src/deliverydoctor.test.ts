@@ -934,6 +934,20 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
     expect(t.deliverables.every((m) => m.responsible === "alice")).toBe(true);
   });
 
+  it("unknown delivery evidence keeps the evaluator's reasons", async () => {
+    const r = await read([issue(75, ["bug"], [submitted(75, [94])])], [], {});
+    expect(r.tickets[0].delivery).toBe("unknown");
+    expect(r.tickets[0].because.join(" ")).toContain("could not be read");
+    expect(r.tickets[0].because.join(" ")).not.toContain("legacy");
+    const c = await read(
+      [issue(76, ["bug"], [submitted(76, [95])])],
+      [],
+      { 95: { merged: "m95" } },
+      {},
+    );
+    expect(c.tickets[0].because.join(" ")).toContain("inconclusive");
+  });
+
   it("an unverifiable legacy release is unknown delivery, with its diagnostics", async () => {
     const legacy = await release("alice", { pr: prLink(9) });
     const r = await read(
@@ -1216,7 +1230,7 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
         reviewDecision: "REVIEW_REQUIRED",
       },
       checks: {
-        required: { class: "passed" },
+        required: { class: "passed", outcome: "SUCCESS" },
         counts: { passed: 1, pending: 0, cancelled: 0, failed: 0, unknown: 0 },
       },
       threads: { unresolved: [], omitted: 0 },
@@ -1228,6 +1242,17 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
       "waiting",
       "awaiting current-head review",
     ]);
+    // A SKIPPED or NEUTRAL verify is "passed" by class but is not a successful verify.
+    for (const outcome of ["SKIPPED", "NEUTRAL"]) {
+      const skipped = {
+        ...report,
+        checks: { ...report.checks, required: { class: "passed", outcome } },
+        receipts: [],
+        reviews: [{ state: "APPROVED", reviewedCommit: "h1" }],
+        pullRequest: { ...report.pullRequest, mergeState: "CLEAN" },
+      } as unknown as PrStatusReport;
+      expect(classifyFollowUp(reportFollowUpFacts(skipped))[0]).toBe("unknown");
+    }
     const codex = {
       ...report,
       receipts: [
