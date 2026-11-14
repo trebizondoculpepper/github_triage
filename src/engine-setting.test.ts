@@ -1,3 +1,6 @@
+import { Client } from "@modelcontextprotocol/client";
+import { InMemoryTransport } from "@modelcontextprotocol/server";
+import { createServer, envelope } from "./mcp.js";
 import { describe, it, expect } from "vite-plus/test";
 import { parseConfig, settingFor } from "./config.js";
 import { resolveEngineSetting } from "./engine-setting.js";
@@ -188,5 +191,45 @@ it("preserves config repair guidance instead of an unusable rollback", async () 
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).not.toContain("Roll back:");
     expect((error as Error).message).toContain("configuration");
+  }
+});
+
+it("returns sanitized MCP configuration repair guidance without an unusable rollback", async () => {
+  const broken = local('schemaVersion = 1\n[briefing]\nengine = "invalid"\n');
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  const server = createServer(
+    { repo: snapshot.repository, project: SYNTHETIC_ROOT },
+    {
+      collect: async () => snapshot,
+      currentRepository: async () => snapshot.repository,
+      dependencyReport,
+      guide: broken,
+      estimation: broken,
+      fs: broken.fs,
+      git: broken.git,
+      env: {},
+    },
+  );
+  await server.connect(serverSide);
+  const client = new Client({ name: "config-recovery-regression", version: "1" });
+  await client.connect(clientSide);
+  try {
+    const raw = await client.callTool({
+      name: "triage_briefing",
+      arguments: { agent: "tester", role: "implementer" },
+    });
+    const result = envelope.parse(raw.structuredContent);
+    expect(raw.isError).toBe(true);
+    expect(result.status).toBe("error");
+    expect(result.result).toBeNull();
+    expect(result.error?.code).toBe("decision-engine-config");
+    const rendered = JSON.stringify(raw);
+    expect(rendered).toContain("repair guidance");
+    expect(rendered.toLowerCase()).not.toContain("rollback");
+    expect(rendered).not.toContain("config set briefing.engine typescript");
+    expect(rendered).not.toContain(SYNTHETIC_ROOT);
+  } finally {
+    await client.close();
+    await server.close();
   }
 });
