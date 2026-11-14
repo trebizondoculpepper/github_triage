@@ -68,6 +68,9 @@ export const workflow = {
   conflicts: ["CONFLICTING"],
   mergeable: ["MERGEABLE"],
   currentMergeStates: ["CLEAN", "HAS_HOOKS", "UNSTABLE"],
+  /** Merge states of an accepted PR that need a refresh or branch update, not waiting (#182 S9). */
+  refreshMergeStates: ["BEHIND", "UNKNOWN"],
+  unknownMergeable: ["UNKNOWN"],
 };
 /** The labelled part of an issue or pull request. */
 export type Labelled = Pick<Issue, "labels">;
@@ -484,6 +487,33 @@ analysisRules.set("pull-requests", ({ snapshot, prs }) =>
       !workflow.changesRequested.includes(pr.reviewDecision ?? "") &&
       workflow.currentMergeStates.includes(pr.mergeStateStatus) &&
       !pr.isDraft;
+    // Accepted on the current head but mergeability is UNKNOWN or the branch is BEHIND: refreshing
+    // or updating it is delivery follow-up, never a wait and never merge authorization (#182 S9).
+    const accepted =
+      verified &&
+      complete &&
+      !failed.length &&
+      !pending.length &&
+      !unknown.length &&
+      !unresolved.length &&
+      !workflow.changesRequested.includes(pr.reviewDecision ?? "") &&
+      !workflow.conflicts.includes(pr.mergeable) &&
+      !pr.isDraft;
+    if (
+      accepted &&
+      (workflow.unknownMergeable.includes(pr.mergeable) ||
+        workflow.refreshMergeStates.includes(pr.mergeStateStatus))
+    )
+      findings.push(
+        action(
+          "pr-integrate",
+          pr,
+          75,
+          `Accepted at the current head (verify passed, no fetched findings) but merge state is ${pr.mergeStateStatus}, mergeable ${pr.mergeable}.`,
+          "Refresh mergeability or update the branch, then recheck the new head before considering merge. This is not approval.",
+          "candidate",
+        ),
+      );
     if (clean)
       findings.push(
         action(
@@ -539,6 +569,11 @@ export interface BriefingOptions {
   estimate?: boolean;
   /** Shared paired facts per open issue (#247); absent means not read (subjects show null). */
   assessments?: ReadonlyMap<string, SubjectAssessments>;
+  /**
+   * Trusted delivery responsibility per pull request URL (#182 over #190 records). Additive to
+   * `agent:` linkage for own follow-up; absent means not read, never "nobody responsible".
+   */
+  responsible?: ReadonlyMap<string, string>;
 }
 /** A bounded list: the first `limit` items plus how many were left out. */
 export interface Bounded<T> {

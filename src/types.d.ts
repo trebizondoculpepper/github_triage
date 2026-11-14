@@ -5,6 +5,8 @@ export type Page<T> = {
   totalCount?: number;
 };
 export type Comment = {
+  /** Stable numeric id; orders delivery records (#182). Absent from older caches: order unknown. */
+  databaseId?: number;
   body: string;
   url: string;
   /** `__typename` and the edit fields (#247) are absent from older caches: authority unknown. */

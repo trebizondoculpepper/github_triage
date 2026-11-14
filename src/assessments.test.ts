@@ -173,7 +173,7 @@ describe("collection supplies the provenance trust evidence (#247)", () => {
     const snapshot = await collector(fixture, sources)(repo);
     const issues = sources.find((s) => s.includes("issues(first"));
     expect(issues).toContain(
-      "comments(first:100){nodes{body url author{__typename login} createdAt updatedAt lastEditedAt includesCreatedEdit editor{__typename login}}",
+      "comments(first:100){nodes{databaseId body url author{__typename login} createdAt updatedAt lastEditedAt includesCreatedEdit editor{__typename login}}",
     );
     // The same issues and pull-requests queries as before: two requests for one page each.
     expect(sources).toHaveLength(2);

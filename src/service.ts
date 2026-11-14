@@ -10,6 +10,7 @@ import type { EngineSetting, DecisionEngineMetadata } from "./engine-setting.js"
 import { collect, IssueUnavailable, permissionLookup } from "./github.js";
 import type { IssueDiagnosis, Rest } from "./github.js";
 import { markerTrust } from "./delivery.js";
+import { readSnapshotResponsibility } from "./responsibility.js";
 import type { TrustDecision } from "./delivery.js";
 import { impactMetric } from "./metrics.js";
 import { dependencyReport, dependencyText } from "./dependencies.js";
@@ -83,6 +84,9 @@ export async function presentBriefing(
     platform: options.platform,
     signal,
   });
+  // Trusted delivery responsibility (#182 over #190 records) from the comments already collected.
+  const responsibility = await readSnapshotResponsibility(snapshot, trust, signal);
+  options = { ...options, responsible: responsibility.responsible };
   let experimental:
     | Awaited<ReturnType<(typeof import("./datalog.js"))["evaluateDatalog"]>>
     | undefined;
@@ -106,6 +110,8 @@ export async function presentBriefing(
         agent: options.agent,
         platform: options.platform,
         order: options.order,
+        responsible: responsibility.responsible,
+        responsibilityUnknown: responsibility.unknown.map((u) => u.issue),
         limit: Number.MAX_SAFE_INTEGER,
         signal,
       });

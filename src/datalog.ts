@@ -32,6 +32,13 @@ export interface DatalogOptions {
   agent?: string;
   platform?: string;
   order?: PickupOrder;
+  /**
+   * Trusted delivery responsibility per deliverable URL (#190 records, read by #182). Additive to
+   * `agent:` linkage; a deliverable absent here has no proven responsibility, never "nobody".
+   */
+  responsible?: ReadonlyMap<string, string>;
+  /** Issues whose delivery records could not be folded; reported, never treated as absence. */
+  responsibilityUnknown?: readonly string[];
   limit: number;
   signal?: AbortSignal;
   now?: () => number;
@@ -167,6 +174,8 @@ function normalize(
     }
     for (const p of s.closedByPullRequestsReferences?.nodes ?? [])
       if (p.state === "OPEN") put(id, "closing", ids.get(p.url) ?? nextId++);
+    const responsible = options.responsible?.get(s.url);
+    if (responsible) put(id, "responsible", responsible);
     if (pr) {
       const rollup = pr.commits.nodes[0]?.commit.statusCheckRollup;
       for (const [k, v] of Object.entries({
@@ -402,8 +411,14 @@ export function evaluateDatalog(
       rulesHash,
       coverage: { subjects: objects.size, datoms: facts.length },
       denials,
-      diagnostics:
-        elapsed > 2000 ? [`evaluation exceeded soft 2000ms budget (${Math.round(elapsed)}ms)`] : [],
+      diagnostics: [
+        ...(elapsed > 2000
+          ? [`evaluation exceeded soft 2000ms budget (${Math.round(elapsed)}ms)`]
+          : []),
+        ...(options.responsibilityUnknown ?? []).map(
+          (issue) => `delivery responsibility unknown for ${issue}; agent: labels only`,
+        ),
+      ],
     },
   };
 }
