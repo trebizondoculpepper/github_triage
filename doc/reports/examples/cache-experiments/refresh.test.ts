@@ -7,6 +7,8 @@ import {
   manifestOf,
   baselineWorld,
   runScenarios,
+  restResourceFor,
+  SCENARIOS,
   RECONCILE_MINUTES,
   warmRefresh,
   type ManifestEntry,
@@ -141,6 +143,27 @@ describe("conditional refresh experiment (#202)", () => {
     const inside = baselineWorld();
     inside.now += RECONCILE_MINUTES - 1;
     expect(warmRefresh("manifest+live", previous, inside).reconciliations).toBe(0);
+  });
+
+  it("charges the conditional strategy for inventory discovery", () => {
+    const [r0] = runScenarios(SCENARIOS.filter((x) => x.id === "R0"));
+    const [r15] = runScenarios(SCENARIOS.filter((x) => x.id === "R15"));
+    // R0: the inventory page revalidates (304, free); R15: it returns 200 and costs a point.
+    expect(r0!.results.conditional.notModified).toBeGreaterThan(
+      r15!.results.conditional.notModified,
+    );
+    expect(r15!.results.conditional.corePoints).toBe(1 + 4); // inventory + 4 new-issue resources
+    expect(r15!.results.conditional.restRequests).toBe(r0!.results.conditional.restRequests + 4);
+    expect(r15!.results.conditional.missedChanges).toBe(0);
+  });
+
+  it("refreshes a PR head through the pull resource", () => {
+    expect(restResourceFor("core", "pr")).toBe("pull");
+    expect(restResourceFor("core", "issue")).toBe("issue");
+    const [r4] = runScenarios(SCENARIOS.filter((x) => x.id === "R4"));
+    // inventory + pull (head) + check-runs change; the issue resource is never read for a PR.
+    expect(r4!.results.conditional.corePoints).toBe(3);
+    expect(r4!.results.conditional.missedChanges).toBe(0);
   });
 
   it("reuses a 304 only for the exact stored resource, validator and context", () => {

@@ -119,6 +119,8 @@ export class Live {
   constructor(
     readonly gh: Gh,
     readonly limits: Limits = CONTRACT_LIMITS,
+    /** Every request names this host explicitly, so GH_HOST cannot silently redirect it. */
+    readonly host = "github.com",
   ) {}
   /** Throws LiveStop when this source or the run has no budget left; checked before sending. */
   reserve(source: string): void {
@@ -138,7 +140,7 @@ export class Live {
     this.requests[resource]++;
     this.bySource[source] = (this.bySource[source] ?? 0) + 1;
     const t0 = performance.now();
-    const raw = await this.gh(["api", "-i", ...args]);
+    const raw = await this.gh(["api", "--hostname", this.host, "-i", ...args]);
     const ms = Math.round(performance.now() - t0);
     const out = classifyGh(raw);
     const header = (h: string) => headerOf(raw.stdout, h);
@@ -298,6 +300,45 @@ export function manifestStatus(read: ManifestRead): Record<string, unknown> {
   };
 }
 
+/** Restore saved state only if it is for this exact context and has the expected shape. */
+export function validState(x: unknown, contextKey: string): LiveState | undefined {
+  if (!x || typeof x !== "object") return undefined;
+  const st = x as Record<string, unknown>;
+  if (st.contextKey !== contextKey) return undefined;
+  if (!st.resources || typeof st.resources !== "object" || Array.isArray(st.resources))
+    return undefined;
+  for (const v of Object.values(st.resources as Record<string, unknown>)) {
+    const res = v as Partial<StoredResource> | null;
+    if (
+      !res ||
+      res.contextKey !== contextKey ||
+      typeof res.etag !== "string" ||
+      typeof res.body !== "string" ||
+      (res.coverage !== undefined && res.coverage !== "complete" && res.coverage !== "first-page")
+    )
+      return undefined;
+  }
+  if (st.manifest !== undefined) {
+    const m = st.manifest as Partial<Manifest> | null;
+    if (
+      !m ||
+      m.coverage !== "complete" ||
+      typeof m.observedAt !== "number" ||
+      !Array.isArray(m.entries) ||
+      !m.entries.every(
+        (e) =>
+          e &&
+          typeof e.key === "string" &&
+          typeof e.state === "string" &&
+          typeof e.updatedAt === "number" &&
+          (e.headOid === undefined || e.headOid === null || typeof e.headOid === "string"),
+      )
+    )
+      return undefined;
+  }
+  return st as unknown as LiveState;
+}
+
 /** Run one optional section; a budget or rate-limit stop is recorded, never a crash. */
 async function section(
   skipped: Record<string, string>,
@@ -326,11 +367,14 @@ export async function liveRun(
   if (!repo || !statePath) throw new Error("--live requires --repo OWNER/NAME and --state PATH");
   const [owner, name] = repo.split("/") as [string, string];
   const probe = argv.includes("--probe");
-  const live = new Live(gh, limits);
+  // Bind requests and the context key to one explicit host; default is GH_HOST or github.com.
+  const host = opt("--hostname") ?? process.env.GH_HOST ?? "github.com";
+  const live = new Live(gh, limits, host);
   const report: Record<string, unknown> = {
     repo,
     observedAt: new Date().toISOString(),
     ghLogin: "(omitted)",
+    host,
   };
   const skipped: Record<string, string> = {};
   report.skipped = skipped;
@@ -351,7 +395,7 @@ export async function liveRun(
     report.error = "authenticated login unknown; no reuse without a known context";
     return finish();
   }
-  const contextKey = `github.com|${repo}|${login}|refresh-v1`;
+  const contextKey = `${host}|${repo}|${login}|refresh-v1`;
   // A corrupt or foreign state file is a cache miss with a diagnostic, never a crash or reuse.
   let prior: Partial<LiveState> | undefined;
   try {
@@ -359,10 +403,10 @@ export async function liveRun(
   } catch {
     report.stateDiagnostic = "unreadable state file ignored";
   }
-  const state: LiveState =
-    prior?.contextKey === contextKey && prior.resources && typeof prior.resources === "object"
-      ? (prior as LiveState)
-      : { contextKey, resources: {} };
+  const restored = prior === undefined ? undefined : validState(prior, contextKey);
+  if (prior !== undefined && !restored && !report.stateDiagnostic)
+    report.stateDiagnostic = "state for another context or of an invalid shape ignored";
+  const state: LiveState = restored ?? { contextKey, resources: {} };
   report.run = state.manifest ? "warm" : "cold";
 
   const read = await readManifest(live, owner, name, state.manifest);
@@ -407,12 +451,20 @@ export async function liveRun(
         "rest",
       );
       const r = applyConditional(stored, contextKey, stored?.etag, call.out);
-      // One page only: a resource with more pages is partial evidence, whatever the validator says.
-      const partial =
-        call.out.kind === "ok" && hasNextLink(call.raw.stdout) ? " (first page only)" : "";
+      // One page only: a resource with more pages is partial evidence, whatever the validator
+      // says. Coverage is stored with the payload, so a later 304 keeps the omission notice.
+      const coverage =
+        r.kind === "fresh"
+          ? hasNextLink(call.raw.stdout)
+            ? "first-page"
+            : "complete"
+          : r.kind === "validated"
+            ? (stored?.coverage ?? "first-page") // unknown coverage is not complete
+            : undefined;
+      const partial = coverage === "first-page" ? " (first page only)" : "";
       outcomes[label] = (r.kind === "miss" ? `miss: ${r.reason}` : r.kind) + partial;
       if (r.kind === "fresh" && r.etag)
-        state.resources[path] = { contextKey, etag: r.etag, body: r.body };
+        state.resources[path] = { contextKey, etag: r.etag, body: r.body, coverage };
       if (call.out.kind === "ok" && call.out.lastModified)
         lastModified[label] = call.out.lastModified;
     }

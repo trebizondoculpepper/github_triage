@@ -73,8 +73,19 @@ export const FACT_BYTES: Record<FactKind, number> = {
 };
 const MANIFEST_ENTRY_BYTES = { issue: 70, pr: 125 } as const;
 const HEADERS_ONLY_BYTES = 1200;
+/** Per-item size of the REST issue list, from the live 100-item page (604 KB). */
+const INVENTORY_ITEM_BYTES = 6000;
 
 /** The REST resource that carries each fact; threads and mergeability have no REST validator. */
+/**
+ * The REST resource that carries a fact for a given subject. A PR's core facts, state and head
+ * come from the pull resource; the issue resource does not return the head.
+ */
+export function restResourceFor(f: FactKind, kind: Subject["kind"]): string | undefined {
+  const r = REST_RESOURCE[f];
+  return r === "issue" && kind === "pr" ? "pull" : r;
+}
+
 export const REST_RESOURCE: Record<FactKind, string | undefined> = {
   core: "issue",
   assignees: "issue",
@@ -246,6 +257,8 @@ export interface StoredResource {
   contextKey: string;
   etag: string;
   body: string;
+  /** "first-page" when the stored body was one page of a longer list; kept across 304s. */
+  coverage?: "complete" | "first-page";
 }
 export type Revalidation =
   | { kind: "validated"; body: string }
@@ -469,6 +482,21 @@ export function warmRefresh(
       // One REST request per (subject, resource); 304 when the resource is unchanged. Threads
       // and mergeability have no REST validator, so open PRs read them live by GraphQL.
       view = new Map();
+      // Inventory discovery: a conditional read of the REST issue list (which includes PRs),
+      // 100 per page. It returns 200 when any subject was added, removed or updated, else 304.
+      // Subjects not in the cache are only known through this read.
+      const inventoryPages = Math.max(1, chunks(next.subjects.length, GRAPHQL_MANIFEST_PAGE));
+      const inventory = diffManifest(manifestOf(previous), manifestOf(next));
+      const inventoryChanged =
+        inventory.added.length + inventory.changed.length + inventory.removed.length > 0;
+      c.restRequests += inventoryPages;
+      if (inventoryChanged) {
+        c.corePoints += inventoryPages;
+        c.bytes += next.subjects.length * INVENTORY_ITEM_BYTES;
+      } else {
+        c.notModified += inventoryPages;
+        c.bytes += inventoryPages * HEADERS_ONLY_BYTES;
+      }
       const openPrs = next.subjects.filter((s) => s.kind === "pr" && s.state === "OPEN");
       if (openPrs.length) {
         const pages = chunks(openPrs.length, GRAPHQL_FULL_PAGE);
@@ -480,7 +508,7 @@ export function warmRefresh(
         const copy = structuredClone(old ?? s);
         const resources = new Map<string, FactKind[]>();
         for (const f of factsOf(s)) {
-          const r = REST_RESOURCE[f];
+          const r = restResourceFor(f, s.kind);
           if (!r) {
             if (s.state === "OPEN" || !old) {
               copy.facts[f] = s.facts[f];
@@ -493,13 +521,15 @@ export function warmRefresh(
         }
         for (const [resource, facts] of resources) {
           c.restRequests++;
-          // The issue/pull resource also carries state and the PR head.
+          // The issue resource carries state; the pull resource carries state and the PR head.
           const meta =
-            resource === "issue" && (old?.state !== s.state || old?.headOid !== s.headOid);
+            (resource === "issue" && old?.state !== s.state) ||
+            (resource === "pull" && (old?.state !== s.state || old?.headOid !== s.headOid));
           const changed = !old || meta || facts.some((f) => old.facts[f] !== s.facts[f]);
           if (changed) {
             c.corePoints++;
-            if (resource === "issue") Object.assign(copy, { state: s.state, headOid: s.headOid });
+            if (resource === "issue") copy.state = s.state;
+            if (resource === "pull") Object.assign(copy, { state: s.state, headOid: s.headOid });
             for (const f of facts) {
               copy.facts[f] = s.facts[f];
               c.bytes += FACT_BYTES[f];

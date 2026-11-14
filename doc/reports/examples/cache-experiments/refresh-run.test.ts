@@ -8,6 +8,7 @@ import {
   liveRun,
   manifestStatus,
   readManifest,
+  validState,
   type Limits,
 } from "./refresh-run.js";
 import type { GhResult, Manifest } from "./refresh.js";
@@ -147,6 +148,12 @@ function fakeGitHub(log: string[], rateLimitAt?: string) {
           'HTTP/2.0 403 Forbidden\nRetry-After: 60\nX-Ratelimit-Remaining: 4000\n\n{"message":"secondary rate limit"}',
       };
     if (a.endsWith(" user")) return ok({ login: "someone" });
+    if (a.includes("If-None-Match") && !a.includes("graphql"))
+      return {
+        exitCode: 1,
+        stderr: "gh: HTTP 304",
+        stdout: 'HTTP/2.0 304 Not Modified\nEtag: W/"e"\n\n',
+      };
     if (a.includes("issues(")) return page("issues", [1, 2], true, 150);
     if (a.includes("pullRequests(")) return page("pullRequests", [7], true, 150);
     if (a.includes("viewer")) return ok({ data: { viewer: { login: "someone" } } });
@@ -218,6 +225,51 @@ describe("live run budget (#202)", () => {
     writeFileSync(state, "{not json");
     const report = await liveRun(fakeGitHub([]), args(state));
     expect(report).toMatchObject({ run: "cold", stateDiagnostic: "unreadable state file ignored" });
+  });
+
+  it("keeps first-page-only coverage when a later read of the resource is a 304", async () => {
+    const state = tempState();
+    await liveRun(fakeGitHub([]), args(state));
+    const warm = await liveRun(fakeGitHub([]), args(state));
+    const outcomes = warm.conditional as Record<string, string>;
+    expect(outcomes.comments).toBe("validated (first page only)");
+    expect(outcomes.blocked_by).toBe("validated");
+  });
+
+  it("binds requests and the saved context to the host", async () => {
+    const state = tempState();
+    const log: string[] = [];
+    await liveRun(fakeGitHub(log), args(state));
+    expect(log.every((a) => a.startsWith("api --hostname github.com -i"))).toBe(true);
+    const other: string[] = [];
+    const report = await liveRun(fakeGitHub(other), [...args(state), "--hostname", "ghe.example"]);
+    expect(other.every((a) => a.startsWith("api --hostname ghe.example -i"))).toBe(true);
+    expect(report).toMatchObject({
+      run: "cold",
+      host: "ghe.example",
+      stateDiagnostic: "state for another context or of an invalid shape ignored",
+    });
+    // No validator saved for github.com is sent to the other host (the GraphQL probe sends its own).
+    expect(other.some((a) => a.includes("If-None-Match") && !a.includes("graphql"))).toBe(false);
+  });
+
+  it("treats a well-formed JSON state of the wrong shape as a miss", async () => {
+    const state = tempState();
+    writeFileSync(
+      state,
+      JSON.stringify({
+        contextKey: "github.com|o/n|someone|refresh-v1",
+        resources: {},
+        manifest: { coverage: "complete", observedAt: 1, entries: null },
+      }),
+    );
+    const report = await liveRun(fakeGitHub([]), args(state));
+    expect(report).toMatchObject({ run: "cold" });
+    expect(validState({ contextKey: "k", resources: { p: { etag: 1 } } }, "k")).toBeUndefined();
+    expect(validState({ contextKey: "k", resources: {} }, "k")).toEqual({
+      contextKey: "k",
+      resources: {},
+    });
   });
 
   it("does not reuse anything when the login is unknown", async () => {
