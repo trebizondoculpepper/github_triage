@@ -504,6 +504,37 @@ describe("estimate --metric impact records and revises (#245)", () => {
       expect(t.kinds()).toEqual(["addComment"]);
     }
   });
+  it("stops at newer provenance of unknown authority instead of accepting an older trusted record", async () => {
+    const stranger = { __typename: "User", login: "stranger" } as const;
+    const older = comment(provenanceComment(impactRecord()));
+    const newer = comment(provenanceComment(impactRecord()), stranger);
+    const reading = await readAssessment(
+      impactMetric,
+      {
+        labels: {
+          nodes: [{ name: "impact:L" }],
+          pageInfo: { hasNextPage: false, endCursor: null },
+        },
+        comments: { nodes: [older, newer], pageInfo: {} },
+      },
+      { trust },
+    );
+    expect(reading.state).toBe("unknown");
+    const t = harness({ labels: ["impact:L"], comments: [older, newer] });
+    expect(await t.call(...impactArgs, "--json")).toBe(0);
+    expect(t.json().status).toBe("recorded");
+    expect(t.kinds()).toEqual(["addComment"]);
+    // A confirmed-untrusted newer marker is skipped: the older trusted record still matches.
+    const skipped = harness({
+      labels: ["impact:L"],
+      comments: [
+        older,
+        comment(provenanceComment(impactRecord()), { __typename: "User", login: "bot" }),
+      ],
+    });
+    expect(await skipped.call(...impactArgs, "--json")).toBe(0);
+    expect(skipped.json().status).toBe("unchanged");
+  });
   it("refuses a stale --replace guard", async () => {
     const t = harness({ labels: ["impact:M"] });
     expect(await t.call(...impactArgs, "--replace", "S", "--json")).toBe(1);

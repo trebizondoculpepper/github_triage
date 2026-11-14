@@ -16,7 +16,7 @@ import type { ComplexitySize } from "./complexity.js";
 import type { Comment } from "./claims.js";
 import { classifyMetricLabels } from "./complexitylabels.js";
 import type { TrustDecision } from "./delivery.js";
-import { parseMetricProvenance } from "./estimate.js";
+import { scanProvenance } from "./estimate.js";
 import type { MetricDescriptor } from "./metrics.js";
 import type { Issue } from "./types.js";
 
@@ -73,23 +73,12 @@ export async function readAssessment(
   if (!c.size) return none("unassessed", [`no ${d.metric} size label`]);
   const size = c.size;
 
-  const reasons: string[] = [];
-  let record: {
-    provenance: NonNullable<ReturnType<typeof parseMetricProvenance>>;
-    url: string | null;
-  } | null = null;
-  for (const comment of [...issue.comments.nodes].reverse()) {
-    const parsed = parseMetricProvenance(d, comment.body);
-    if (!parsed) continue;
-    const authority = await trust(comment);
-    if (authority.status === "trusted") {
-      record = { provenance: parsed, url: comment.url ?? null };
-      break;
-    }
-    if (authority.status === "unknown")
-      return none("unknown", [`provenance authority unknown (${authority.why})`]);
-    reasons.push(`untrusted provenance ignored (${authority.why})`);
-  }
+  const scan = await scanProvenance(d, issue.comments.nodes, trust);
+  if (scan.status === "unknown")
+    return none("unknown", [...scan.ignored, `provenance authority unknown (${scan.why})`]);
+  const reasons = scan.ignored;
+  const record =
+    scan.status === "trusted" ? { provenance: scan.provenance, url: scan.node.url ?? null } : null;
   // Newer comments are missing: a replacement or unverifiable record may be among them, so
   // neither the selected provenance nor its state is established, even when one was found.
   if (issue.comments.pageInfo.hasNextPage)

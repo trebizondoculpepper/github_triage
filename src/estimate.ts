@@ -305,23 +305,48 @@ const unknownProvenance = (number: number, why: string) =>
     "Retry the same command; missing comment history is never treated as no provenance.",
   );
 
+/** Result of scanning comments newest-first for the newest relevant provenance marker. */
+export type ProvenanceScan<N> =
+  | {
+      readonly status: "trusted";
+      readonly provenance: MetricProvenance;
+      readonly node: N;
+      readonly ignored: string[];
+    }
+  | { readonly status: "unknown"; readonly why: string; readonly ignored: string[] }
+  | { readonly status: "none"; readonly ignored: string[] };
+
 /**
- * Newest valid marker among comment nodes (oldest-first order), or null. With a trust decision
- * (impact), a marker counts only when its author and any editor are trusted; untrusted and
- * unverifiable markers are skipped, so they never make a retry look already recorded.
+ * The newest relevant provenance among comment nodes (oldest-first order), shared by the writer
+ * and the trusted-provenance reader so they cannot diverge (#245). With a trust decision
+ * (impact), a confirmed-untrusted marker is skipped (noted in `ignored`) and the search goes on;
+ * a marker whose author or editor authority is unknown stops the search as `unknown`, so an older
+ * trusted record is never accepted behind it. Without a trust decision (complexity, #269) the
+ * newest valid marker is taken as before.
  */
-async function newestMarker(
+export async function scanProvenance<N>(
   d: MetricDescriptor,
-  nodes: unknown,
+  nodes: readonly N[],
   trust: TrustDecision | undefined,
-): Promise<MetricProvenance | null> {
-  for (const node of [...(Array.isArray(nodes) ? nodes : [])].reverse()) {
-    const parsed = parseMetricProvenance(d, text(prop(node, "body")));
-    if (!parsed) continue;
-    if (!trust || (await trust(node as Comment)).status === "trusted") return parsed;
+): Promise<ProvenanceScan<N>> {
+  const ignored: string[] = [];
+  for (const node of [...nodes].reverse()) {
+    const provenance = parseMetricProvenance(d, text(prop(node, "body")));
+    if (!provenance) continue;
+    const authority = trust
+      ? await trust(node as unknown as Comment)
+      : { status: "trusted" as const };
+    if (authority.status === "trusted") return { status: "trusted", provenance, node, ignored };
+    if (authority.status === "unknown") return { status: "unknown", why: authority.why, ignored };
+    ignored.push(`untrusted provenance ignored (${authority.why})`);
   }
-  return null;
+  return { status: "none", ignored };
 }
+
+const nodesOf = (comments: unknown): unknown[] => {
+  const nodes = prop(comments, "nodes");
+  return Array.isArray(nodes) ? nodes : [];
+};
 
 /** Cursor for older comments, or null when history is exhausted; throws when unreadable. */
 function olderCursor(comments: unknown, number: number): string | null {
@@ -525,13 +550,13 @@ export async function runEstimate(
     const read = async (): Promise<IssueState> => {
       const answer = await safely(api.query(issueQuery(number, d), vars));
       const { comments: firstPage, ...first } = readIssue(answer, number, size, replaceInvalid, d);
-      let state: IssueState = {
-        ...first,
-        provenance: await newestMarker(d, prop(firstPage, "nodes"), trust),
-      };
-      let cursor = state.provenance ? null : olderCursor(firstPage, number);
+      // Paging stops at the first relevant marker: trusted (recorded) or unknown authority. An
+      // unknown marker leaves `provenance` null, so it never matches and fresh provenance is
+      // recorded, exactly where readAssessment reports `unknown` (doc/design/impact-estimation.md).
+      let scan = await scanProvenance(d, nodesOf(firstPage), trust);
+      let cursor = scan.status === "none" ? olderCursor(firstPage, number) : null;
       let pages = 0;
-      while (!state.provenance && cursor !== null) {
+      while (scan.status === "none" && cursor !== null) {
         if (pages >= MAX_COMMENT_PAGES)
           throw unknownProvenance(number, `more than ${MAX_COMMENT_PAGES + 1} pages of comments`);
         pages += 1;
@@ -541,11 +566,14 @@ export async function runEstimate(
         if (page.errors.length)
           throw unknownProvenance(number, denied(page) ?? "GitHub returned errors");
         const comments = prop(page.data, "repository", "issue", "comments");
-        const provenance = await newestMarker(d, prop(comments, "nodes"), trust);
+        scan = await scanProvenance(d, nodesOf(comments), trust);
         const next = olderCursor(comments, number);
-        state = { ...state, provenance };
-        cursor = provenance ? null : next;
+        cursor = scan.status === "none" ? next : null;
       }
+      const state: IssueState = {
+        ...first,
+        provenance: scan.status === "trusted" ? scan.provenance : null,
+      };
       return state;
     };
     const onlyTarget = (sizes: readonly ComplexitySize[]) =>
