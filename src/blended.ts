@@ -10,8 +10,9 @@
  * otherwise incomparable pair, is ordinary work. Missing evidence is unknown, never a default.
  * No collection, no weighted score and no network lookup happen here.
  *
- * The additive `rankedActions` object is new; the legacy `actions` and `role.next` projections
- * are not derived from it (#259). The designer NEXT STEPS text renders it since #246.
+ * The additive `rankedActions` object is authoritative: since #259 the legacy `actions` and
+ * `role.next` of both blended roles are its first-occurrence target projection, and both roles'
+ * NEXT STEPS text renders it (designer since #246).
  */
 import type { AssessmentState, MetricView, SubjectAssessments } from "./assessments.js";
 import type { ComplexitySize } from "./complexity.js";
@@ -350,12 +351,10 @@ export function roleCandidates(input: CandidateInput): ActionFacts[] {
       implement: otherClaims.length ? handoff : claim,
       "estimate-complexity": estimate("complexity"),
       "assess-impact": estimate("impact"),
-      // Designer inspection of known bad impact evidence carries the Ticket Doctor fix (#246,
-      // doc/design/impact-estimation.md "The unassessed-work queue"): the judged size replaces
-      // the conflicting labels, or removes the invalid ones. The implementer's complexity
-      // inspection stays command-free here; #259 owns that view.
-      "inspect-assessment":
-        metric === "impact" ? estimate("impact", a.impact.state === "invalid") : null,
+      // Inspection of known bad evidence carries the Ticket Doctor fix for the role's metric
+      // (designer impact #246, implementer complexity #259): the judged size replaces the
+      // conflicting labels, or removes the invalid ones with --replace-invalid.
+      "inspect-assessment": estimate(metric, a[metric].state === "invalid"),
       inspect: null,
     };
     const next = kind in command ? (command[kind] ?? null) : detail;
