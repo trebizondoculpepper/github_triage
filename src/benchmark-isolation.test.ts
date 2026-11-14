@@ -8,7 +8,7 @@ import {
   SYNTHETIC_ROOT,
 } from "../scripts/benchmark-isolation.js";
 import { resolveGuideSetting } from "./process.js";
-import { collectLabelEstimationInput } from "./complexitylabels.js";
+import { collectLabelEstimationInput } from "./estimation/complexitylabels.js";
 
 describe("benchmark isolation (scripts/mcp-benchmark.ts)", () => {
   it("forbids subprocesses, including through ESM named imports, and restores them", () => {

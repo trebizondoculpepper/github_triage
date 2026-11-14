@@ -64,9 +64,9 @@ import {
   policyVersion,
 } from "./process.js";
 import { closingPrEvidence, pickupEligibility, pickupPolicy } from "./ranking.js";
-import { complexityGuidance } from "./complexity.js";
-import { parseLabelProvenance, provenanceComment } from "./estimate.js";
-import type { LabelEstimateProvenance } from "./estimate.js";
+import { complexityGuidance } from "./estimation/complexity.js";
+import { parseLabelProvenance, provenanceComment } from "./estimation/estimate.js";
+import type { LabelEstimateProvenance } from "./estimation/estimate.js";
 import {
   classifyComplexityLabels,
   collectLabelEstimationInput,
@@ -75,8 +75,8 @@ import {
   INVALID_SIZE_SUGGESTIONS,
   labelEstimationReport,
   suggestedSize,
-} from "./complexitylabels.js";
-import { estimationText } from "./estimation.js";
+} from "./estimation/complexitylabels.js";
+import { estimationText } from "./estimation/estimation.js";
 import {
   collect,
   declaredDependencies,

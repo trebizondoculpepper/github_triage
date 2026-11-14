@@ -13,14 +13,14 @@
  * #245 ships the primitive; #247 adds `readSnapshotAssessments`, the one shared paired-facts
  * reader per snapshot that report subjects (`assessments`) and later the queue (#248) consume.
  */
-import type { ComplexitySize } from "./complexity.js";
+import type { ComplexitySize } from "./estimation/complexity.js";
 import { impactLookup } from "./ranking.js";
 import type { Comment } from "./claims.js";
-import { classifyMetricLabels } from "./complexitylabels.js";
+import { classifyMetricLabels } from "./estimation/complexitylabels.js";
 import type { TrustDecision } from "./delivery.js";
-import { scanProvenance } from "./estimate.js";
-import { complexityMetric, impactMetric } from "./metrics.js";
-import type { MetricDescriptor } from "./metrics.js";
+import { scanProvenance } from "./estimation/estimate.js";
+import { complexityMetric, impactMetric } from "./estimation/metrics.js";
+import type { MetricDescriptor } from "./estimation/metrics.js";
 import type { Issue, Snapshot } from "./github/types.js";
 
 export type AssessmentState =

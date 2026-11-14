@@ -15,7 +15,7 @@
  * NEXT STEPS text renders it (designer since #246).
  */
 import type { AssessmentState, MetricView, SubjectAssessments } from "./assessments.js";
-import type { ComplexitySize } from "./complexity.js";
+import type { ComplexitySize } from "./estimation/complexity.js";
 import type { PickupOrder } from "./ranking.js";
 
 export const blendedPolicyVersion = 1 as const;
