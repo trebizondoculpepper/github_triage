@@ -161,6 +161,8 @@ export class Live {
       this.stopped = `rate limited at ${label}`;
       throw new LiveStop(this.stopped);
     }
+    // A response that spends the last request of the window is usable, but nothing more is sent.
+    if (header("x-ratelimit-remaining") === "0") this.stopped = `rate limit exhausted at ${label}`;
     return { out, raw };
   }
 }
@@ -440,6 +442,8 @@ export async function liveRun(
   const outcomes: Record<string, string> = {};
   report.conditional = outcomes;
   const lastModified: Record<string, string> = {};
+  // Saved payloads are reused only for paths that returned 200 or a matching 304 on this run.
+  const revalidated = new Set<string>();
   await section(skipped, "conditional", async () => {
     for (const [label, path] of Object.entries(resources)) {
       const stored = state.resources[path];
@@ -451,6 +455,7 @@ export async function liveRun(
         "rest",
       );
       const r = applyConditional(stored, contextKey, stored?.etag, call.out);
+      if (r.kind === "fresh" || r.kind === "validated") revalidated.add(path);
       // One page only: a resource with more pages is partial evidence, whatever the validator
       // says. Coverage is stored with the payload, so a later 304 keeps the omission notice.
       const coverage =
@@ -564,7 +569,12 @@ export async function liveRun(
         }
       }
     });
-    const checkRuns = resources["check-runs"] && state.resources[resources["check-runs"]];
+    const checkRunsPath = resources["check-runs"];
+    const checkRuns =
+      checkRunsPath && revalidated.has(checkRunsPath) ? state.resources[checkRunsPath] : undefined;
+    if (checkRunsPath && !checkRuns)
+      (report.invalidation as Record<string, unknown>).checkRuns =
+        `stale or unknown: ${outcomes["check-runs"] ?? "not read on this run"}`;
     const prUpdated = observed.find((e) => e.key === `pr#${pr}`)?.updatedAt;
     if (checkRuns && prUpdated !== undefined) {
       const body = JSON.parse(checkRuns.body) as {

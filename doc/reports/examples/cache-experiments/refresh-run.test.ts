@@ -136,10 +136,16 @@ describe("live manifest read (#202)", () => {
 });
 
 /** A fake GitHub for whole live runs: every REST list says it has more pages. */
-function fakeGitHub(log: string[], rateLimitAt?: string) {
+function fakeGitHub(
+  log: string[],
+  rateLimitAt?: string,
+  override?: (a: string) => GhResult | undefined,
+) {
   return async (args: string[]): Promise<GhResult> => {
     const a = args.join(" ");
     log.push(a);
+    const o = override?.(a);
+    if (o) return o;
     if (rateLimitAt && a.includes(rateLimitAt))
       return {
         exitCode: 1,
@@ -211,6 +217,66 @@ describe("live run budget (#202)", () => {
     });
     expect(log).toHaveLength(5);
     expect(report.skipped).toMatchObject({ conditional: "run budget of 5 requests reached" });
+  });
+
+  it("sends nothing after a GraphQL RATE_LIMITED error", async () => {
+    const log: string[] = [];
+    const report = await liveRun(
+      fakeGitHub(log, undefined, (a) =>
+        a.includes("pullRequests(")
+          ? ok({
+              data: null,
+              errors: [{ type: "RATE_LIMITED", message: "API rate limit exceeded" }],
+            })
+          : undefined,
+      ),
+      args(tempState()),
+    );
+    expect(log.at(-1)).toContain("pullRequests(");
+    expect(report.stopped).toBe("rate limited at manifest pullRequests p1");
+  });
+
+  it("sends nothing after a 429 or after a response that spends the last request", async () => {
+    const log: string[] = [];
+    const report = await liveRun(
+      fakeGitHub(log, undefined, (a) =>
+        a.includes("/comments")
+          ? { exitCode: 1, stderr: "", stdout: "HTTP/2.0 429 Too Many Requests\n\n{}" }
+          : undefined,
+      ),
+      args(tempState()),
+    );
+    expect(log.at(-1)).toContain("/comments");
+    expect(report.stopped).toBe("rate limited at full comments");
+    const last: string[] = [];
+    const spent = await liveRun(
+      fakeGitHub(last, undefined, (a) =>
+        a.includes("/comments") ? ok([], "X-Ratelimit-Remaining: 0\n") : undefined,
+      ),
+      args(tempState()),
+    );
+    expect(last.at(-1)).toContain("/comments");
+    expect(spent.stopped).toBe("rate limit exhausted at full comments");
+  });
+
+  it("does not sample saved check runs unless they revalidated on this run", async () => {
+    const state = tempState();
+    await liveRun(fakeGitHub([]), args(state));
+    const warm = await liveRun(
+      fakeGitHub([], undefined, (a) =>
+        a.includes("check-runs")
+          ? { exitCode: 1, stderr: "", stdout: "HTTP/2.0 502 Bad Gateway\n\n" }
+          : undefined,
+      ),
+      args(state),
+    );
+    const inv = warm.invalidation as { seen: Record<string, number>; checkRuns?: string };
+    expect(inv.seen.check_run_completed).toBeUndefined();
+    expect(inv.checkRuns).toBe("stale or unknown: miss: HTTP 502");
+    const ok304 = await liveRun(fakeGitHub([]), args(state));
+    expect((ok304.invalidation as { seen: Record<string, number> }).seen.check_run_completed).toBe(
+      1,
+    );
   });
 
   it("sends nothing after a secondary rate limit", async () => {

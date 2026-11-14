@@ -133,6 +133,17 @@ describe("conditional refresh experiment (#202)", () => {
     ).toMatchObject({ rateLimited: false });
   });
 
+  it("treats a GraphQL 200 with a RATE_LIMITED error as a rate limit", () => {
+    expect(
+      classifyGh({
+        exitCode: 0,
+        stdout:
+          'HTTP/2.0 200 OK\n\n{"data":null,"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}',
+        stderr: "",
+      }),
+    ).toEqual({ kind: "http-error", status: 200, rateLimited: true });
+  });
+
   it("reconciles with a full re-read after the interval instead of reusing old facts", () => {
     const previous = baselineWorld();
     const next = baselineWorld();

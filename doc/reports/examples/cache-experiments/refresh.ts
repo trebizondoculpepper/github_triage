@@ -234,6 +234,9 @@ export function classifyGh(result: GhResult): HttpOutcome {
     if (i > 0) headers.set(line.slice(0, i).trim().toLowerCase(), line.slice(i + 1).trim());
   }
   if (status === 304) return { kind: "not-modified", status: 304 };
+  // GraphQL reports its rate limit as HTTP 200 with an errors entry of type RATE_LIMITED.
+  if (status >= 200 && status < 300 && /"type"\s*:\s*"RATE_LIMITED"/.test(body))
+    return { kind: "http-error", status, rateLimited: true };
   if (status >= 200 && status < 300)
     return {
       kind: "ok",
