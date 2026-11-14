@@ -282,11 +282,11 @@ describe("own submitted PR follow-up survives the released claim (#182 S2)", () 
       [10, 9],
     ]) {
       const r = await cli(shared(order), "implementer");
-      expect(ranked(r)[0], `issue order ${order}`).toBe("pr-follow-up#25");
+      expect(ranked(r)[0], `issue order ${order.join(",")}`).toBe("pr-follow-up#25");
       const own = r.rankedActions!.items[0] as unknown as { why: { facts: object } };
       expect(own.why.facts).toMatchObject({ responsible: "me; other" });
       const ts = await cli(shared(order), "implementer", typescript);
-      expect(next(ts)[0], `typescript, issue order ${order}`).toBe(25);
+      expect(next(ts)[0], `typescript, issue order ${order.join(",")}`).toBe(25);
     }
   });
 

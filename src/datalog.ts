@@ -6,7 +6,6 @@ import type { Snapshot, Issue, PullRequest } from "./types.js";
 import type { SubjectAssessments } from "./assessments.js";
 import type { RankedAction, RankedActions, BlendedRole, ActionKind, Band } from "./blended.js";
 import type { PickupOrder } from "./ranking.js";
-import { codexMarker, codexReviewer } from "./reviewevidence.js";
 import {
   definitions,
   clauses,
@@ -95,6 +94,27 @@ const artifact = {
   eligibilityWitnesses,
 };
 export const rulesHash = createHash("sha256").update(JSON.stringify(artifact)).digest("hex");
+/**
+ * Codex review-state markers as raw facts. Kept local, not imported, so the lazily loaded
+ * evaluator stays one self-contained chunk; reviewevidence.ts holds the TypeScript-engine twin
+ * and the tests assert both engines agree.
+ */
+const codexAccount = "chatgpt-codex-connector";
+function codexState(
+  body: string,
+): { status?: unknown; commit_sha?: unknown; has_unresolved_findings?: unknown } | null {
+  const m = /codex-review-state:v1 (\{.*?\}) -->/.exec(body);
+  try {
+    const parsed: unknown = m ? JSON.parse(m[1]) : null;
+    const review =
+      typeof parsed === "object" && parsed !== null
+        ? (parsed as { code_review?: unknown }).code_review
+        : null;
+    return typeof review === "object" && review !== null ? review : null;
+  } catch {
+    return null;
+  }
+}
 const emptyMetric = { state: "unknown" as const, size: null, provenance: null };
 const subjectsOf = (s: Snapshot) => [...s.issues, ...s.pullRequests];
 function normalize(
@@ -209,13 +229,13 @@ function normalize(
         if (review.commit?.oid) put(r, "review-commit", review.commit.oid);
       }
       for (const c of pr.comments.nodes) {
-        if ((c.author?.login ?? "").replace(/\[bot\]$/, "") !== codexReviewer) continue;
-        const state = codexMarker(c.body)?.code_review;
+        if ((c.author?.login ?? "").replace(/\[bot\]$/, "") !== codexAccount) continue;
+        const state = codexState(c.body ?? "");
         if (!state) continue;
         const r = nextId++;
         put(id, "receipt", r);
-        if (state.commit_sha) put(r, "receipt-commit", state.commit_sha);
-        if (state.status) put(r, "receipt-status", state.status);
+        if (typeof state.commit_sha === "string") put(r, "receipt-commit", state.commit_sha);
+        if (typeof state.status === "string") put(r, "receipt-status", state.status);
         if (typeof state.has_unresolved_findings === "boolean")
           put(r, "receipt-findings", state.has_unresolved_findings);
       }
