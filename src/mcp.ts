@@ -174,12 +174,7 @@ export const briefingInput = z
     mode: z.enum(["actions", "briefing"]).default("actions"),
     since,
     last,
-    limit: z
-      .number()
-      .int()
-      .min(catchUpLimits.limit.min)
-      .max(catchUpLimits.limit.max)
-      .default(catchUpLimits.limit.default),
+    limit: z.number().int().min(catchUpLimits.limit.min).max(catchUpLimits.limit.max).default(10),
     maxChars,
     /** Registered role view (#260, doc/design/mcp.md "Role views"): same as CLI --role. */
     role: z

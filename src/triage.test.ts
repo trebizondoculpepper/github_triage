@@ -598,6 +598,7 @@ describe("compact briefing contract", () => {
     expect(text).not.toContain("NEXT STEPS");
     expect(text).not.toContain("0 omitted");
     expect(text).not.toContain("Read-only suggestions, not authority");
+    expect(text).toContain("No --agent given:");
     expect(argumentsFor([]).limit).toBe(10);
     expect(argumentsFor(["--limit", "2"]).limit).toBe(2);
   });

@@ -140,6 +140,9 @@ export interface ImpactEstimation {
   boundaries: string;
 }
 
+const unfocusedIdentityNotice =
+  "No --agent given: addressed attention and owned-work focus are unavailable (identity is never inferred from the GitHub login).";
+
 export function compactBriefing(
   snapshot: Snapshot,
   options: Pick<BriefingOptions, "limit" | "agent" | "estimate"> & { role?: string },
@@ -492,9 +495,7 @@ export function compactBriefing(
     subjects,
     changes: facts.changes,
     detail: facts.detail,
-    guidance: options.agent
-      ? facts.guidance
-      : `${facts.guidance} No --agent given: addressed attention and owned-work focus are unavailable (identity is never inferred from the GitHub login).`,
+    guidance: options.agent ? facts.guidance : `${facts.guidance} ${unfocusedIdentityNotice}`,
   };
 }
 export type CompactBriefing = ReturnType<typeof compactBriefing>;
@@ -539,6 +540,7 @@ export function compactText(
     `Fetched ${report.freshness.fetchedAt} — ${report.freshness.offline ? "OFFLINE CACHE; live verification unavailable" : "LIVE fetch window"}`,
     `${report.summary.issues} issues; ${report.summary.pullRequests} PRs; ${report.summary.findings} findings on ${report.summary.distinctSubjects} subjects.`,
   ];
+  if (report.guidance.includes(unfocusedIdentityNotice)) lines.push(unfocusedIdentityNotice);
   const rows: string[] = [];
   const shown = new Set<string>();
   const add = (
@@ -566,7 +568,15 @@ export function compactText(
   const estimation = report.estimation;
   const estimationRows = (): void => {
     if (estimation.status === "disabled") return;
-    if (!estimation.requested && !estimation.queue?.total && !estimation.findings.length) return;
+    if (
+      !estimation.requested &&
+      !estimation.queue?.total &&
+      !estimation.findings.length &&
+      !estimation.conflicts.total &&
+      !estimation.unknown &&
+      estimation.status === "available"
+    )
+      return;
     rows.push(
       `\nESTIMATION${estimation.requested ? " (requested)" : ranked && report.role?.name === "implementer" ? " (detail; estimates are ranked in NEXT STEPS)" : " (optional; after the work above)"} (${estimation.queue?.total ?? "unavailable"}${estimation.queue?.omitted ? `; ${estimation.queue.omitted} omitted` : ""})`,
       `- ${estimation.detail}`,
