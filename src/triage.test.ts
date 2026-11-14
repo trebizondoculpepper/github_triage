@@ -626,6 +626,28 @@ describe("compact briefing contract", () => {
     expect(compactText(noDetail, 1500).length).toBeLessThanOrEqual(1500);
     expect(compactText(noDetail, 600)).toContain("omitted");
   });
+  it("keeps real estimation warnings visible even with no estimate candidates", async () => {
+    const { compactBriefing, compactText } = await import("./compact.js");
+    const data = snapshot([], []);
+    const base = compactBriefing(
+      data,
+      { limit: 10 },
+      briefing(data, { limit: 10 }, new Date(time)),
+    );
+    const report = {
+      ...base,
+      estimation: {
+        ...base.estimation,
+        queue: { total: 0, omitted: 0, items: [] },
+        conflicts: { total: 1, omitted: 0, items: [] },
+        unknown: 1,
+        detail: "Conflicting sizing and unknown provenance require inspection.",
+      },
+    };
+    expect(compactText(report)).toContain(
+      "Conflicting sizing and unknown provenance require inspection.",
+    );
+  });
   it("bounds independent requests, retains order and propagates failure", async () => {
     const { concurrentMap } = await import("./github.js");
     let active = 0;
