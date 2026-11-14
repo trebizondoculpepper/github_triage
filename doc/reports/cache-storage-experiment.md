@@ -46,7 +46,7 @@ The runner was run twice on 2026-11-14 at source revision `6e49779` plus the fil
 - **macOS**: Darwin 27.2.0, Node 26.7.0, APFS on the internal disk, 30 iterations per size, 24.5 s in total.
 - **Linux**: the `node:26` Docker image (Node 26.13.1) on Docker Desktop's LinuxKit VM (kernel 6.12.76), overlay filesystem, run as a non-root user, 30 iterations per size, 20.8 s in total. This is a virtual machine on the same Mac, not native Linux hardware.
 
-**Windows** was not measured. The test file runs in CI on `windows-latest` (Node 26), so the tests that do not need POSIX permissions also run there. These include rename over an existing file, readers during renames, concurrent writer processes and processes killed at each step. The PR's CI result is the only Windows evidence.
+**Windows** was not measured. The test file runs in CI on `windows-latest` (Node 26), so the tests that do not need POSIX permissions also run there. These include rename over an existing file, readers during renames, concurrent writer processes and processes killed at each step. On PR #381's first CI run (2026-11-14, run 43632250760) `storage.test.ts` passed on `windows-latest` with 27 tests run and the 2 POSIX-only tests skipped; it also passed on `ubuntu-latest`. That pass/fail result is the only Windows evidence.
 
 The records are synthetic. Each one has a title, state, labels, assignees, recent comment excerpts, edges and, for PRs, a head SHA and checks, which comes to about 1.2 KB of JSON per record. Times are real wall-clock measurements on these machines. One run per platform is indicative, not a statistical study.
 
