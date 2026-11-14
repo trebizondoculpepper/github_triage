@@ -7,7 +7,12 @@ import { planRelease } from "./claims.js";
 import { main } from "./cli.js";
 import { deliveryMarker, markerTrust, readDeliveryFold } from "./delivery.js";
 import type { Deliverable, DeliveryComment, DeliveryRecord, TrustDecision } from "./delivery.js";
-import { deliveryDoctorTicketCap, diagnoseDelivery } from "./deliverydoctor.js";
+import {
+  closedDriftIssueCap,
+  deliveryDoctorTicketCap,
+  diagnoseClosedDrift,
+  diagnoseDelivery,
+} from "./deliverydoctor.js";
 import type { RepositoryPermission, RestAnswer } from "./github/github.js";
 import { ticketDoctor } from "./ticketdoctor.js";
 import type { TicketDoctorReport } from "./ticketdoctor.js";
@@ -568,5 +573,180 @@ describe("delivery-aware Ticket Doctor (#192)", () => {
     expect(code).toBe(0);
     const report = JSON.parse(text) as TicketDoctorReport;
     expect(kinds(report, 14)).toEqual(["delivery-verified-open"]);
+  });
+});
+
+/** A closed issue as the closed-window query returns it. */
+const closedNode = (
+  number: number,
+  stateReason: string,
+  comments: DeliveryComment[],
+  { actor = "shared-account", older = false } = {},
+) => ({
+  number,
+  title: `Ticket ${number}`,
+  url: `https://github.com/${repo}/issues/${number}`,
+  state: "CLOSED",
+  stateReason,
+  closedAt: time,
+  timelineItems: { nodes: [{ actor: { login: actor } }] },
+  comments: {
+    nodes: comments,
+    pageInfo: { hasPreviousPage: older, startCursor: older ? "c" : null },
+  },
+});
+
+const closedDoctor = async (
+  nodes: ReturnType<typeof closedNode>[],
+  prs: Record<number, LivePr> = {},
+  compare: Record<string, string> = {},
+  more = false,
+) => {
+  const fake = live(prs, compare);
+  const query = async (q: string, v: Record<string, unknown>) => {
+    if (q.includes("states:CLOSED"))
+      return { repository: { issues: { nodes, pageInfo: { hasNextPage: more } } } };
+    if (q.includes("comments(last:100,before:"))
+      return {
+        repository: {
+          issue: {
+            comments: { nodes: [], pageInfo: { hasPreviousPage: true, startCursor: null } },
+          },
+        },
+      };
+    return fake.rt.query(q, v);
+  };
+  const closedDrift = await diagnoseClosedDrift(repo, time, {
+    trust,
+    live: { query: query as never, rest: fake.rt.rest },
+  });
+  return ticketDoctor(snapshot([]), { now: new Date(time), closedDrift });
+};
+
+describe("closed-issue delivery drift (#192: S5, S16, S68 after closing)", () => {
+  it("S16 reports closed-completed without verified delivery as a discrepancy, naming the login, never reopening", async () => {
+    const submit = post(record(40, "submit", { deliverables: [pr(60)], membership: "complete" }));
+    const r = await closedDoctor([closedNode(40, "COMPLETED", [submit])], { 60: "open" });
+    const f = finding(r, 40, "closed-not-delivered");
+    expect(f.detail).toContain("by shared-account");
+    expect(f.detail).toContain("not proof of unauthorised closure");
+    expect(f.plan.steps.some((s) => s.argv.includes("reopen"))).toBe(false);
+    expect(f.plan.steps.map((s) => s.command)).toContain(`pdb pr 60 --repo ${repo}`);
+    expect(r.closedScan).toEqual({ since: time, scanned: 1, withRecords: 1, complete: true });
+  });
+
+  it("S68 after closing: a complete record whose delivery no longer holds is a residual race, not reopened", async () => {
+    const submit = post(record(41, "submit", { deliverables: [pr(61)], membership: "complete" }));
+    const done = post(
+      record(41, "complete", { verdict: "delivered", evaluationRevision: "r", evaluatedAt: time }),
+    );
+    const attach = post(record(41, "attach", { deliverables: [pr(62)] }));
+    const r = await closedDoctor(
+      [closedNode(41, "COMPLETED", [submit, done, attach])],
+      { 61: { merged: "m61" }, 62: "open" },
+      { m61: "behind" },
+    );
+    const f = finding(r, 41, "closed-not-delivered");
+    expect(f.plan.facts.join(" ")).toContain("residual race");
+  });
+
+  it("closed completed with verified delivery is not a finding", async () => {
+    const submit = post(record(42, "submit", { deliverables: [pr(63)], membership: "complete" }));
+    const r = await closedDoctor(
+      [closedNode(42, "COMPLETED", [submit])],
+      { 63: { merged: "m63" } },
+      { m63: "identical" },
+    );
+    expect(r.tickets).toEqual([]);
+  });
+
+  it("S5 turns open required PRs after a not-planned closure into cleanup for the responsible agent", async () => {
+    const submit = post(record(43, "submit", { deliverables: [pr(64)], membership: "complete" }));
+    const r = await closedDoctor([closedNode(43, "NOT_PLANNED", [submit])], { 64: "draft" });
+    const f = finding(r, 43, "closed-cleanup");
+    const close = f.plan.steps.find((s) => s.choice === "close-pr-64");
+    expect(close?.command).toBe(`gh pr close 64 --repo ${repo} --comment '<WHY>'`);
+    expect(close?.runBy).toContain("alice");
+    expect(f.detail).toContain("The closure stands");
+  });
+
+  it("not planned with nothing left open is respected silently", async () => {
+    const submit = post(record(44, "submit", { deliverables: [pr(65)], membership: "complete" }));
+    const r = await closedDoctor([closedNode(44, "NOT_PLANNED", [submit])], { 65: "closed" });
+    expect(r.tickets).toEqual([]);
+  });
+
+  it("unreadable evidence on a closed ticket is unknown with inspection only", async () => {
+    const submit = post(record(45, "submit", { deliverables: [pr(66)], membership: "complete" }));
+    const r = await closedDoctor([closedNode(45, "COMPLETED", [submit])], {});
+    const f = finding(r, 45, "closed-delivery-unknown");
+    expect(f.certainty).toBe("unknown");
+    expect(f.plan.steps.every((s) => s.kind === "inspect")).toBe(true);
+  });
+
+  it("an unverifiable record on a closed ticket is unknown, never a discrepancy", async () => {
+    const submit = post(
+      record(46, "submit", { deliverables: [pr(67)], membership: "complete" }),
+      "flaky",
+    );
+    const r = await closedDoctor([closedNode(46, "COMPLETED", [submit])], { 67: "open" });
+    expect(kinds(r, 46)).toEqual(["closed-delivery-unknown"]);
+  });
+
+  it("a truncated window or comment history is incomplete, never no drift", async () => {
+    const r = await closedDoctor([closedNode(47, "COMPLETED", [], { older: true })], {}, {}, true);
+    expect(r.completeness.complete).toBe(false);
+    expect(r.completeness.warnings.join(" ")).toContain(`more than ${closedDriftIssueCap}`);
+    expect(r.completeness.warnings.join(" ")).toContain(
+      "whether it carries a delivery record is unknown",
+    );
+    expect(r.closedScan?.complete).toBe(false);
+  });
+
+  it("the CLI refuses --since with --offline", async () => {
+    await expect(
+      main(["ticket-doctor", "--since", time, "--offline", "--cache", "x.json"], async () => {}, {
+        collect: async () => snapshot([]),
+        currentRepository: async () => repo,
+        updateCheck: async () => ({ status: "skipped" }) as never,
+      }),
+    ).rejects.toThrow("--offline");
+  });
+});
+
+describe("stale claims beside delivery responsibility (#192)", () => {
+  const later = new Date(Date.parse(time) + 10 * 24 * 3_600_000);
+  const stale = async (comments: DeliveryComment[], withTrust = true) => {
+    const old = {
+      ...issue(50, ["bug", "agent:alice"], comments),
+      updatedAt: "2026-11-01T00:00:00Z",
+    };
+    const snap = snapshot([old]);
+    const delivery = await diagnoseDelivery(snap, {
+      trust: withTrust ? trust : undefined,
+      live: withTrust ? live({ 70: "open" }).rt : undefined,
+    });
+    return finding(ticketDoctor(snap, { now: later, delivery }), 50, "stale-agent-activity");
+  };
+
+  it("states that releasing a stale claim does not end the claimant's delivery responsibility", async () => {
+    const f = await stale([
+      post(record(50, "submit", { deliverables: [pr(70)], membership: "complete" })),
+    ]);
+    expect(f.plan.facts.join(" ")).toContain(
+      `Delivery responsibility: ticket alice; alice is responsible for ${repo}#70. Releasing the claim does not end responsibility`,
+    );
+    // Recovery stays the supported claimant-only release; nothing is reassigned.
+    expect(f.plan.steps.every((s) => s.kind === "inspect" || s.runBy?.includes("alice"))).toBe(
+      true,
+    );
+  });
+
+  it("reports responsibility as unknown, not absent, when records are unverified", async () => {
+    const f = await stale(
+      [post(record(50, "submit", { deliverables: [pr(70)], membership: "complete" }))],
+      false,
+    );
+    expect(f.plan.facts.join(" ")).toContain("Delivery responsibility is unknown");
   });
 });
