@@ -415,6 +415,19 @@ export interface RejectedRecord {
   comment: string;
   error: "HANDOFF_STALE" | "VOID_NOT_APPLICABLE";
   why: string;
+  /**
+   * HANDOFF_STALE only (#192): the rejected transfer and the responsibility in force when it was
+   * replayed, so diagnostics can name both records without replaying the fold again.
+   */
+  transfer?: {
+    sender: string;
+    recipient: string;
+    scope: "ticket" | "deliverable";
+    deliverable: string | null;
+    expected: string | null;
+    effective: string | null;
+    effectiveHolder: string | null;
+  };
 }
 export interface DeliveryFold {
   /** False when history was truncated or any recognized record could not be read or trusted. */
@@ -647,6 +660,15 @@ export function foldDelivery(records: ClassifiedRecord[], historyComplete: boole
               comment: id,
               error: "HANDOFF_STALE",
               why: `${rec.agent} → ${to} expected ticket responsibility record ${rec.expectedResponsibilityRecord}; current is ${fold.ticketResponsibilityRecord ?? "none"} held by ${fold.ticketResponsible ?? "nobody"}`,
+              transfer: {
+                sender: rec.agent,
+                recipient: to,
+                scope: "ticket",
+                deliverable: null,
+                expected: rec.expectedResponsibilityRecord ?? null,
+                effective: fold.ticketResponsibilityRecord,
+                effectiveHolder: fold.ticketResponsible,
+              },
             });
             break;
           }
@@ -669,6 +691,15 @@ export function foldDelivery(records: ClassifiedRecord[], historyComplete: boole
               comment: id,
               error: "HANDOFF_STALE",
               why: `${rec.agent} → ${to} for ${deliverableLabel(rec.deliverables[0])} expected responsibility record ${rec.expectedResponsibilityRecord}; current is ${m?.responsibilityRecord ?? "none"} held by ${m?.responsible ?? "nobody"}`,
+              transfer: {
+                sender: rec.agent,
+                recipient: to,
+                scope: "deliverable",
+                deliverable: deliverableLabel(rec.deliverables[0]),
+                expected: rec.expectedResponsibilityRecord ?? null,
+                effective: m?.responsibilityRecord ?? null,
+                effectiveHolder: m?.responsible ?? null,
+              },
             });
             break;
           }

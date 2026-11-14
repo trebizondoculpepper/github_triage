@@ -13,6 +13,7 @@ import { complexityLabelFindings, metricLabelFindings } from "./complexitylabels
 import { impactMetric } from "./metrics.js";
 import { closingPrEvidence } from "./ranking.js";
 import type { Issue, PullRequest, Snapshot } from "./types.js";
+import type { DeliveryDiagnosis, IssueDeliveryDiagnosis } from "./deliverydoctor.js";
 
 /**
  * Whether a PR's contribution is evidently finished: out of draft, checks passing, no open or
@@ -70,6 +71,11 @@ export interface TicketDoctorOptions {
    * true, including when configuration could not be read (findings only suggest, never apply).
    */
   impactEnabled?: boolean;
+  /**
+   * #192: delivery facts from `diagnoseDelivery`. Absent leaves every finding as before; present,
+   * trusted delivery records supersede the two label-only review checks for that ticket.
+   */
+  delivery?: DeliveryDiagnosis;
 }
 export interface TicketDoctorReport {
   schemaVersion: 1;
@@ -155,6 +161,275 @@ export function cyclePath(
   return [start];
 }
 
+type AddFinding = (
+  issue: Pick<Issue, "number" | "title" | "url">,
+  kind: string,
+  certainty: Certainty,
+  detail: string,
+  steps?: CorrectionStep[],
+  extra?: { judgment?: boolean; facts?: string[] },
+) => void;
+
+const prLabel = /^([\w.-]+\/[\w.-]+)#(\d+)$/;
+const prLink = (label: string): string | null => {
+  const m = label.match(prLabel);
+  return m ? `https://github.com/${m[1]}/pull/${m[2]}` : null;
+};
+
+/**
+ * #192: delivery-aware findings for one ticket from `diagnoseDelivery`. Read-only suggestions;
+ * an unknown fold or evaluation only ever yields inspection, never a mutation or a negative.
+ */
+function deliveryFindings(
+  issue: Issue,
+  d: IssueDeliveryDiagnosis,
+  claimants: string[],
+  add: AddFinding,
+  cmd: ReturnType<typeof planCommands>,
+  repository: string,
+): void {
+  const n = issue.number;
+  const claimFact = claimants.length
+    ? [
+        `Active claim held by ${claimants.join(", ")}; a claim and delivery responsibility are distinct.`,
+      ]
+    : [];
+  if (d.fold === "unread") {
+    add(
+      issue,
+      "delivery-evidence-unknown",
+      "unknown",
+      "Delivery or release records are present but were not verified; delivery and responsibility are unknown, not absent.",
+      [cmd.inspectIssue(n)],
+      { facts: d.unknownBecause },
+    );
+    return;
+  }
+  for (const t of d.staleTransfers) {
+    const scope = t.scope === "ticket" ? "ticket" : `deliverable ${t.deliverable ?? "(unknown)"}`;
+    const facts = [
+      `Rejected record ${t.comment}${t.url ? ` ${t.url}` : ""}: ${t.sender} -> ${t.recipient} (${scope}), expected predecessor ${t.expected ?? "none"}.`,
+      `Effective record ${t.effective ?? "none"}${t.effectiveUrl ? ` ${t.effectiveUrl}` : ""}; effective responsible ${t.effectiveHolder ?? "nobody"}.`,
+      ...claimFact,
+    ];
+    // Recovery is addressed to whoever is responsible after the whole fold, never the holder at
+    // rejection time; an unknown final fold names nobody, so only inspection is offered.
+    const known = d.fold === "known";
+    const holder = known ? t.current : null;
+    facts.push(
+      known
+        ? `Currently responsible after all records: ${holder ?? "nobody"}.`
+        : "Current responsibility is unknown: a later record could not be read or trusted.",
+    );
+    add(
+      issue,
+      "handoff-stale",
+      known ? "candidate" : "unknown",
+      `Handoff ${t.sender} -> ${t.recipient} (${scope}) was rejected HANDOFF_STALE; ${known ? `${holder ?? "nobody"} is responsible now` : "current responsibility is unknown"}. Nothing is transferred automatically.`,
+      [
+        cmd.inspectIssue(n),
+        cmd.deliveryDryRun(n, holder ?? t.effectiveHolder ?? t.sender),
+        ...(holder
+          ? [
+              cmd.deliveryHandoff(
+                n,
+                holder,
+                t.scope === "deliverable" && t.deliverable ? prLink(t.deliverable) : null,
+                `fresh-handoff-${t.comment}`,
+              ),
+            ]
+          : []),
+      ],
+      { judgment: true, facts },
+    );
+  }
+  if (d.unverifiableTransfers.length)
+    add(
+      issue,
+      "handoff-unverifiable",
+      "unknown",
+      `Handoff ${d.unverifiableTransfers.map((t) => t.comment).join(", ")} cannot be validated because an earlier record is unknown; it is neither applied nor stale.`,
+      [cmd.inspectIssue(n)],
+      {
+        facts: d.unverifiableTransfers.map(
+          (t) => `Record ${t.comment}${t.url ? ` ${t.url}` : ""}.`,
+        ),
+      },
+    );
+  if (d.fold === "unknown") {
+    add(
+      issue,
+      "delivery-records-unknown",
+      "unknown",
+      "Delivery records could not all be read or trusted; delivery and responsibility are unknown, not absent.",
+      [cmd.inspectIssue(n)],
+      { facts: d.unknownBecause },
+    );
+    return;
+  }
+  if (d.legacy?.status === "unknown")
+    add(
+      issue,
+      "legacy-release-unverified",
+      "unknown",
+      "A v1 done release record exists but its author's authority could not be verified.",
+      [cmd.inspectIssue(n)],
+      { facts: d.legacy.unverified },
+    );
+  if (d.legacy?.status === "trusted") {
+    const facts = [
+      `Release record ${d.legacy.release ?? "(no link)"}${d.legacy.agent ? ` by ${d.legacy.agent}` : ""}.`,
+      ...(d.legacy.candidates.length
+        ? [`Candidates (not membership): ${d.legacy.candidates.map((c) => c.value).join(", ")}.`]
+        : ["No candidate deliverable is named; supply the PR URL or commit yourself."]),
+      ...claimFact,
+    ];
+    add(
+      issue,
+      "legacy-delivery",
+      "candidate",
+      "Only a legacy v1 done handoff exists: membership is unknown and never inferred. Record the required deliverables, or attest a non-code outcome.",
+      [
+        cmd.inspectIssue(n),
+        ...(d.legacy.candidates.length
+          ? d.legacy.candidates.map((c, i) =>
+              cmd.legacyAttach(
+                n,
+                c.flag,
+                c.value,
+                d.legacy!.candidates.length > 1 ? `attach-${i + 1}` : "attach",
+              ),
+            )
+          : [cmd.legacyAttach(n, "--pr", "<PR_URL>", "attach")]),
+        cmd.legacyAttest(n),
+      ],
+      { judgment: true, facts },
+    );
+    return;
+  }
+  if (!d.trustedRecord) return;
+  const responsible = d.ticketResponsible;
+  const facts = [
+    `Ticket responsible: ${responsible ?? "nobody (after a reset or effective completion)"}.`,
+    ...d.members.map((m) => `${m.deliverable}: responsible ${m.responsible ?? "nobody"}.`),
+    ...claimFact,
+  ];
+  const inspect = cmd.deliveryDryRun(n, responsible ?? "<AGENT>");
+  if (!d.evaluation) {
+    add(
+      issue,
+      "delivery-not-evaluated",
+      "unknown",
+      `Delivery was not evaluated: ${d.notEvaluated ?? "no live evidence"}.`,
+      [inspect],
+      { facts },
+    );
+    return;
+  }
+  const e = d.evaluation;
+  const lines = e.perDeliverable.map(
+    (m) => `${m.deliverable} -> ${m.target}: ${m.state} (${m.why}).`,
+  );
+  if (e.delivery === "unknown") {
+    add(
+      issue,
+      "delivery-unknown",
+      "unknown",
+      "Delivery cannot be verified: some evidence is unknown (never read as not delivered).",
+      [inspect],
+      { facts: [...facts, ...e.because, ...lines] },
+    );
+    return;
+  }
+  if (e.delivery === "delivered" || e.delivery === "attested") {
+    add(
+      issue,
+      "delivery-verified-open",
+      "candidate",
+      `Delivery is ${e.delivery} but the issue is still open${responsible ? `; ${responsible} may record completion` : "; no agent is responsible"}.`,
+      [
+        inspect,
+        ...(responsible
+          ? [
+              cmd.complete(
+                n,
+                responsible,
+                `${responsible} records verified completion and closes #${n}.`,
+              ),
+            ]
+          : []),
+      ],
+      { facts: [...facts, ...e.because, ...e.overrides, ...lines] },
+    );
+    return;
+  }
+  // S68 on an open issue: a `complete` record was written but delivery no longer holds (a member
+  // or membership changed after it). Reported, never reverted or re-closed automatically.
+  if (d.completions.length) {
+    add(
+      issue,
+      "delivery-diverged-after-complete",
+      "candidate",
+      `A complete record (${d.completions.join(", ")}) exists but delivery is now ${e.delivery}; the issue stays open. ${responsible ?? "The responsible agent"} finishes the outstanding delivery, then completes again.`,
+      [inspect],
+      { judgment: true, facts: [...facts, ...e.because, ...lines] },
+    );
+    return;
+  }
+  const stalled = e.perDeliverable.filter(
+    (m) => m.state === "closed-unmerged" || m.state === "merged-off-target",
+  );
+  const prSteps = (states: typeof e.perDeliverable) =>
+    states.flatMap((m) => {
+      // `pr N` reads this repository only; another repository's member is in the facts.
+      const match = m.deliverable.match(prLabel);
+      return match && match[1].toLowerCase() === repository.toLowerCase()
+        ? [cmd.pr(Number(match[2]))]
+        : [];
+    });
+  if (e.delivery === "partial" || stalled.length) {
+    const outstanding = e.perDeliverable.filter((m) => m.state !== "merged");
+    add(
+      issue,
+      stalled.length ? "delivery-member-stalled" : "delivery-partial",
+      "candidate",
+      stalled.length
+        ? `Required ${stalled.map((m) => `${m.deliverable} is ${m.state}`).join("; ")}: it cannot deliver as recorded. ${responsible ?? "The responsible agent"} decides whether to reopen, replace, retarget or detach it.`
+        : `Partly delivered: ${outstanding.map((m) => `${m.deliverable} is ${m.state}`).join("; ")}. Responsibility continues until every required member merges into its target.`,
+      [inspect, ...prSteps(stalled.length ? stalled : outstanding)],
+      { judgment: !!stalled.length, facts: [...facts, ...lines] },
+    );
+    return;
+  }
+  if (e.delivery === "none")
+    add(
+      issue,
+      "delivery-empty",
+      "candidate",
+      `Trusted records leave no required deliverable and no applicable attestation; ${responsible ?? "nobody"} remains responsible for attaching, attesting or handing back.`,
+      [inspect],
+      { facts: [...facts, ...e.because] },
+    );
+  // Every recorded member merged but membership is still open: more deliverables may be expected,
+  // so delivery is not complete and `complete` is never offered. The responsible agent decides.
+  if (
+    e.delivery === "submitted" &&
+    e.perDeliverable.every((m) => m.state === "merged") &&
+    !e.derived.membershipComplete
+  ) {
+    add(
+      issue,
+      "delivery-membership-open",
+      "candidate",
+      `${e.perDeliverable.length ? `Every recorded deliverable (${e.perDeliverable.length}) is merged into its target` : "No deliverable is required yet"}, but membership is still open, so delivery is not complete. ${responsible ?? "The responsible agent"} attaches the remaining deliverables${e.perDeliverable.length ? "" : " (or attests a non-code outcome once the empty set is complete)"} or confirms the set is complete.`,
+      [inspect, ...(responsible ? [cmd.membershipComplete(n, responsible)] : [])],
+      { judgment: true, facts: [...facts, ...e.because, ...lines] },
+    );
+    return;
+  }
+  // `submitted` with every member open or draft is waiting on review or CI: not a finding.
+}
+
 export function ticketDoctor(
   snapshot: Snapshot,
   {
@@ -163,6 +438,7 @@ export function ticketDoctor(
     limit = 30,
     offline = false,
     impactEnabled = true,
+    delivery,
   }: TicketDoctorOptions = {},
 ): TicketDoctorReport {
   const open = snapshot.issues.filter((i) => i.state === "OPEN");
@@ -454,7 +730,14 @@ export function ticketDoctor(
         ],
         { judgment: true },
       );
-    const prs = openPrsFor.get(issue.url) ?? [];
+    const diagnosis = delivery?.issues.get(issue.number);
+    // #192: trusted delivery records (or a trusted legacy v1 handoff) supersede the label-only
+    // review checks below; an unknown fold never does, so those checks still run.
+    const superseded =
+      diagnosis?.fold === "known" &&
+      (diagnosis.trustedRecord || diagnosis.legacy?.status === "trusted");
+    if (diagnosis) deliveryFindings(issue, diagnosis, agents, add, cmd, snapshot.repository);
+    const prs = superseded ? [] : (openPrsFor.get(issue.url) ?? []);
     const pickup = labels.filter((l) => doctorPolicy.claimedReadiness.includes(l));
     // Whether every linked PR is evidently finished (not draft, checks green, no open threads).
     const finished = prs.length > 0 && prs.every((p) => p.finished);
@@ -512,7 +795,7 @@ export function ticketDoctor(
     // A handoff to review that no open PR backs: the PR merged or closed, so the awaiting-review
     // state (and any remaining claim) is a leftover to inspect.
     const closing = closingPrEvidence(issue, snapshot.pullRequests);
-    if (!closing.open.length && labels.includes(doctorPolicy.awaitingReview))
+    if (!superseded && !closing.open.length && labels.includes(doctorPolicy.awaitingReview))
       add(
         issue,
         "awaiting-review-without-pr",
@@ -720,7 +1003,7 @@ export function ticketDoctor(
     );
   const count = (k: Certainty): number =>
     all.reduce((n, t) => n + t.findings.filter((f) => f.certainty === k).length, 0);
-  const warnings = [...snapshot.warnings, ...gaps];
+  const warnings = [...snapshot.warnings, ...gaps, ...(delivery?.warnings ?? [])];
   return {
     schemaVersion: 1,
     kind: "ticket-doctor",

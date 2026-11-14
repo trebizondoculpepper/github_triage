@@ -202,5 +202,118 @@ export function planCommands(repository: string) {
           ],
         },
       ),
+    /** #192: read-only delivery evaluation (records, members, verdict, responsibility). */
+    deliveryDryRun: (n: number, agent: string) =>
+      step(
+        "inspect",
+        `Re-read #${n}'s delivery records and live member evidence without writing anything.`,
+        triage("complete", String(n), "--agent", agent, "--dry-run"),
+      ),
+    /** #192/#191: record verified completion; refused unless delivery holds on a fresh read. */
+    complete: (n: number, agent: string, description: string) =>
+      step("command", description, triage("complete", String(n), "--agent", agent), {
+        choice: "complete",
+        runBy: `agent ${agent} only (ticket-responsible)`,
+        preconditions: [
+          "No agent holds a claim on the ticket (CLAIM_HELD otherwise).",
+          "Run with --dry-run first; the command re-evaluates delivery and refuses if it changed.",
+        ],
+      }),
+    /** #192 (S66): a fresh transfer from the effective holder; never an automatic reassignment. */
+    deliveryHandoff: (n: number, holder: string, deliverable: string | null, choice: string) =>
+      step(
+        "command",
+        `If a transfer is still wanted, ${holder} hands responsibility over afresh.`,
+        triage(
+          "deliverables",
+          String(n),
+          "handoff",
+          "--agent",
+          holder,
+          "--to",
+          "<AGENT>",
+          ...(deliverable ? ["--pr", deliverable] : []),
+          "--reason",
+          "<REASON>",
+        ),
+        {
+          choice,
+          runBy: `agent ${holder} only (currently responsible)`,
+          preconditions: [
+            "Ticket-level handoff is refused CLAIM_HELD while any agent holds a claim.",
+            "Run with --dry-run first; the command replays the records and refuses a stale predecessor.",
+          ],
+        },
+      ),
+    /** #192: confirm an open required set is complete; delivery is then re-evaluated, not assumed. */
+    membershipComplete: (n: number, agent: string) =>
+      step(
+        "command",
+        `If no further deliverable is expected, ${agent} states the required set is complete.`,
+        triage(
+          "deliverables",
+          String(n),
+          "membership",
+          "complete",
+          "--agent",
+          agent,
+          "--reason",
+          "<REASON>",
+        ),
+        {
+          choice: "membership-complete",
+          runBy: `agent ${agent} only (ticket-responsible)`,
+          preconditions: [
+            "Membership completeness is not proof of delivery; re-run the dry run before completing.",
+          ],
+        },
+      ),
+    /** #192 (S1): legacy attachment of a named candidate; membership stays open by default. */
+    legacyAttach: (n: number, flag: "--pr" | "--commit", value: string, choice: string) =>
+      step(
+        "command",
+        `If ${value} is a required deliverable of #${n}, attach it as legacy membership (open).`,
+        triage(
+          "deliverables",
+          String(n),
+          "attach",
+          "--legacy",
+          "--agent",
+          "<AGENT>",
+          flag,
+          value,
+          "--reason",
+          "<REASON>",
+        ),
+        {
+          choice,
+          preconditions: [
+            "Candidates are named for a decision, never inferred membership; confirm the deliverable first.",
+            "Needs write permission; refused CLAIM_HELD while another agent holds a claim.",
+          ],
+        },
+      ),
+    /** #192 (S1): legacy attestation for a non-code outcome. */
+    legacyAttest: (n: number) =>
+      step(
+        "command",
+        `If #${n}'s outcome was not code, attest it as a legacy non-code outcome.`,
+        triage(
+          "deliverables",
+          String(n),
+          "attest",
+          "--legacy",
+          "--agent",
+          "<AGENT>",
+          "--reason",
+          "<REASON>",
+        ),
+        {
+          choice: "attest",
+          preconditions: [
+            "Needs write permission; refused CLAIM_HELD while another agent holds a claim.",
+          ],
+        },
+      ),
   };
 }
