@@ -153,8 +153,17 @@ export function compareActions(order: PickupOrder = "impact") {
         identity(a, b)
       );
     if (ca.band === 6 && order !== "impact") {
-      const age = order === "oldest" ? created(a) - created(b) : created(b) - created(a);
-      return age || identity(a, b);
+      // Age-only order applies to unclaimed implementation pickup alone (contract: "Explicit
+      // --order oldest/newest"). Other band-6 actions (own continuation, designer `design`,
+      // inspection) keep the normal keys and precede the age-ordered pickup group, which keeps
+      // the comparison a total order.
+      const pa = ca.reasonCodes.includes("age-order");
+      const pb = cb.reasonCodes.includes("age-order");
+      if (pa !== pb) return Number(pa) - Number(pb);
+      if (pa) {
+        const age = order === "oldest" ? created(a) - created(b) : created(b) - created(a);
+        return age || identity(a, b);
+      }
     }
     return (
       Number(cb.boosted) - Number(ca.boosted) ||
@@ -244,6 +253,8 @@ export const unknownAssessments: SubjectAssessments = {
 export const sectionKinds: Readonly<Record<string, ActionKind>> = {
   addressed: "addressed-response",
   "pr-follow-up": "pr-follow-up",
+  // Ranking-only section (see designFollowUpSections): owned design PRs with follow-up findings.
+  "design-follow-up": "pr-follow-up",
   "decision-needed": "decide",
   "documentation-needed": "document",
   "design-review": "design-review",
@@ -253,6 +264,27 @@ export const sectionKinds: Readonly<Record<string, ActionKind>> = {
   "unblock-candidates": "inspect",
   "stale-claims": "inspect",
 };
+
+/**
+ * Ranking input only: for designers, owned design PRs with an actionable follow-up finding are
+ * own-PR delivery follow-up (contract "Default order" band 2, no role qualifier), not design
+ * review (band 3). Moves those rows out of `design-review` into a `design-follow-up` section
+ * placed straight after `addressed`. The displayed role sections are unchanged.
+ */
+export function designFollowUpSections<S extends { name: string; rows: { url: string }[] }>(
+  sections: S[],
+  ownedFollowUp: (url: string) => boolean,
+): S[] {
+  const review = sections.find((s) => s.name === "design-review");
+  const moved = review ? review.rows.filter((r) => ownedFollowUp(r.url)) : [];
+  if (!review || moved.length === 0) return sections;
+  const out = sections.map((s) =>
+    s === review ? { ...s, rows: s.rows.filter((r) => !ownedFollowUp(r.url)) } : s,
+  );
+  const at = out.findIndex((s) => s.name === "addressed") + 1;
+  out.splice(at, 0, { ...review, name: "design-follow-up", rows: moved });
+  return out;
+}
 
 /** The subject facts the candidate builder reads; supplied from the collected snapshot. */
 export interface CandidateSubject {

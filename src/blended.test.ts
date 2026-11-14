@@ -5,8 +5,14 @@
 import { join } from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 import type { AssessmentState } from "./assessments.js";
-import { classify, compareActions, rankActions, roleCandidates } from "./blended.js";
-import type { ActionFacts, ActionKind } from "./blended.js";
+import {
+  classify,
+  compareActions,
+  designFollowUpSections,
+  rankActions,
+  roleCandidates,
+} from "./blended.js";
+import type { ActionFacts, ActionKind, CandidateSubject } from "./blended.js";
 import { briefing } from "./briefing.js";
 import { compactBriefing } from "./compact.js";
 import type { CompactBriefing } from "./compact.js";
@@ -220,6 +226,77 @@ describe("blended comparator bands (#248)", () => {
     const ranked = rankActions(facts, { order: "oldest", limit: 5 });
     expect(ranked.items[1]?.impact).toEqual({ state: "current", size: "XS" });
     expect(classify({ ...facts[0]!, own: true }, "oldest").band).toBe(4);
+  });
+
+  it("keeps the normal keys for designer design actions under explicit oldest/newest", () => {
+    const older = fact(1, "design", unassessed, unassessed, {
+      createdAt: "2026-01-01T00:00:00Z",
+      urgency: 2,
+    });
+    const newer = fact(2, "design", unassessed, unassessed, {
+      createdAt: "2026-06-01T00:00:00Z",
+      urgency: 0,
+      unlocks: 4,
+    });
+    for (const mode of ["impact", "oldest", "newest"] as const)
+      expect(order([older, newer], mode)).toEqual(["design#2", "design#1"]);
+    // Own continuation also keeps urgency, and precedes the age-ordered pickup group.
+    const own = fact(3, "continue-implementation", unassessed, unassessed, {
+      own: true,
+      urgency: 2,
+      createdAt: "2026-09-01T00:00:00Z",
+    });
+    const pickup = fact(4, "implement", unassessed, unassessed, {
+      urgency: 0,
+      createdAt: "2026-01-01T00:00:00Z",
+    });
+    expect(order([pickup, own], "oldest")).toEqual(["continue-implementation#3", "implement#4"]);
+  });
+
+  it("ranks an owned design PR with a follow-up finding as band-2 PR follow-up", () => {
+    const pr = (n: number) => `https://github.com/${repo}/pull/${n}`;
+    const sections = [
+      { name: "addressed", background: false, rows: [] },
+      { name: "decision-needed", background: false, rows: [{ url: url(5) }] },
+      { name: "design-review", background: false, rows: [{ url: pr(10) }, { url: pr(11) }] },
+    ];
+    const moved = designFollowUpSections(sections, (u) => u === pr(11));
+    expect(moved.map((s) => [s.name, s.rows.map((r) => r.url)])).toEqual([
+      ["addressed", []],
+      ["design-follow-up", [pr(11)]],
+      ["decision-needed", [url(5)]],
+      ["design-review", [pr(10)]],
+    ]);
+    expect(designFollowUpSections(sections, () => false)).toBe(sections);
+    const subject = (n: number, u: string, isIssue: boolean) =>
+      [
+        u,
+        { url: u, number: n, state: "OPEN", createdAt: time, labels: [] as string[], isIssue },
+      ] as [string, CandidateSubject];
+    const ranked = rankActions(
+      roleCandidates({
+        repository: repo,
+        role: "designer",
+        agent: "me",
+        sections: moved,
+        subjects: new Map([
+          subject(5, url(5), true),
+          subject(10, pr(10), false),
+          subject(11, pr(11), false),
+        ]),
+        assessments: new Map(),
+        isAddressed: () => false,
+        isParked: () => false,
+        urgency: () => 1,
+        ownedByViewer: () => false,
+      }),
+      { limit: 10 },
+    ).items.map((i) => [i.kind, i.band, Number(i.target.split("/").pop())]);
+    expect(ranked).toEqual([
+      ["pr-follow-up", 2, 11],
+      ["decide", 3, 5],
+      ["design-review", 3, 10],
+    ]);
   });
 
   it("dedupes by stable ID and counts omissions after ranking", () => {

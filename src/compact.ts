@@ -7,9 +7,9 @@ import { assessmentsText, provenanceText } from "./assessments.js";
 import type { SubjectAssessments } from "./assessments.js";
 import type { EstimateEntry } from "./estimation.js";
 import { compareImpact, impactLookup, urgencyBand } from "./ranking.js";
-import { roleSectionRows, roleView } from "./roles.js";
+import { followUpRules, roleSectionRows, roleView } from "./roles.js";
 import type { RoleContext } from "./roles.js";
-import { rankActions, roleCandidates } from "./blended.js";
+import { designFollowUpSections, rankActions, roleCandidates } from "./blended.js";
 import type { BlendedRole, RankedActions } from "./blended.js";
 import type { RoleView } from "./roles.js";
 import type { Action, Issue, PullRequest, Snapshot } from "./types.js";
@@ -291,12 +291,17 @@ export function compactBriefing(
             role: blendedRole,
             ...(options.agent ? { agent: options.agent } : {}),
             ...(facts.ranking.platform ? { platform: facts.ranking.platform } : {}),
-            sections: role.sections.map((section) => ({
-              name: section.name,
-              background: section.background,
-              // Ranking happens before limits: rank every row the selector placed.
-              rows: rowsBySection.get(section.name) ?? section.items,
-            })),
+            sections: designFollowUpSections(
+              role.sections.map((section) => ({
+                name: section.name,
+                background: section.background,
+                // Ranking happens before limits: rank every row the selector placed.
+                rows: rowsBySection.get(section.name) ?? section.items,
+              })),
+              (url) =>
+                linkedMine(byUrl.get(url)) &&
+                (grouped.get(url) ?? []).some((f) => followUpRules.includes(f.rule)),
+            ),
             subjects: new Map(
               objects.map((item) => [
                 item.url,
