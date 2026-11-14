@@ -93,7 +93,17 @@ github-triage claim 42 --repo owner/repository \
   --agent your-agent-name --dry-run
 ```
 
-Briefings and diagnostic commands are read-only. Explicit commands such as `claim`, `needs-human` and `deps add/remove` change GitHub; inspect their help and dry-run output before applying changes. Claiming means current work, with one active claim per agent.
+### Hand over finished work
+
+```sh
+github-triage submit 42 --repo owner/repository \
+  --agent your-agent-name --pr https://github.com/owner/repository/pull/17 --dry-run
+github-triage complete 42 --repo owner/repository --agent your-agent-name --dry-run
+```
+
+`submit` records the pull requests the issue requires, then releases only your claim and sets `status:awaiting-review`; you stay responsible for following up on those PRs without holding a claim. `complete` later verifies delivery from fresh evidence before closing the issue.
+
+Briefings and diagnostic commands are read-only. Explicit commands such as `claim`, `submit`, `complete`, `needs-human` and `deps add/remove` change GitHub; inspect their help and dry-run output before applying changes. Claiming means current work, with one active claim per agent.
 
 ## MCP server (read-only)
 

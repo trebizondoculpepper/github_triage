@@ -64,6 +64,8 @@ import {
   deliverablesArguments,
   deliverablesHelp,
   deliverablesText,
+  submitArguments,
+  submitHelp,
   planDeliverables,
 } from "./deliverables.js";
 import { markerTrust } from "./delivery.js";
@@ -155,6 +157,9 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   deliverables N attach|detach|retarget|handoff|membership|attest|reassign|reset|void
                         --agent NAME ... [--dry-run]  Record required deliverables and
                         responsibility on the issue (deliverables --help)
+  submit N --agent NAME [--pr URL...] [--target owner/name:branch] [--membership open] [--dry-run]
+                        Hand over your PRs: record them, release your claim and set
+                        status:awaiting-review; you stay responsible for follow-up (submit --help)
   complete N --agent NAME [--dry-run]  Verify delivery from fresh evidence (every required PR
                         merged into its live target) and only then record completion and close
                         the issue as completed; never reopens or merges (complete --help)
@@ -677,12 +682,15 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
     await output(values.json ? JSON.stringify(report, null, 2) + "\n" : ticketDoctorText(report));
     return report.completeness.complete ? 0 : 2;
   }
-  if (args[0] === "deliverables") {
+  if (args[0] === "submit" || args[0] === "deliverables") {
+    const submit = args[0] === "submit";
     if (args.length === 1 || args.slice(1).some((a) => a === "--help" || a === "-h")) {
-      await output(deliverablesHelp);
+      await output(submit ? submitHelp : deliverablesHelp);
       return 0;
     }
-    const { request, repo, json, dryRun } = deliverablesArguments(args.slice(1));
+    const { request, repo, json, dryRun } = submit
+      ? submitArguments(args.slice(1))
+      : deliverablesArguments(args.slice(1));
     const repository = repo ?? (await runtime.currentRepository());
     // Per run: a permission learned now is never reused by a later invocation.
     const permission = permissionLookup(repository, runtime.rest ?? ghRest);
