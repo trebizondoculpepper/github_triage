@@ -170,11 +170,14 @@ export async function readSnapshotAssessments(
     complexity,
     trust = unknownTrust,
     platform,
+    signal,
   }: {
     impact: MetricAvailability;
     complexity: MetricAvailability;
     trust?: TrustDecision;
     platform?: string;
+    /** Cancellation: rejects with the abort reason; never returns a partial map. */
+    signal?: AbortSignal;
   },
 ): Promise<Map<string, SubjectAssessments>> {
   const open = snapshot.issues.filter((issue) => issue.state === "OPEN");
@@ -193,6 +196,7 @@ export async function readSnapshotAssessments(
   const result = new Map<string, SubjectAssessments>();
   // Sequential, so the permission cache answers repeated authors without a second request.
   for (const issue of open) {
+    signal?.throwIfAborted();
     const unlocks = unlocksOf(issue.url);
     result.set(issue.url, {
       impact: await read(impactMetric, impact, issue),
@@ -201,6 +205,7 @@ export async function readSnapshotAssessments(
       unlocksUnknown: unlocks.unknown,
     });
   }
+  signal?.throwIfAborted();
   return result;
 }
 

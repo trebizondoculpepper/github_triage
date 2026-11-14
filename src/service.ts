@@ -49,6 +49,7 @@ export async function presentBriefing(
   now: Date = new Date(),
   redactDiagnostic?: (text: string) => string,
   trust?: TrustDecision,
+  signal?: AbortSignal,
 ): Promise<PresentedBriefing> {
   // Sizes come from the snapshot's labels (#152); only configuration is read here.
   const collected = await collectLabelEstimationInput(snapshot.repository, estimationRuntime);
@@ -71,6 +72,7 @@ export async function presentBriefing(
     impact: await metricStatus(impactMetric, snapshot.repository, estimationRuntime),
     trust,
     platform: options.platform,
+    signal,
   });
   const expanded = briefing(
     snapshot,
@@ -172,7 +174,10 @@ export async function readBriefing(
     runtime.estimation,
     runtime.now?.(),
     runtime.redactDiagnostic,
-    runtime.rest ? markerTrust(permissionLookup(request.repository, runtime.rest)) : undefined,
+    runtime.rest
+      ? markerTrust(permissionLookup(request.repository, runtime.rest, request.signal))
+      : undefined,
+    request.signal,
   );
   return { kind: "report", ...presented };
 }

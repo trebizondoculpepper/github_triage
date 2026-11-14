@@ -369,6 +369,64 @@ describe("side-by-side assessments (#247)", () => {
     expect(byNumber(report, 1)?.assessments?.complexity.provenance).toBe(commentUrl(1, 12));
   });
 
+  it("stops permission reads when the request is cancelled mid-assessment and reports no result", async () => {
+    const controller = new AbortController();
+    const calls: string[] = [];
+    const seen: (AbortSignal | undefined)[] = [];
+    // The first lookup is in flight when the client cancels; it settles only through the signal.
+    const rest: Rest = (path, options) => {
+      calls.push(path);
+      seen.push(options?.signal);
+      setTimeout(() => controller.abort(), 0);
+      return new Promise((_, reject) => {
+        options?.signal?.addEventListener("abort", () => reject(options.signal?.reason));
+      });
+    };
+    const read = readBriefing(
+      {
+        collect: collector(fixture),
+        dependencyReport: async () => {
+          throw new Error("unused");
+        },
+        now: () => new Date(time),
+        estimation: estimation(),
+        rest,
+      },
+      { repository: repo, limit: 10, maxChars: 10000, signal: controller.signal },
+    );
+    await expect(read).rejects.toMatchObject({ name: "AbortError" });
+    expect(calls).toHaveLength(1);
+    expect(seen[0]).toBe(controller.signal);
+  });
+
+  it("starts no permission lookup and returns no partial map once already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const calls: string[] = [];
+    const snapshot = await collector(fixture)(repo);
+    const read = readSnapshotAssessments(snapshot, {
+      impact: "available",
+      complexity: "available",
+      trust: markerTrust(permissionLookup(repo, permissions(calls), controller.signal)),
+      signal: controller.signal,
+    });
+    await expect(read).rejects.toMatchObject({ name: "AbortError" });
+    expect(calls).toEqual([]);
+  });
+
+  it("does not turn a cancelled permission lookup into an unknown answer", async () => {
+    const controller = new AbortController();
+    const lookup = permissionLookup(
+      repo,
+      async () => {
+        controller.abort();
+        throw new Error("gh terminated");
+      },
+      controller.signal,
+    );
+    await expect(lookup("maintainer")).rejects.toMatchObject({ name: "AbortError" });
+  });
+
   it("keeps every shown row whole under a small text budget", async () => {
     const snapshot = await collector(fixture)(repo);
     const presented = await presentBriefing(

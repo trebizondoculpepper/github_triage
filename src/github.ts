@@ -143,12 +143,17 @@ export interface RestAnswer {
   status: number | null;
   body: unknown;
 }
-export type Rest = (path: string) => Promise<RestAnswer>;
+/**
+ * Read-only REST GET. With `options.signal`, an implementation stops before starting and aborts
+ * a running request; an aborted signal rejects rather than answering.
+ */
+export type Rest = (path: string, options?: { signal?: AbortSignal }) => Promise<RestAnswer>;
 
 /** Read-only REST GET through gh (which follows GitHub's transfer redirects). */
 export const ghRestWith =
-  (signal?: AbortSignal): Rest =>
-  async (path) => {
+  (bound?: AbortSignal): Rest =>
+  async (path, options) => {
+    const signal = options?.signal ?? bound;
     signal?.throwIfAborted();
     try {
       const { stdout } = await execute("gh", ["api", path], { timeout: 30_000, signal });
@@ -720,14 +725,21 @@ export const writePermissions: ReadonlySet<RepositoryPermission> = new Set([
  * answer (404, missing access, rate limit), a transport error, a body for another user or an
  * unrecognised value is `unknown`, which grants nothing.
  */
-export function permissionLookup(repository: string, rest: Rest = ghRest): PermissionLookup {
+export function permissionLookup(
+  repository: string,
+  rest: Rest = ghRest,
+  signal?: AbortSignal,
+): PermissionLookup {
   const cache = new Map<string, Promise<RepositoryPermission>>();
   const lookup = async (login: string): Promise<RepositoryPermission> => {
+    // A cancelled run starts no further requests and never reports a partial answer as unknown.
+    signal?.throwIfAborted();
     // A GitHub user login; anything else (an app's `name[bot]`, a malformed value) is never asked.
     if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(login)) return "unknown";
     try {
       const answer = await rest(
         `repos/${repository}/collaborators/${encodeURIComponent(login)}/permission`,
+        signal ? { signal } : undefined,
       );
       if (answer.status !== 200 || !isRecord(answer.body)) return "unknown";
       const user = prop(answer.body, "user", "login");
@@ -740,6 +752,7 @@ export function permissionLookup(repository: string, rest: Rest = ghRest): Permi
         ? (legacy as RepositoryPermission)
         : "unknown";
     } catch {
+      signal?.throwIfAborted();
       return "unknown";
     }
   };
