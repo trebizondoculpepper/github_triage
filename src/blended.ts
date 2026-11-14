@@ -338,12 +338,12 @@ export function roleCandidates(input: CandidateInput): ActionFacts[] {
     if (!s) return null;
     const a = input.assessments.get(url) ?? unknownAssessments;
     const detail = s.isIssue
-      ? `github-triage --repo ${input.repository} --issue ${s.number} --json`
+      ? `pdb --repo ${input.repository} --issue ${s.number} --json`
       : `gh pr view ${s.number} --repo ${input.repository}`;
     const estimate = (m: string, invalid = false) =>
-      `github-triage estimate ${s.number} --metric ${m} --size SIZE --rationale TEXT${invalid ? " --replace-invalid" : ""} --repo ${input.repository}`;
+      `pdb estimate ${s.number} --metric ${m} --size SIZE --rationale TEXT${invalid ? " --replace-invalid" : ""} --repo ${input.repository}`;
     const restricted = s.labels.some((l) => l.startsWith("platform:"));
-    const claim = `github-triage claim ${s.number} --repo ${input.repository} --agent ${agent}${
+    const claim = `pdb claim ${s.number} --repo ${input.repository} --agent ${agent}${
       restricted && input.platform ? ` --platform ${input.platform}` : ""
     }`;
     // One active claim per agent (src/claims.ts OTHER_ACTIVE_CLAIM): a claim on another ticket is
@@ -352,7 +352,7 @@ export function roleCandidates(input: CandidateInput): ActionFacts[] {
     const otherClaims = kind === "implement" ? ownActive.filter((n) => n !== s.number) : [];
     const handoff =
       otherClaims.length === 1
-        ? `github-triage release ${otherClaims[0]} --repo ${input.repository} --agent ${agent} --as incomplete --note TEXT`
+        ? `pdb release ${otherClaims[0]} --repo ${input.repository} --agent ${agent} --as incomplete --note TEXT`
         : null;
     const command: Partial<Record<ActionKind, string | null>> = {
       implement: otherClaims.length ? handoff : claim,
@@ -394,7 +394,7 @@ export function roleCandidates(input: CandidateInput): ActionFacts[] {
       inspection: next
         ? null
         : otherClaims.length
-          ? `one active claim per agent: release #${otherClaims.join(", #")} first (github-triage release N --repo ${input.repository} --agent ${agent} --as incomplete --note TEXT), then ${claim}`
+          ? `one active claim per agent: release #${otherClaims.join(", #")} first (pdb release N --repo ${input.repository} --agent ${agent} --as incomplete --note TEXT), then ${claim}`
           : kind === "inspect-assessment"
             ? `${metric} evidence is ${a[metric].state}; inspect labels and provenance (${detail})`
             : `inspect before acting (${detail})`,

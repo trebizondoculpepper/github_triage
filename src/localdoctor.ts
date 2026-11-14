@@ -240,8 +240,8 @@ export async function localDoctor(
           ? `This checkout has no GitHub remote for ${options.repo}.`
           : "This checkout does not have exactly one GitHub remote; the intended project is ambiguous.",
       next: notRepo
-        ? ["cd <CHECKOUT_OF_INTENDED_REPOSITORY> && github-triage doctor"]
-        : ["git remote -v", "github-triage doctor --repo <OWNER/NAME>"],
+        ? ["cd <CHECKOUT_OF_INTENDED_REPOSITORY> && pdb doctor"]
+        : ["git remote -v", "pdb doctor --repo <OWNER/NAME>"],
     });
   }
 
@@ -274,7 +274,7 @@ export async function localDoctor(
               detail: `No ${IDENTITY_FILE} at the checkout root. Setting a triage role creates it (Git-excluded) with a generated name; explicit --agent still works meanwhile.`,
               next: [
                 withRepo(
-                  "github-triage config set identity.triage_role <TRIAGE_ROLE> --entry <ENTRY>",
+                  "pdb config set identity.triage_role <TRIAGE_ROLE> --entry <ENTRY>",
                   report.repository,
                 ),
               ],
@@ -389,7 +389,7 @@ export async function localDoctor(
             source: "no --agent and no persisted name of a selected entry",
             detail:
               "No agent identity resolved. A shared GitHub login does not identify an agent; reads are unfocused.",
-            next: [withRepo("github-triage doctor --agent <AGENT_NAME>", report.repository)],
+            next: [withRepo("pdb doctor --agent <AGENT_NAME>", report.repository)],
           },
   );
 
@@ -404,7 +404,7 @@ export async function localDoctor(
           status: "unknown",
           source: "no --role and no persisted triage_role of a selected entry",
           detail: `No triage role resolved; a generic 'role' key is not a triage role. Supported views: ${roles.join(", ")}.`,
-          next: [withRepo("github-triage doctor --role <ROLE>", report.repository)],
+          next: [withRepo("pdb doctor --role <ROLE>", report.repository)],
         }
       : roles.includes(role)
         ? {
@@ -419,7 +419,7 @@ export async function localDoctor(
             status: "invalid",
             source: "--role",
             detail: `${role} is not a registered view. Supported: ${roles.join(", ")}.`,
-            next: roles.map((r) => withRepo(`github-triage doctor --role ${r}`, report.repository)),
+            next: roles.map((r) => withRepo(`pdb doctor --role ${r}`, report.repository)),
           },
   );
 
@@ -501,7 +501,7 @@ async function identityChecks(
         // The service's message carries line/column only, never file text.
         detail: `${caught.message} Doctor does not repair it.`,
         next: [
-          `Fix ${IDENTITY_FILE} at the checkout root by hand, then run: ${withRepo("github-triage doctor", repository)}`,
+          `Fix ${IDENTITY_FILE} at the checkout root by hand, then run: ${withRepo("pdb doctor", repository)}`,
         ],
       });
       unknownRest(1, `${IDENTITY_FILE} malformed`, "The identity file could not be parsed.");
@@ -525,7 +525,7 @@ async function identityChecks(
       status: "invalid",
       source: options.entry !== undefined ? "--entry" : "--harness",
       detail: caught.message,
-      next: [withRepo("github-triage doctor --entry <ENTRY>", repository)],
+      next: [withRepo("pdb doctor --entry <ENTRY>", repository)],
     });
     unknownRest(2, "no entry selected", "No identity entry was selected.");
     return result;
@@ -540,7 +540,7 @@ async function identityChecks(
           ? `${resolution.reason} (signals: ${resolution.signals.join(", ")})`
           : resolution.reason,
       detail: `${resolution.message} Select the entry explicitly.`,
-      next: choices.map((entry) => withRepo(`github-triage doctor --entry ${entry}`, repository)),
+      next: choices.map((entry) => withRepo(`pdb doctor --entry ${entry}`, repository)),
     });
     unknownRest(2, "no entry selected", "No identity entry was selected.");
     return result;
@@ -554,7 +554,7 @@ async function identityChecks(
       : resolution.source;
   const select = `--entry ${entry}`;
   const initialise = TRIAGE_ROLES.map((role) =>
-    withRepo(`github-triage config set identity.triage_role ${role} ${select}`, repository),
+    withRepo(`pdb config set identity.triage_role ${role} ${select}`, repository),
   );
   const record = await readIdentity(root, entry, fs);
   if (!record.entryExists) {
@@ -582,7 +582,7 @@ async function identityChecks(
       source,
       detail: `agents.${entry} in ${IDENTITY_FILE} is not a table. Doctor does not repair it.`,
       next: [
-        `Fix [agents.${entry}] in ${IDENTITY_FILE} by hand, then run: ${withRepo(`github-triage doctor ${select}`, repository)}`,
+        `Fix [agents.${entry}] in ${IDENTITY_FILE} by hand, then run: ${withRepo(`pdb doctor ${select}`, repository)}`,
       ],
     });
     unknownRest(2, "entry malformed", "The selected entry is not a table.");
@@ -614,9 +614,7 @@ async function identityChecks(
           detail: nameInvalid
             ? "The stored name is not a valid agent name (value not shown)."
             : "The selected entry has no persisted name.",
-          next: [
-            withRepo(`github-triage config set identity.name <AGENT_NAME> ${select}`, repository),
-          ],
+          next: [withRepo(`pdb config set identity.name <AGENT_NAME> ${select}`, repository)],
         },
   );
 

@@ -43,11 +43,11 @@ import type { ConfigFileSystem, GitRunner } from "./config.js";
 import { ghGraphqlApi, isRecord, prop } from "./github.js";
 import type { GraphqlAnswer, GraphqlApi } from "./github.js";
 
-export const estimateUsage = `Usage: github-triage estimate N [--metric complexity|impact] --size SIZE --rationale TEXT
+export const estimateUsage = `Usage: pdb estimate N [--metric complexity|impact] --size SIZE --rationale TEXT
          [--assumption TEXT]... [--reference REF]... [--agent NAME] [--replace SIZE]
          [--replace-invalid] [--json] [--repo owner/name]
-       github-triage estimate --help [--metric complexity|impact] [--json]
-(From a source checkout, use npm run triage -- estimate ...)
+       pdb estimate --help [--metric complexity|impact] [--json]
+(From a source checkout, use npm run pdb -- estimate ...)
 Record a complexity size for issue N as the label complexity:SIZE, with its provenance in an
 issue comment (marker github-triage:complexity-estimate v2).
   --metric METRIC       complexity (default; effort) or impact (judged benefit, recorded as
@@ -135,7 +135,7 @@ export function provenanceComment(p: MetricProvenance): string {
   const title = d === impactMetric ? "Impact" : "Complexity";
   const lines = [
     `<!-- ${d.marker} ${commentSafe(p)} -->`,
-    `**${title} estimate: ${p.size}**${p.previous.length ? ` (was ${p.previous.join(", ")})` : ""} — recorded with github-triage, guidance version ${p.guidanceVersion}.`,
+    `**${title} estimate: ${p.size}**${p.previous.length ? ` (was ${p.previous.join(", ")})` : ""} — recorded with pdb, guidance version ${p.guidanceVersion}.`,
     "",
     `Rationale: ${p.rationale}`,
   ];
@@ -537,7 +537,7 @@ export async function runEstimate(
         "disabled",
         2,
         `${Title} is disabled for ${target.repository} (${d.enabledKey} = false); nothing was recorded.`,
-        `Opt in with: github-triage config set ${d.enabledKey} true`,
+        `Opt in with: pdb config set ${d.enabledKey} true`,
       );
     const trust: TrustDecision | undefined = impact
       ? (runtime.trust?.(target.repository) ??
@@ -667,7 +667,7 @@ export async function runEstimate(
           repository: before.repositoryId,
           name: label,
           color: d.labelColor,
-          description: `${Title} estimate ${size} (github-triage estimate)`,
+          description: `${Title} estimate ${size} (pdb estimate)`,
         }),
       );
       const node = labelNode(prop(created.data, "createLabel", "label"));

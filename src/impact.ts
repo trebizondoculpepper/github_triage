@@ -5,7 +5,7 @@
  * One versioned definition, the same shape as `ComplexityGuidance`, so the same renderers can
  * serve it. It describes the judged benefit of the completed outcome, not effort, and never the
  * computed unlock utility (`immediateUnlocks`). #246 renders it in CLI help
- * (`estimate --help --metric impact [--json]`) and MCP help (`github-triage-mcp --help`) through
+ * (`estimate --help --metric impact [--json]`) and MCP help (`pdb-mcp --help`) through
  * the shared renderer, so the prose is never maintained twice.
  */
 import { COMPLEXITY_SIZES, guidanceText } from "./complexity.js";
@@ -87,7 +87,7 @@ export const impactGuidance: ComplexityGuidance = {
   ],
 };
 
-/** Plain-text rendering used by `github-triage estimate --help --metric impact`. */
+/** Plain-text rendering used by `pdb estimate --help --metric impact`. */
 export function impactGuidanceText(g: ComplexityGuidance = impactGuidance): string {
   return guidanceText(
     "Impact estimation guidance",
@@ -111,7 +111,7 @@ export function impactGuidanceSummary(g: ComplexityGuidance = impactGuidance): s
   return `Impact estimation guidance (version ${g.guidanceVersion}): ${g.scale}
 ${g.bands.map((b) => `  ${b.size.padEnd(width)}  ${b.guidance}`).join("\n")}
 ${[...g.method, ...g.boundaries].map((line) => `  - ${line}`).join("\n")}
-Full guidance: github-triage estimate --help --metric impact [--json]
-Record (CLI): github-triage estimate N --metric impact --size SIZE --rationale TEXT --repo owner/name
+Full guidance: pdb estimate --help --metric impact [--json]
+Record (CLI): pdb estimate N --metric impact --size SIZE --rationale TEXT --repo owner/name
 `;
 }

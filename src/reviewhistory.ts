@@ -505,7 +505,7 @@ export function reviewHistory(
     .sort((a, b) => rank(a) - rank(b) || (b.round ?? 0) - (a.round ?? 0))
     .slice(0, historyLimits.findings);
   const uniqueWarnings = [...new Set(warnings)];
-  const command = `github-triage pr ${pr.number} --repo ${repository}`;
+  const command = `pdb pr ${pr.number} --repo ${repository}`;
 
   return {
     schemaVersion: 1,

@@ -593,7 +593,7 @@ export function briefing(snapshot: Snapshot, options: BriefingOptions, now: Date
           .filter((link) => /(?:^|\/)doc\//.test(link) || /(?:^|\/)AGENTS\.md$/.test(link)),
       ),
     ],
-    detailCommand: `npm run --silent triage -- --repo ${snapshot.repository} --issue ${issue.number} --json`,
+    detailCommand: `npm run --silent pdb -- --repo ${snapshot.repository} --issue ${issue.number} --json`,
     /** Impact, complexity and unlock utility side by side (#247); null for PRs and closed issues. */
     assessments: options.assessments?.get(issue.url) ?? null,
   });
@@ -711,7 +711,7 @@ export function briefing(snapshot: Snapshot, options: BriefingOptions, now: Date
 export type Briefing = ReturnType<typeof briefing>;
 export function textReport(report: Briefing): string {
   const lines = [
-    `GitHub action briefing: ${report.repository}`,
+    `Presidential Daily Briefing: ${report.repository}`,
     `Fetched ${report.freshness.fetchedAt}${report.freshness.offline ? ` — OFFLINE CACHE (${report.freshness.ageSeconds}s old), live verification unavailable` : " — LIVE fetch window"}`,
     report.guidance,
   ];

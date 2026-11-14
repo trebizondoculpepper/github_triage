@@ -3,7 +3,7 @@
  * "#65: daily cache and quiet notices".
  *
  * Wraps the basic check (#51) with one small human-readable JSON file in the per-user cache
- * directory (`env-paths('github-triage').cache`), shared by every project checkout. Each npm
+ * directory (`env-paths('presidential-daily-briefing').cache`), shared by every project checkout. Each npm
  * channel is looked up at most once per 24 hours, failed lookups included, and a given
  * available version is announced at most once per 24 hours. Writes use atomic replacement under
  * a short-lived exclusive lock with bounded waiting and stale-lock recovery. If the cache cannot
@@ -68,7 +68,7 @@ export interface CachedCheckOptions extends CheckOptions {
 
 /** The per-user cache directory (XDG_CACHE_HOME, ~/Library/Caches, %LOCALAPPDATA%). */
 export function defaultCacheDir(): string {
-  return envPaths("github-triage").cache;
+  return envPaths("presidential-daily-briefing").cache;
 }
 
 /** Read the cache; a missing, unreadable, corrupt or foreign-schema file counts as absent. */

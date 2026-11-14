@@ -1566,14 +1566,14 @@ describe("dependency migration", () => {
 });
 
 describe("help names the installed command (#53)", () => {
-  it("leads with github-triage and mentions the checkout form only as an alternative", async () => {
+  it("leads with pdb and mentions the checkout form only as an alternative", async () => {
     let main_ = "";
     let deps = "";
     await main(["--help"], async (t) => void (main_ = t));
     await main(["deps", "--help"], async (t) => void (deps = t));
     for (const text of [main_, deps]) {
-      expect(text).toMatch(/^Usage: github-triage /);
-      expect(text.split("\n").filter((l) => /^\s*npm run triage/.test(l))).toEqual([]);
+      expect(text).toMatch(/^Usage: pdb /);
+      expect(text.split("\n").filter((l) => /^\s*npm run pdb/.test(l))).toEqual([]);
     }
   });
 });
@@ -1769,9 +1769,7 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
     const owned = await claim({ labels: ["status:ready", "agent:other"] });
     expect(refused(owned).recovery.join(" ")).not.toMatch(/agent:other/);
     const other = await claim({ labels: ["status:ready"], claims: [9] });
-    expect(refused(other).recovery[0]).toMatch(
-      /^github-triage release 9 --agent kavya --as incomplete/,
-    );
+    expect(refused(other).recovery[0]).toMatch(/^pdb release 9 --agent kavya --as incomplete/);
     expect(
       (await claim({ labels: ["status:incomplete", "platform:ori"] }, { platform: "ori" })).ok,
     ).toBe(true);
@@ -1789,11 +1787,11 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
       await claim({ labels: ["status:ready"], openPrs: [70], comments: [doneBy("kavya")] }),
     ];
     const commands = plans.flatMap((p) => refused(p).recovery);
-    expect(commands.filter((c) => c.startsWith("github-triage ")).length).toBeGreaterThan(5);
+    expect(commands.filter((c) => c.startsWith("pdb ")).length).toBeGreaterThan(5);
     for (const c of commands) {
       expect(c).not.toMatch(/(^|\s)#/);
       const words = shellWords(c);
-      if (words[0] !== "github-triage" && words[0] !== "gh") continue;
+      if (words[0] !== "pdb" && words[0] !== "gh") continue;
       expect(words.indexOf("--repo"), c).toBeGreaterThan(0);
       expect(words[words.indexOf("--repo") + 1], c).toBe(repo);
     }
@@ -1820,9 +1818,7 @@ describe("claim and needs-human (doc/design/workflow.md)", () => {
     it("refuses a plain claim on awaiting review but offers the explicit --rework reclaim", async () => {
       const plan = await claim(waiting());
       expect(plan).toMatchObject({ ok: false, error: "NOT_READY" });
-      expect(refused(plan).recovery[0]).toBe(
-        `github-triage claim 7 --agent kavya --rework --repo ${repo}`,
-      );
+      expect(refused(plan).recovery[0]).toBe(`pdb claim 7 --agent kavya --rework --repo ${repo}`);
     });
     it("reclaims the caller's own awaiting-review issue: claims and leaves review state", async () => {
       const env = fake({ ...waiting(), repoLabels: ["agent:kavya"] });
@@ -2168,7 +2164,7 @@ describe("claim and needs-human review fixes", () => {
     const blocked = base(["status:ready"]);
     blocked.repository.issueOrPullRequest.issueDependenciesSummary.blockedBy = 1;
     const plan = await planClaim(repo, { number: 7, agent: "kavya" }, async () => blocked);
-    expect(refused(plan).recovery[0]).toBe(`github-triage deps 7 --repo ${repo}`);
+    expect(refused(plan).recovery[0]).toBe(`pdb deps 7 --repo ${repo}`);
     const { shellQuote } = await import("./claims.js");
     expect(shellQuote("$(rm -rf x)")).toBe("'$(rm -rf x)'");
     expect(shellQuote("it's")).toBe("'it'\\''s'");
@@ -2625,7 +2621,7 @@ describe("version check (#51, doc/design/updates.md)", () => {
     });
     expect(stable).toMatchObject({ status: "newer", available: "0.2.0", channel: "latest" });
     expect(updateAdvisory(stable)).toBe(
-      "github-triage 0.2.0 is available (installed 0.1.0). Update with: npm install -g @trebizondoculpepper/github-triage",
+      "pdb 0.2.0 is available (installed 0.1.0). Update with: npm install -g @trebizondoculpepper/presidential-daily-briefing",
     );
     const pre = await checkForUpdate({
       installed: installed("0.2.1-next.1"),
@@ -2677,7 +2673,7 @@ describe("version check (#51, doc/design/updates.md)", () => {
       fetchImpl: registry({ latest: "0.1.0" }, seen),
     });
     expect(seen).toEqual([
-      "https://registry.npmjs.org/-/package/@trebizondoculpepper%2fgithub-triage/dist-tags",
+      "https://registry.npmjs.org/-/package/@trebizondoculpepper%2fpresidential-daily-briefing/dist-tags",
     ]);
   });
   it("prints the advisory on stderr after the command, keeping JSON stdout valid", async () => {
@@ -2698,14 +2694,14 @@ describe("version check (#51, doc/design/updates.md)", () => {
           installed: "0.1.0",
           available: "0.2.0",
           channel: "latest",
-          command: "npm install -g @trebizondoculpepper/github-triage",
+          command: "npm install -g @trebizondoculpepper/presidential-daily-briefing",
         }),
       };
       expect(
         await main(["--offline", "--cache", cache, "--json"], async (t) => void (out = t), runtime),
       ).toBe(0);
       expect(() => JSON.parse(out)).not.toThrow();
-      expect(err.join("")).toMatch(/^github-triage 0\.2\.0 is available/);
+      expect(err.join("")).toMatch(/^pdb 0\.2\.0 is available/);
       // Help does not wait on the network.
       let checked = 0;
       await main(["--help"], async () => {}, {
@@ -3083,7 +3079,7 @@ describe("daily cached version check (#65, doc/design/updates.md)", () => {
       expect(reg.calls).toEqual([]);
       expect(await readdir(cacheDir)).toEqual([]);
     });
-    expect(defaultCacheDir()).toMatch(/github-triage/);
+    expect(defaultCacheDir()).toMatch(/presidential-daily-briefing/);
     expect(defaultCacheDir().startsWith(process.cwd())).toBe(false);
   });
 });
@@ -3269,7 +3265,7 @@ describe("Ticket Doctor v1 (#66, doc/design/diagnostics.md)", () => {
       expect(argv.slice(1, 4)).toEqual(["issue", "edit", argv[3]]);
       return;
     }
-    expect(argv[0]).toBe("github-triage");
+    expect(argv[0]).toBe("pdb");
     const [sub, ...rest] = argv.slice(1);
     if (sub === "release" || sub === "needs-human" || sub === "claim")
       expect(() => workflowArgumentsFor(sub, rest)).not.toThrow();
@@ -3333,16 +3329,16 @@ describe("Ticket Doctor v1 (#66, doc/design/diagnostics.md)", () => {
     const openPr = r.tickets.find((x) => x.number === 7)!.findings[0].plan;
     expect(openPr.judgment).toBe(false);
     expect(openPr.steps.map((s) => s.command)).toEqual([
-      `github-triage who 7 --repo ${repo}`,
-      `github-triage --issue 7 --json --repo ${repo}`,
-      `github-triage pr 90 --repo ${repo}`,
+      `pdb who 7 --repo ${repo}`,
+      `pdb --issue 7 --json --repo ${repo}`,
+      `pdb pr 90 --repo ${repo}`,
       `gh issue edit 7 --repo ${repo} --add-label status:awaiting-review --remove-label status:ready`,
     ]);
     const cycle = r.tickets.find((x) => x.number === 11)!.findings[0].plan;
     expect(cycle.facts).toEqual(["Path (blocked by): #11 -> #12 -> #11"]);
     expect(cycle.steps.map((s) => s.command)).toEqual([
-      `github-triage deps 11 --tree --repo ${repo}`,
-      `github-triage deps remove 11 --on 12 --note '<WHY>' --repo ${repo}`,
+      `pdb deps 11 --tree --repo ${repo}`,
+      `pdb deps remove 11 --on 12 --note '<WHY>' --repo ${repo}`,
     ]);
     expect(cycle.judgment).toBe(true);
     const owners = steps(r, 6, "multiple-owners").map((s) => s.choice);
@@ -3351,7 +3347,7 @@ describe("Ticket Doctor v1 (#66, doc/design/diagnostics.md)", () => {
       .find((x) => x.number === 9)!
       .findings.find((f) => f.kind === "stale-agent-activity")!.plan;
     expect(stale.facts[0]).toMatch(/^Last activity .* \(/);
-    expect(stale.steps[0].command).toBe(`github-triage who 9 --repo ${repo}`);
+    expect(stale.steps[0].command).toBe(`pdb who 9 --repo ${repo}`);
     expect(
       stale.steps
         .slice(1)
@@ -4580,7 +4576,7 @@ describe("who is working on a ticket (#61, doc/design/diagnostics.md)", () => {
     expect(r.answer).toBe("recorded claim: ana");
     expect(r.presence).toMatch(/^unknown/);
     expect(kinds(r)).toEqual([]);
-    expect(r.next).toContain(`github-triage --repo ${repo} --issue 1`);
+    expect(r.next).toContain(`pdb --repo ${repo} --issue 1`);
     expect(ticketOwnershipText(r)).toContain("Presence: unknown");
   });
   it("comment-only reported work is a candidate, not a claim", () => {
@@ -4602,7 +4598,7 @@ describe("who is working on a ticket (#61, doc/design/diagnostics.md)", () => {
     expect(r.pullRequests.map((p) => p.number)).toEqual([4]);
     expect(kinds(r)).toEqual(["candidate:unowned-open-pr"]);
     expect(r.latestActivity!.source).toBe("PR #4 updated");
-    expect(r.next).toContain(`github-triage pr 4 --repo ${repo}`);
+    expect(r.next).toContain(`pdb pr 4 --repo ${repo}`);
   });
   it("multiple owners are definite; a claim after a handoff comment is a candidate contradiction", () => {
     const r = lookup(
@@ -4721,7 +4717,7 @@ describe("repository configuration service (#116, doc/design/repository-configur
     expect(retiredKeyNotices(config)).toEqual([
       expect.objectContaining({
         key: "complexity.fieldId",
-        next: "github-triage config set complexity.enabled false",
+        next: "pdb config set complexity.enabled false",
       }),
     ]);
     expect(memory.files.get(path)).toBe(raw);
@@ -5074,7 +5070,7 @@ describe("shared repository settings in TOML (#160, doc/design/configuration-for
     const memory = memoryFs();
     await updateConfig(target, new Map([["processGuide", false]]), { fs: memory.fs, token });
     const text = memory.files.get(tomlPath)!;
-    expect(text.startsWith("# Shared github-triage repository settings")).toBe(true);
+    expect(text.startsWith("# Shared pdb repository settings")).toBe(true);
     expect(text).toContain("schemaVersion = 1\nprocessGuide = false\n");
     expect([...memory.files.keys()]).toEqual([tomlPath]);
     const config = await loadConfig(root, memory.fs);
@@ -5108,7 +5104,7 @@ describe("shared repository settings in TOML (#160, doc/design/configuration-for
     const error = await loadConfig(root, memory.fs).catch((caught: unknown) => caught);
     expect(error).toMatchObject({ code: "duplicate-config" });
     expect((error as ConfigError).message).toContain("same settings");
-    expect((error as ConfigError).recovery).toContain("\ngithub-triage config convert");
+    expect((error as ConfigError).recovery).toContain("\npdb config convert");
     await expect(
       updateConfig(target, new Map([["processGuide", true]]), { fs: memory.fs, token }),
     ).rejects.toMatchObject({ code: "duplicate-config" });
@@ -5126,8 +5122,8 @@ describe("shared repository settings in TOML (#160, doc/design/configuration-for
     expect(error.code).toBe("duplicate-config");
     expect(error.message).toContain("disagree on complexity.enabled, processGuide");
     expect(error.recovery.split("\n").slice(1)).toEqual([
-      "github-triage config convert --prefer toml",
-      "github-triage config convert --prefer json",
+      "pdb config convert --prefer toml",
+      "pdb config convert --prefer json",
     ]);
     expect(error.recovery).not.toContain("#");
     await expect(convertConfig(target, { fs: memory.fs, token })).rejects.toMatchObject({
@@ -5198,7 +5194,7 @@ describe("shared repository settings in TOML (#160, doc/design/configuration-for
       (caught: unknown) => caught,
     )) as ConfigError;
     expect(error.code).toBe("partial-conversion");
-    expect(error.recovery).toContain("github-triage config convert --prefer json");
+    expect(error.recovery).toContain("pdb config convert --prefer json");
     expect(memory.files.get(jsonPath)).toBe('{"schemaVersion":1,"processGuide":true}');
     expect(memory.files.has(tomlPath)).toBe(true);
   });
@@ -5211,7 +5207,7 @@ describe("shared repository settings in TOML (#160, doc/design/configuration-for
     )) as ConfigError;
     expect(error.code).toBe("partial-conversion");
     expect(error.message).toContain("verified settings");
-    expect(error.recovery.split("\n").at(-1)).toBe("github-triage config convert");
+    expect(error.recovery.split("\n").at(-1)).toBe("pdb config convert");
     expect(memory.files.get(jsonPath)).toBe(JSON_SETTINGS);
     memory.hooks.failRemove = undefined;
     // The retired key is ignored when comparing, so the stores agree and the JSON is removed.
@@ -5254,7 +5250,7 @@ describe("shared repository settings in TOML (#160, doc/design/configuration-for
         (caught: unknown) => caught,
       )) as ConfigError;
       expect(error.code).toBe("partial-conversion");
-      expect(error.recovery).toContain("github-triage config convert --prefer");
+      expect(error.recovery).toContain("pdb config convert --prefer");
       expect(memory.files.get(jsonPath)).toBe(json);
     },
   );
@@ -5281,7 +5277,7 @@ describe("shared repository settings in TOML (#160, doc/design/configuration-for
     )) as ConfigError;
     expect(error.code).toBe("partial-conversion");
     const command = error.recovery.split("\n").at(-1)!;
-    expect(command).toBe("github-triage config convert --prefer json");
+    expect(command).toBe("pdb config convert --prefer json");
     memory.hooks.afterRename = undefined;
     expect(await convertConfig(target, { fs: memory.fs, token, prefer: "json" })).toMatchObject({
       status: "replaced-toml",
@@ -5300,7 +5296,7 @@ describe("shared repository settings in TOML (#160, doc/design/configuration-for
       (caught: unknown) => caught,
     )) as ConfigError;
     expect(error.code).toBe("duplicate-config");
-    expect(error.recovery).toContain("github-triage config convert --prefer toml");
+    expect(error.recovery).toContain("pdb config convert --prefer toml");
     expect(await convertConfig(target, { fs: memory.fs, token, prefer: "toml" })).toMatchObject({
       status: "removed-json",
       wroteToml: false,
@@ -5439,7 +5435,7 @@ describe("shared repository settings in TOML (#160, doc/design/configuration-for
           format: "json",
           path: LEGACY_CONFIG_PATH,
           legacy: true,
-          next: "github-triage config convert",
+          next: "pdb config convert",
         },
       });
       expect(await t.call("get", "processGuide")).toBe(0);
@@ -5482,7 +5478,7 @@ describe("shared repository settings in TOML (#160, doc/design/configuration-for
       expect(t.json()).toMatchObject({
         path: TOML_CONFIG_PATH,
         legacyPath: LEGACY_CONFIG_PATH,
-        convert: "github-triage config convert",
+        convert: "pdb config convert",
       });
       expect(await t.call("help")).toBe(0);
       expect(t.out.at(-1)).toContain("config convert [--prefer toml|json]");
@@ -5546,7 +5542,7 @@ describe("config get/set/list/help commands (#117)", () => {
     expect(t.json().retired).toEqual([
       expect.objectContaining({
         key: "complexity.fieldId",
-        next: "github-triage config set complexity.enabled true",
+        next: "pdb config set complexity.enabled true",
       }),
     ]);
     expect(await t.call("list")).toBe(0);
@@ -5593,16 +5589,14 @@ describe("config get/set/list/help commands (#117)", () => {
     expect(t.json()).toMatchObject({
       kind: "config-error",
       code: "invalid-value",
-      recovery: "github-triage config set complexity.enabled true|false",
+      recovery: "pdb config set complexity.enabled true|false",
     });
     expect(await t.call("get", "colour", "--json")).toBe(1);
     expect(t.json()).toMatchObject({ code: "unknown-key" });
     expect(t.json().recovery).toContain("complexity.enabled");
     expect(await t.call("list", "--global", "--json")).toBe(1);
     expect(t.json()).toMatchObject({ code: "unsupported-scope" });
-    await expect(t.call("set", "complexity.enabled")).rejects.toThrow(
-      /Usage: github-triage config/,
-    );
+    await expect(t.call("set", "complexity.enabled")).rejects.toThrow(/Usage: pdb config/);
     await expect(t.call("frobnicate")).rejects.toThrow(/Unknown config command/);
     expect(t.files.size).toBe(0);
   });
@@ -6434,7 +6428,7 @@ describe("estimation queue and briefing visibility from size labels (#122, #152)
       findings: [
         {
           rule: "config-retired-key",
-          next: ["github-triage config set complexity.enabled true"],
+          next: ["pdb config set complexity.enabled true"],
         },
       ],
     });
@@ -6620,7 +6614,7 @@ describe("read-only MCP adapter (#25)", async () => {
     it(`negotiates ${version} for an older client and serves tools/list and tools/call`, async () => {
       const session = await rawSession(version);
       expect(session.init.protocolVersion).toBe(version);
-      expect(session.init.serverInfo).toMatchObject({ name: "github-triage" });
+      expect(session.init.serverInfo).toMatchObject({ name: "pdb" });
       const { tools } = (await session.request("tools/list")) as { tools: { name: string }[] };
       expect(tools.map((t) => t.name).sort()).toEqual([
         "triage_briefing",
@@ -6848,8 +6842,8 @@ describe("read-only MCP adapter (#25)", async () => {
         const message = envelope.error?.message ?? "";
         for (const fix of ["repo", "--repo owner/name", "--project /absolute/project/path"])
           expect(message, name).toContain(fix);
-        const command = /github-triage-mcp [^\n]*/.exec(message)?.[0] ?? "";
-        expect(command).toBe("github-triage-mcp --project /absolute/project/path");
+        const command = /pdb-mcp [^\n]*/.exec(message)?.[0] ?? "";
+        expect(command).toBe("pdb-mcp --project /absolute/project/path");
         expect(message).not.toContain("#");
         expect(JSON.stringify(result)).not.toContain(daemonRepo);
       }
@@ -6894,7 +6888,7 @@ describe("read-only MCP adapter (#25)", async () => {
       'name = "file_codex"',
       'role = "agent"',
       "",
-      '[agents."ori.github-triage"]',
+      '[agents."ori.pdb"]',
       'name = "file_ori"',
       'triage_role = "designer"',
       "",
@@ -6938,36 +6932,36 @@ describe("read-only MCP adapter (#25)", async () => {
       const cases: [Options, string, Record<string, string>, object][] = [
         [
           { ...base, agent: "boot", entry: "codex" },
-          "ori-github-triage",
+          "ori-pdb",
           { agent: "zed" },
           { agent: "zed", identitySource: "tool" },
         ],
         [
           { ...base, agent: "boot", entry: "codex" },
-          "ori-github-triage",
+          "ori-pdb",
           {},
           { agent: "boot", identitySource: "startup", entry: null },
         ],
         [
           { ...base, entry: "codex" },
-          "ori-github-triage",
+          "ori-pdb",
           {},
           { agent: "file_codex", identitySource: "entry", entry: "codex", triageRole: null },
         ],
         [
           { ...base, harness: "codex" },
-          "ori-github-triage",
+          "ori-pdb",
           {},
           { agent: "file_codex", identitySource: "harness", entry: "codex" },
         ],
         [
           base,
-          "ori-github-triage",
+          "ori-pdb",
           {},
           {
             agent: "file_ori",
             identitySource: "client",
-            entry: "ori.github-triage",
+            entry: "ori.pdb",
             triageRole: "designer",
           },
         ],
@@ -7004,7 +6998,7 @@ describe("read-only MCP adapter (#25)", async () => {
 
     it("focuses the read exactly as the CLI does for the same name", async () => {
       const { runtime } = identityRuntime();
-      const client = await connectAs(runtime, { project: root, repo }, "ori-github-triage");
+      const client = await connectAs(runtime, { project: root, repo }, "ori-pdb");
       const brief = await briefingSelection(client);
       expect(brief.selection.agent).toBe("file_ori");
       let out = "";
@@ -7036,7 +7030,7 @@ describe("read-only MCP adapter (#25)", async () => {
           identityRuntime(toml),
           { project: root, harness: "ori" },
           "test",
-          /Candidate entries: ori.github-triage, ori.review/,
+          /Candidate entries: ori.pdb, ori.review/,
         ],
         [identityRuntime(toml), { project: root }, "test", /No supported harness/],
         [
@@ -7061,7 +7055,7 @@ describe("read-only MCP adapter (#25)", async () => {
         [
           identityRuntime(toml, { CLAUDECODE: "1" }),
           {},
-          "ori-github-triage",
+          "ori-pdb",
           /no local project is configured/,
         ],
       ];
@@ -7873,7 +7867,7 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
     expect(commands.length).toBeGreaterThan(3);
     for (const c of commands) {
       const words = shellWords(c);
-      if (words[0] !== "github-triage" && words[0] !== "gh") continue;
+      if (words[0] !== "pdb" && words[0] !== "gh") continue;
       expect(words[words.indexOf("--repo") + 1], c).toBe(repo);
     }
     expect(shellWords(accepted(plans[2]).retry!)).toContain(note);
@@ -7926,7 +7920,7 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
     const env = live({ labels: ["agent:kavya"], prState: "OPEN" });
     const plan = accepted(await release(env, { outcome: "done", pr }));
     expect(plan.notes).toContain(
-      `Deprecated: release --as done --pr writes a release record only, never a delivery record. Use: github-triage submit 7 --agent kavya --pr ${pr} --repo ${repo}`,
+      `Deprecated: release --as done --pr writes a release record only, never a delivery record. Use: pdb submit 7 --agent kavya --pr ${pr} --repo ${repo}`,
     );
     const noPr = accepted(await release(live({ labels: ["agent:kavya"] }), { outcome: "done" }));
     expect(noPr.notes!.join(" ")).not.toMatch(/Deprecated/);
@@ -7987,7 +7981,7 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
     expect(env.s.labels).toEqual(["agent:kavya", "status:ready"]);
     const { claimText } = await import("./claims.js");
     expect(claimText(first)).toMatch(
-      /Retry \(safe.*github-triage release 7 --agent kavya --as incomplete --note half --repo/,
+      /Retry \(safe.*pdb release 7 --agent kavya --as incomplete --note half --repo/,
     );
     const retry = await release(env, { note: "half" });
     expect(accepted(retry).changes.map((c) => c.step)).toEqual(["labels"]);
@@ -8402,7 +8396,7 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
         refusal: {
           error: "NOT_RESPONSIBLE",
           prerequisite: "kavya is not ticket-responsible",
-          recovery: [`github-triage who 7 --repo ${repo}`],
+          recovery: [`pdb who 7 --repo ${repo}`],
         },
       }).plan;
       expect(plan).toMatchObject({ ok: false, error: "NOT_RESPONSIBLE" });
@@ -8414,7 +8408,7 @@ describe("release: coordinated handoff (#62, doc/design/workflow.md)", () => {
         refusal: {
           error: "MARKER_UNVERIFIED",
           prerequisite: "unknown",
-          recovery: [`github-triage who 7 --repo ${repo}`],
+          recovery: [`pdb who 7 --repo ${repo}`],
         },
       }).plan;
       expect(plan).toMatchObject({ ok: false, error: "MARKER_UNVERIFIED" });
@@ -8888,7 +8882,7 @@ describe("pr review history: why does this keep failing review (#60)", () => {
     const r = JSON.parse(text);
     expect(r).toMatchObject({ kind: "pr-review-history", cost: { requests: 2 } });
     expect(r.current.blockers.join(" ")).toContain("verify");
-    expect(r.nextCommands[1]).toBe(`github-triage pr 47 --repo ${repo} --history --json`);
+    expect(r.nextCommands[1]).toBe(`pdb pr 47 --repo ${repo} --history --json`);
   });
 });
 
@@ -9065,7 +9059,7 @@ describe("local configuration doctor (#64)", () => {
     expect(status["triage.role"]).toBe("invalid");
     expect(status["identity.agent"]).toBe("unknown");
     const role = report.checks.find((c) => c.id === "triage.role")!;
-    expect(role.next).toContain("github-triage doctor --role implementer --repo owner/name");
+    expect(role.next).toContain("pdb doctor --role implementer --repo owner/name");
   });
 
   const persisted = [
@@ -9088,7 +9082,7 @@ describe("local configuration doctor (#64)", () => {
     for (const command of commands) {
       expect(command).not.toContain("#");
       const words = command.split(" ");
-      if (words[0] !== "github-triage") continue;
+      if (words[0] !== "pdb") continue;
       expect(command).toContain("--repo ");
       if (words[1] === "config") {
         expect(command).toContain("--entry ");
@@ -9139,9 +9133,7 @@ describe("local configuration doctor (#64)", () => {
       "identity.name": "unknown",
       "identity.triage-role": "unknown",
     });
-    expect(check(report, "identity.parse").next[0]).toContain(
-      "github-triage doctor --repo owner/name",
-    );
+    expect(check(report, "identity.parse").next[0]).toContain("pdb doctor --repo owner/name");
     for (const out of [text, json]) expect(out).not.toContain(SECRET);
     expect(localDoctorExitCode(report)).toBe(1);
   });
@@ -9158,8 +9150,8 @@ describe("local configuration doctor (#64)", () => {
       "triage.role": "unknown",
     });
     expect(check(absent.report, "identity.entry").next).toEqual([
-      "github-triage config set identity.triage_role implementer --entry codex --repo owner/name",
-      "github-triage config set identity.triage_role designer --entry codex --repo owner/name",
+      "pdb config set identity.triage_role implementer --entry codex --repo owner/name",
+      "pdb config set identity.triage_role designer --entry codex --repo owner/name",
     ]);
     const missingEntry = await run({}, persisted, { entry: "ori.review" });
     expect(missingEntry.status["identity.entry"]).toBe("missing");
@@ -9182,8 +9174,8 @@ describe("local configuration doctor (#64)", () => {
       { harness: "codex" },
     );
     expect(check(several.report, "identity.entry").next).toEqual([
-      "github-triage doctor --entry codex --repo owner/name",
-      "github-triage doctor --entry codex.review --repo owner/name",
+      "pdb doctor --entry codex --repo owner/name",
+      "pdb doctor --entry codex.review --repo owner/name",
     ]);
     expect(several.text).not.toContain('"a"');
     const ori = await run({}, persisted, {}, "26.1.0", { ORI_SESSION_ID: "s" });
@@ -9207,7 +9199,7 @@ describe("local configuration doctor (#64)", () => {
       "triage.role": "unknown",
     });
     expect(check(generic.report, "identity.name").next).toEqual([
-      "github-triage config set identity.name <AGENT_NAME> --entry claude --repo owner/name",
+      "pdb config set identity.name <AGENT_NAME> --entry claude --repo owner/name",
     ]);
     const invalid = await run(
       {},
@@ -9361,14 +9353,13 @@ describe("workflow guide in help and briefings (#71, doc/design/workflow-guide.m
     for (const name of mutatingCommands()) expect(process_.guide).toContain(name);
     const text = (await run(["--guide"], null)).out;
     expect(text).toContain("WORKFLOW\n- Order:");
-    expect(text).toContain("github-triage process");
+    expect(text).toContain("pdb process");
   });
 
   it("only advertises implemented commands", () => {
     const templates = commandRegistry.map((c) => c.template.split(" ")[1]);
     for (const line of compactGuide().split("\n"))
-      for (const match of line.matchAll(/github-triage (\S+)/g))
-        expect(templates).toContain(match[1]);
+      for (const match of line.matchAll(/pdb (\S+)/g)) expect(templates).toContain(match[1]);
   });
 
   it("honours the processGuide opt-out without changing the briefing evidence", async () => {
@@ -9422,9 +9413,7 @@ describe("workflow guide in help and briefings (#71, doc/design/workflow-guide.m
   it("counts against the text budget and reports omission instead of truncating", async () => {
     const { out } = await run(["--guide", "--max-chars", "600"], null);
     expect(out).not.toContain("WORKFLOW\n");
-    expect(out).toContain(
-      "Workflow guide omitted by text budget. Full guide: github-triage process",
-    );
+    expect(out).toContain("Workflow guide omitted by text budget. Full guide: pdb process");
   });
 
   it("never exceeds --max-chars with the guide on or off (reserved footer)", async () => {
@@ -9438,7 +9427,7 @@ describe("workflow guide in help and briefings (#71, doc/design/workflow-guide.m
           max,
         );
         if (raw === off) expect(out).not.toContain("Workflow guide off");
-        else expect(out).toContain("github-triage process");
+        else expect(out).toContain("pdb process");
       }
     }
   });
@@ -9671,7 +9660,7 @@ x = 1
     expect(await t.call("get", "identity.name", "--repo", "owner/name", "--json")).toBe(1);
     expect(t.json()).toMatchObject({ code: "identity-unresolved" });
     expect(t.json().recovery).toContain(
-      "github-triage config get identity.name --entry KEY --repo owner/name",
+      "pdb config get identity.name --entry KEY --repo owner/name",
     );
     expect(t.json().recovery).not.toContain("#");
     expect(await t.call("list", "--json")).toBe(0);
@@ -9711,15 +9700,15 @@ x = 1
   });
 
   it("matches the Ori server prefix before embedded generic client names", () => {
-    expect(detectClientEntry("ori-github-triage")).toEqual({
+    expect(detectClientEntry("ori-pdb")).toEqual({
       harness: "ori",
-      entry: "ori.github-triage",
+      entry: "ori.pdb",
     });
     expect(detectClientEntry("ori-claude-helper")).toEqual({
       harness: "ori",
       entry: "ori.claude-helper",
     });
-    expect(detectClientEntry("ori-github-triage-2")?.entry).not.toBe("ori.github-triage");
+    expect(detectClientEntry("ori-pdb-2")?.entry).not.toBe("ori.pdb");
     expect(detectClientEntry("ori-")).toBeNull();
     expect(detectClientEntry("ori-bad name")).toBeNull();
     expect(detectClientEntry("claude-code")).toBeNull();
@@ -9839,20 +9828,18 @@ x = 1
     expect(refused.message).toContain("claude, codex");
     expect(refused.message).toContain("CLAUDECODE, CODEX_CI");
     expect(refused.recovery).toContain(
-      "github-triage config set identity.triage_role designer --entry KEY --repo owner/name",
+      "pdb config set identity.triage_role designer --entry KEY --repo owner/name",
     );
     expect(refused.recovery).not.toContain("#");
     expect(conflict.files.get(file)).toBe(sample);
 
     const ori = setup(sample, { env: { ORI_SESSION_ID: "s" } });
     expect(await ori.call("get", "identity.name", "--json")).toBe(1);
-    expect(ori.json().recovery).toContain(
-      "github-triage config get identity.name --entry ori.review",
-    );
+    expect(ori.json().recovery).toContain("pdb config get identity.name --entry ori.review");
     expect(await ori.call("list", "--json")).toBe(0);
     expect(ori.json().identity).toMatchObject({ resolved: false, reason: "no-entry-key" });
     expect(await ori.call("list")).toBe(0);
-    expect(ori.out.at(-1)).toContain("github-triage config list --entry ori.review");
+    expect(ori.out.at(-1)).toContain("pdb config list --entry ori.review");
 
     const none = setup(undefined, { env: {} });
     expect(await none.call("set", "identity.triage_role", "designer", "--json")).toBe(1);
@@ -10496,7 +10483,7 @@ describe("label-backed complexity classification and prepared reader (#151)", ()
     ]);
     const fix = invalid(1).plan.steps.find((x) => x.argv[1] === "estimate")!;
     expect(fix.argv).toEqual([
-      "github-triage",
+      "pdb",
       "estimate",
       "1",
       "--size",

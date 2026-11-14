@@ -1,14 +1,16 @@
+> Naming transition: [the Presidential Daily Briefing rename contract](design/pdb-rename.md) defines the one-time authenticated new-package bootstrap at 0.6.0. After that bootstrap, this normal explicit release workflow uses the new package publication history and canonical repository.
+
 # npm distribution and releases
 
 Status: packaging and trusted publishing are implemented, and since #79 **publication is explicit only**: pushes to `main` or `release` never publish. `npm run make-prerelease` publishes a prerelease on `next`; `npm run release` publishes an official version on `latest`. Both dispatch `.github/workflows/publish.yml` with a channel and a full commit SHA, and the workflow validates the request before building anything. Publishing also requires the repository variable `NPM_PUBLISH=true`.
 
 ## Purpose and package
 
-Distribute `@trebizondoculpepper/github-triage`, executable `github-triage`, as one global CLI installation serving multiple project checkouts. Project identity remains local. Runtime requires Node 26+ (current LTS; an install does not upgrade Node) and authenticated GitHub CLI for live queries.
+Distribute `@trebizondoculpepper/presidential-daily-briefing`, executable `pdb`, as one global CLI installation serving multiple project checkouts. Project identity remains local. Runtime requires Node 26+ (current LTS; an install does not upgrade Node) and authenticated GitHub CLI for live queries.
 
 ```sh
-npm install -g @trebizondoculpepper/github-triage
-github-triage --help
+npm install -g @trebizondoculpepper/presidential-daily-briefing
+pdb --help
 ```
 
 Use `@next` to opt into prereleases and `@VERSION` to pin a version. Publish the built ESM CLI at `dist/cli.mjs`; allowlist only required runtime artifacts, README and license. Never ship identity files, caches, credentials, agent settings or tests. Consumer installation must not invoke development tooling or install contributor hooks.
@@ -21,7 +23,7 @@ Use `@next` to opt into prereleases and `@VERSION` to pin a version. Publish the
 | Make a prerelease        | `npm run make-prerelease` | Explicit dispatch for a selected origin/main commit; npm `next` only                                                                    |
 | Make an official release | `npm run release`         | Fast-forward `release` to selected origin/main commit, then explicit dispatch; stable npm `latest`, matching Git tag and GitHub release |
 
-These are maintainer checkout commands, not installed `github-triage` subcommands. The prerelease command is `npm run make-prerelease`, not `npm run prerelease`: npm automatically runs a script named `pre<name>` before `<name>`, so a `prerelease` script would publish a prerelease every time `npm run release` ran (#79). Both operations are implemented; official release promotion is followed by explicit dispatch rather than push-triggered publication. Both support `-- --help` with their process, prerequisites, target channel, retry behavior and failure recovery. These helpers request publication; they do not report a queued dispatch as a completed npm release.
+These are maintainer checkout commands, not installed `pdb` subcommands. The prerelease command is `npm run make-prerelease`, not `npm run prerelease`: npm automatically runs a script named `pre<name>` before `<name>`, so a `prerelease` script would publish a prerelease every time `npm run release` ran (#79). Both operations are implemented; official release promotion is followed by explicit dispatch rather than push-triggered publication. Both support `-- --help` with their process, prerequisites, target channel, retry behavior and failure recovery. These helpers request publication; they do not report a queued dispatch as a completed npm release.
 
 The publish workflow accepts only `workflow_dispatch`, with required channel choice `next` or `latest` and an expected full source SHA. No `push`, PR, scheduled, or CI-completion event publishes. Main and release branch pushes alone cannot publish. Changing `NPM_PUBLISH` remains setup control, not a release request.
 
@@ -60,6 +62,6 @@ No real official release is needed to test the workflow. Use injected command/re
 
 ## Owner setup and delivery
 
-Existing package authorization and trusted publisher remain in place. Confirm npm scope ownership and the GitHub Actions publisher for `trebizondoculpepper/github_triage`, workflow `publish.yml`, when setup is needed. `NPM_PUBLISH=true` permits an explicitly requested publication; it does not cause one on main pushes. This contract does not change any live variable, permission, branch, tag or package.
+Existing package authorization and trusted publisher remain in place. Confirm npm scope ownership and the GitHub Actions publisher for `trebizondoculpepper/presidential-daily-briefing`, workflow `publish.yml`, when setup is needed. `NPM_PUBLISH=true` permits an explicitly requested publication; it does not cause one on main pushes. This contract does not change any live variable, permission, branch, tag or package.
 
 The explicit-only implementation merged in #90 for #79. Helpers, workflow and credential-free tests cover the dispatch path. Role views, MCP, update notices and wake-up adapters remain independent. Source/helper changes still need normal PR verification; do not publish a package merely to validate documentation.

@@ -35,10 +35,10 @@ For MCP, explicit project/repository/agent/entry selection works without client 
 Reuse the merged `config get`, `set`, `list` and `help` layer; agents do not edit files directly. Add registered per-agent settings `identity.name` and `identity.triage_role`, routed to the selected table's `name` and `triage_role` keys. Example planned commands:
 
 ```sh
-github-triage config get identity.name
-github-triage config set identity.triage_role implementer
-github-triage config set identity.triage_role designer --entry codex
-github-triage config help identity.triage_role
+pdb config get identity.name
+pdb config set identity.triage_role implementer
+pdb config set identity.triage_role designer --entry codex
+pdb config help identity.triage_role
 ```
 
 Without explicit selection these use the shared harness/root/entry resolver. Report which repository, entry and non-secret source decided the result. `list` exposes only registered settings for the selected agent and shared policy; never dump unrelated file contents, credentials or another agent's private data. Unknown identity does not break unrelated repository-config operations. CLI role overrides affect one view; `config set identity.triage_role ...` persists the default role.

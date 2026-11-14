@@ -9,7 +9,7 @@
  * The recurring briefing guide is off by default. Precedence: `--guide`/`--no-guide`, then the
  * registered `processGuide` repository setting (.github/triage.toml, or the earlier .github/triage.json), then the default. An
  * unreadable or mismatched configuration never breaks a briefing: it falls back to the default
- * and reports a diagnostic. `--help` and `github-triage process` are always available, local
+ * and reports a diagnostic. `--help` and `pdb process` are always available, local
  * and credential-free.
  */
 import { createHash } from "node:crypto";
@@ -34,7 +34,7 @@ export const PROCESS_SCHEMA_VERSION = 1;
 export const MAX_GUIDE_CODE_POINTS = 900;
 /** Registered repository setting that opts a project out of the recurring guide. */
 export const GUIDE_CONFIG_KEY = "processGuide";
-export const PROCESS_COMMAND = "github-triage process";
+export const PROCESS_COMMAND = "pdb process";
 
 /** An implemented command. Only these may appear as executable advice. */
 export interface CommandSpec {
@@ -49,33 +49,33 @@ export interface CommandSpec {
 export const commandRegistry: readonly CommandSpec[] = [
   {
     name: "deps add/remove",
-    template: "github-triage deps add|remove N --on M --note WHY",
+    template: "pdb deps add|remove N --on M --note WHY",
     mutatesGitHub: true,
   },
   {
     name: "claim",
-    template: "github-triage claim N --agent NAME",
+    template: "pdb claim N --agent NAME",
     mutatesGitHub: true,
   },
   {
     name: "release",
-    template: `github-triage release N --agent NAME --as ${claimPolicy.outcomes.join("|")}`,
+    template: `pdb release N --agent NAME --as ${claimPolicy.outcomes.join("|")}`,
     mutatesGitHub: true,
   },
   {
     name: "needs-human",
-    template: "github-triage needs-human N --agent NAME --designer NAME --why TEXT --question TEXT",
+    template: "pdb needs-human N --agent NAME --designer NAME --why TEXT --question TEXT",
     mutatesGitHub: true,
   },
   {
     name: "estimate N",
-    template: "github-triage estimate N --size S --rationale TEXT",
+    template: "pdb estimate N --size S --rationale TEXT",
     mutatesGitHub: true,
   },
-  { name: "who", template: "github-triage who N", mutatesGitHub: false },
+  { name: "who", template: "pdb who N", mutatesGitHub: false },
   { name: "process", template: PROCESS_COMMAND, mutatesGitHub: false },
   // Changes only the local repository settings file, never GitHub.
-  { name: "config set", template: "github-triage config set KEY VALUE", mutatesGitHub: false },
+  { name: "config set", template: "pdb config set KEY VALUE", mutatesGitHub: false },
 ];
 const command = (name: string): CommandSpec => {
   const found = commandRegistry.find((spec) => spec.name === name);
@@ -147,8 +147,7 @@ export function guideRules(): GuideRule[] {
     {
       id: "questions-on-ticket",
       parameters: { command: command("needs-human").template, label: claimPolicy.decisionNeeded },
-      summary:
-        "Ask questions on the ticket; github-triage needs-human N records them for a designer.",
+      summary: "Ask questions on the ticket; pdb needs-human N records them for a designer.",
       detail: `Full form: ${command("needs-human").template}. It adds ${claimPolicy.decisionNeeded}. Designer and owner discussion remains welcome.`,
     },
     {
@@ -187,7 +186,7 @@ const codePoints = (text: string): number => Array.from(text).length;
 
 export const pointerText = (version: string, enabled: boolean): string =>
   enabled
-    ? `Full guide: ${PROCESS_COMMAND} (policy ${version}). Hide: --no-guide or github-triage config set ${GUIDE_CONFIG_KEY} false.`
+    ? `Full guide: ${PROCESS_COMMAND} (policy ${version}). Hide: --no-guide or pdb config set ${GUIDE_CONFIG_KEY} false.`
     : `Workflow guide off (policy ${version}); see ${PROCESS_COMMAND}.`;
 
 /** Compact guide text including its pointer; always within MAX_GUIDE_CODE_POINTS. */
@@ -203,12 +202,12 @@ export function compactGuide(rules = guideRules(), version = policyVersion(rules
   return text;
 }
 
-/** Full on-demand guide for `github-triage process`. */
+/** Full on-demand guide for `pdb process`. */
 export function fullGuideText(): string {
   const rules = guideRules();
   const version = policyVersion(rules);
   return [
-    `github-triage workflow guide (policy ${version})`,
+    `pdb workflow guide (policy ${version})`,
     ...rules.map((rule) => `\n${rule.id}\n  ${rule.summary}\n  ${rule.detail}`),
     "\nCommands",
     ...commandRegistry.map(
@@ -216,7 +215,7 @@ export function fullGuideText(): string {
     ),
     "\nLimitations",
     ...guideLimitations.map((line) => `  ${line}`),
-    `\nOpt out of the briefing guide: --no-guide, or github-triage config set ${GUIDE_CONFIG_KEY} false.`,
+    `\nOpt out of the briefing guide: --no-guide, or pdb config set ${GUIDE_CONFIG_KEY} false.`,
     "",
   ].join("\n");
 }

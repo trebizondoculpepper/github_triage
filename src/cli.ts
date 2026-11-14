@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { resolveEngineSetting } from "./engine-setting.js";
-/** One read-only intake command. Contract: doc/github-triage-cli.md. */
+/** One read-only intake command. Contract: doc/pdb-cli.md. */
 import { realpathSync } from "node:fs";
 import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -35,7 +35,7 @@ import {
   planRelease,
 } from "./claims.js";
 import { cachedCheckForUpdate } from "./updatecache.js";
-import { installedVersion, optOutEnv, updateAdvisory } from "./updates.js";
+import { installedVersion, optOutEnv, legacyOptOutEnv, updateAdvisory } from "./updates.js";
 import { defaultStaleHours, teamText, teamView } from "./team.js";
 import { ticketOwnership, ticketOwnershipText } from "./who.js";
 import { migrationPlanText, planMigration } from "./migration.js";
@@ -136,11 +136,11 @@ export interface Runtime {
 
 type Output = (text: string) => Promise<void>;
 
-export const help = `Usage: github-triage [options]
-       (from a source checkout: npm run triage -- [options])
-Read-only LLM action briefing. Requires authenticated gh and Node 26+.
+export const help = `Usage: pdb [options]
+       (from a source checkout: npm run pdb -- [options])
+Presidential Daily Briefing: evidence-linked actions for coding agents. Requires authenticated gh and Node 26+.
 Next-action default: Datalog, implementer view; --role designer selects design work.
-Rollback: github-triage config set briefing.engine typescript.
+Rollback: pdb config set briefing.engine typescript.
   briefing [--last 24h | --since ISO | --checkpoint PATH]  Read-only repository catch-up:
                         what changed and what needs attention (briefing --help)
   deps N [--tree]       Read native upstream/downstream dependencies (deps --help)
@@ -188,7 +188,7 @@ Rollback: github-triage config set briefing.engine typescript.
                         identity.triage_role in local agent-inbox.toml, entry chosen by
                         --entry KEY, --harness NAME or the detected harness
   --repo owner/name     Repository (default: current gh checkout)
-  --json                Versioned structured output (from a checkout: npm run --silent triage)
+  --json                Versioned structured output (from a checkout: npm run --silent pdb)
   --issue N             Include full issue body/history, even if closed; diagnoses
                         transferred, missing or forbidden issues instead of failing
   --include-transferred With --issue: follow a transfer to the destination's intake
@@ -237,11 +237,11 @@ Exit: 0 complete; 2 incomplete evidence; 1 invalid arguments/API/cache failure.
 The briefing never changes GitHub; only ${mutatingCommands().join(", ")} do;
 config set/convert change only the local .github/triage.toml/.json or agent-inbox.toml. Hints require inspection.
 `;
-export const depsHelp = `Usage: github-triage deps N [--tree] [--json] [--repo owner/name]
-       github-triage deps add N --on M [--on K] --note WHY [--dry-run] [--json]
-       github-triage deps remove N --on M [--on K] --note WHY [--dry-run] [--json]
-       github-triage deps migrate --plan FILE [--repo owner/name] [--json]
-(From a source checkout, use npm run triage -- deps ...)
+export const depsHelp = `Usage: pdb deps N [--tree] [--json] [--repo owner/name]
+       pdb deps add N --on M [--on K] --note WHY [--dry-run] [--json]
+       pdb deps remove N --on M [--on K] --note WHY [--dry-run] [--json]
+       pdb deps migrate --plan FILE [--repo owner/name] [--json]
+(From a source checkout, use npm run pdb -- deps ...)
 deps N reads native GitHub issue dependencies for issue N (read-only).
 deps add/remove make N blocked (or no longer blocked) by each M, after fresh live checks:
 refuses self-dependencies, pull requests, missing issues and cycles; an edge that already
@@ -251,7 +251,7 @@ Changes no labels.
   --on M                Blocker issue number (repeatable; add/remove only)
   --note WHY            Reason recorded in the comment (required for add/remove)
   --dry-run             Show the exact changes and comment; make none
-  --json                Versioned structured output (from a checkout: npm run --silent triage)
+  --json                Versioned structured output (from a checkout: npm run --silent pdb)
   --repo owner/name     Repository (default: current gh checkout)
   --help                Show usage
 deps migrate --plan reads only: it writes a report of how \`Depends on\` text and blocked:work
@@ -334,7 +334,7 @@ const plannedExit = (changes: { status: string }[]): number => {
   return !applying ? (refused ? 1 : 0) : refused ? 2 : 0;
 };
 const releaseUsage =
-  "Usage: github-triage release N --agent NAME --as ready|incomplete|parked|done [--note TEXT] [--pr URL|--change URL] [--dry-run] [--json]";
+  "Usage: pdb release N --agent NAME --as ready|incomplete|parked|done [--note TEXT] [--pr URL|--change URL] [--dry-run] [--json]";
 export const releaseHelp = `${releaseUsage}
 Hand over your active claim on issue N in one operation (doc/design/workflow.md, #62).
 Re-reads live state, then: removes agent:NAME (only yours; other owners are kept), sets one
@@ -381,10 +381,10 @@ export function workflowArgumentsFor(command: "claim" | "needs-human" | "release
   });
   const usage =
     command === "claim"
-      ? "Usage: github-triage claim N --agent NAME [--branch BRANCH] [--platform P] [--rework] [--dry-run] [--json]"
+      ? "Usage: pdb claim N --agent NAME [--branch BRANCH] [--platform P] [--rework] [--dry-run] [--json]"
       : command === "release"
         ? releaseUsage
-        : "Usage: github-triage needs-human N --agent NAME --designer NAME --why TEXT --question TEXT [--question TEXT...] [--dry-run] [--json]";
+        : "Usage: pdb needs-human N --agent NAME --designer NAME --why TEXT --question TEXT [--question TEXT...] [--dry-run] [--json]";
   const number =
     positionals.length === 1 && /^[1-9]\d*$/.test(positionals[0]) ? Number(positionals[0]) : null;
   const name = /^[A-Za-z0-9][\w.-]*$/;
@@ -574,7 +574,10 @@ export async function main(
 ): Promise<number> {
   // Version check (#51, cached daily per user by #65): runs alongside the command, bounded by a short timeout, and reports
   // only on stderr so JSON on stdout stays valid. --offline and opt-outs mean no network.
-  const optOut = args.includes("--no-update-check") || !!process.env[optOutEnv];
+  const optOut =
+    args.includes("--no-update-check") ||
+    !!process.env[optOutEnv] ||
+    !!process.env[legacyOptOutEnv];
   const rest = args.filter((a) => a !== "--no-update-check");
   const check = runtime.updateCheck ?? cachedCheckForUpdate;
   if (rest[0] === "version") {
@@ -584,7 +587,7 @@ export async function main(
       rest.includes("--json")
         ? JSON.stringify({ schemaVersion: 1, version: installed.version, check: result }, null, 2) +
             "\n"
-        : `github-triage ${installed.version ?? "(unknown version)"}\nUpdate check: ${result.status}${"reason" in result && result.reason ? ` — ${result.reason}` : ""}${"available" in result && result.available ? ` (npm ${result.channel}: ${result.available})` : ""}\n`,
+        : `pdb ${installed.version ?? "(unknown version)"}\nUpdate check: ${result.status}${"reason" in result && result.reason ? ` — ${result.reason}` : ""}${"available" in result && result.available ? ` (npm ${result.channel}: ${result.available})` : ""}\n`,
     );
     return 0;
   }
@@ -854,7 +857,7 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
       },
     });
     if (positionals.length !== 1 || !/^[1-9]\d*$/.test(positionals[0]))
-      throw new Error("Usage: github-triage who N [--json] [--stale-hours N] [--repo owner/name]");
+      throw new Error("Usage: pdb who N [--json] [--stale-hours N] [--repo owner/name]");
     if (values.repo && !/^[\w.-]+\/[\w.-]+$/.test(values.repo))
       throw new Error("--repo must be owner/name.");
     const staleHours =
@@ -893,9 +896,7 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
         rest.filter((a) => a === "--metric").length > 1 ||
         (metric !== "complexity" && metric !== "impact")
       )
-        throw new Error(
-          "Usage: github-triage estimate --help [--metric complexity|impact] [--json]",
-        );
+        throw new Error("Usage: pdb estimate --help [--metric complexity|impact] [--json]");
       const impact = metric === "impact";
       await output(
         rest.includes("--json")
@@ -924,7 +925,7 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
       },
     });
     if (positionals.length !== 1 || !/^[1-9]\d*$/.test(positionals[0]))
-      throw new Error("Usage: github-triage pr N [--history] [--json] [--repo owner/name]");
+      throw new Error("Usage: pdb pr N [--history] [--json] [--repo owner/name]");
     if (values.repo && !/^[\w.-]+\/[\w.-]+$/.test(values.repo))
       throw new Error("--repo must be owner/name.");
     const repository = values.repo ?? (await runtime.currentRepository());

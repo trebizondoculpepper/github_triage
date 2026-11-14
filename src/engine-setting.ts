@@ -22,7 +22,7 @@ export class BriefingEngineError extends Error {
   constructor(
     readonly code: "decision-engine-config" | "decision-engine-role" | "decision-engine-failed",
     detail: string,
-    recovery = "Roll back: github-triage config set briefing.engine typescript",
+    recovery = "Roll back: pdb config set briefing.engine typescript",
   ) {
     super(`${detail} ${recovery}`);
   }

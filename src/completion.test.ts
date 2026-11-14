@@ -595,7 +595,7 @@ describe("complete: unknown evidence never closes", () => {
     expect(plan.facts.delivery).toBe("unknown");
     expect(plan.evaluation?.actions.map((a) => a.id)).toEqual(["L4", "L5a"]);
     expect(plan.recovery.join(" ")).not.toContain("merge");
-    expect(plan.recovery).toContain(`github-triage pr 6 --repo ${repo}`);
+    expect(plan.recovery).toContain(`pdb pr 6 --repo ${repo}`);
   });
   it("S38: an off-target merge whose compare errors is unknown, never merged-off-target", async () => {
     const { rt } = github({

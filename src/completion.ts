@@ -759,7 +759,7 @@ const snapshotOf = (m: MemberEvidence): EvidenceSnapshot => ({
 
 /** The exact, runnable command for a `complete` request. */
 export const completeCommand = (repository: string, r: CompleteRequest): string =>
-  `github-triage complete ${r.number} --agent ${r.agent} --repo ${repository}`;
+  `pdb complete ${r.number} --agent ${r.agent} --repo ${repository}`;
 
 /**
  * Plan `complete N`. Reads only; `applyComplete` writes. With `resume`, the run has posted its
@@ -774,7 +774,7 @@ export async function planComplete(
   resume?: { opId: string; closedByRun: boolean },
 ): Promise<CompletePlan> {
   const { number, agent } = request;
-  const cmd = (text: string): string => `github-triage ${text} --repo ${repository}`;
+  const cmd = (text: string): string => `pdb ${text} --repo ${repository}`;
   const retry = completeCommand(repository, request);
   const inspect = cmd(`--issue ${number}`);
   const written = (own: string | null) =>
@@ -1079,7 +1079,7 @@ export async function planComplete(
           .filter((m) => m.deliverable.kind === "pr")
           .map((m) => {
             const d = m.deliverable as Extract<Deliverable, { kind: "pr" }>;
-            return `github-triage pr ${d.number} --repo ${d.repository}`;
+            return `pdb pr ${d.number} --repo ${d.repository}`;
           }),
       ],
       evaluation,
@@ -1209,7 +1209,7 @@ export async function planComplete(
       const d = m.deliverable;
       const url = prLink(d);
       if (m.state === "open" || m.state === "draft")
-        out.push(`github-triage pr ${d.number} --repo ${d.repository}`);
+        out.push(`pdb pr ${d.number} --repo ${d.repository}`);
       if (m.state === "merged-off-target")
         out.push(
           cmd(
@@ -1236,7 +1236,7 @@ function completionBody(agent: string, record: DeliveryRecord): string {
       `- ${s.deliverable} → ${s.target}: ${s.state}${s.mergeCommit ? ` (${s.mergeCommit.slice(0, 12)}${s.branch ? ` in ${s.branch}` : ""}${s.compare ? `, compare ${s.compare}` : ""})` : ""}`,
   );
   return [
-    `Completion record by \`${agent}\` with \`github-triage complete\`: **delivery ${record.verdict}** on evidence read at ${record.evaluatedAt}.`,
+    `Completion record by \`${agent}\` with \`pdb complete\`: **delivery ${record.verdict}** on evidence read at ${record.evaluatedAt}.`,
     "",
     ...(lines.length ? [...lines, ""] : ["No code deliverable (attested non-code outcome).", ""]),
     deliveryMarker(record),
@@ -1283,7 +1283,7 @@ export async function applyComplete(
           error: "EVIDENCE_INCOMPLETE",
           facts: last.facts,
           prerequisite: `${opId && !closedByRun ? `Completion record written (opId ${opId}), close skipped: ` : ""}evidence incomplete: the re-read after the write failed (${error instanceof Error ? error.message : "unknown error"}).`,
-          recovery: [last.retry, `github-triage --issue ${request.number} --repo ${repository}`],
+          recovery: [last.retry, `pdb --issue ${request.number} --repo ${repository}`],
         };
       }
     }
@@ -1385,7 +1385,7 @@ export function completeText(result: CompletePlan | CompleteResult, dryRun = fal
 }
 
 export const completeUsage =
-  "Usage: github-triage complete N --agent NAME [--dry-run] [--json] [--repo owner/name]";
+  "Usage: pdb complete N --agent NAME [--dry-run] [--json] [--repo owner/name]";
 export const completeHelp = `${completeUsage}
 Verify delivery of issue N from fresh evidence and, only when it holds, record completion and
 close the issue as completed (#191, doc/design/delivery-lifecycle.md). Delivery is "delivered"

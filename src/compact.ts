@@ -491,7 +491,7 @@ export function compactBriefing(
       assessments: assessments?.get(url) ?? null,
       detailCommand: item.headRefOid
         ? `gh pr view ${item.number} --repo ${snapshot.repository} --json headRefOid,statusCheckRollup,reviews`
-        : `npm run --silent triage -- --repo ${snapshot.repository} --issue ${item.number} --json`,
+        : `npm run --silent pdb -- --repo ${snapshot.repository} --issue ${item.number} --json`,
       ...Object.fromEntries(
         facts.pullRequests
           .filter((pr) => pr.url === url)
@@ -561,7 +561,7 @@ function impactEstimationReport(
     conflicts: count("conflict"),
     invalid: count("invalid"),
     unknown: count("unknown"),
-    guidance: "github-triage estimate --help --metric impact",
+    guidance: "pdb estimate --help --metric impact",
     boundaries:
       "Assessment acquires no claim, reserves nothing and does not unblock or re-rank; blocked tickets are assessed under stated assumptions.",
   };
@@ -572,7 +572,7 @@ export function compactText(
 ): string {
   const subjects = new Map(report.subjects.map((s) => [s.url, s]));
   const lines = [
-    `GitHub action briefing: ${report.repository}`,
+    `Presidential Daily Briefing: ${report.repository}`,
     `Fetched ${report.freshness.fetchedAt} — ${report.freshness.offline ? "OFFLINE CACHE; live verification unavailable" : "LIVE fetch window"}`,
     `${report.summary.issues} issues; ${report.summary.pullRequests} PRs; ${report.summary.findings} findings on ${report.summary.distinctSubjects} subjects.`,
   ];
@@ -620,7 +620,7 @@ export function compactText(
       ...(estimation.queue?.items ?? []).map(
         (e) => `- #${e.number} ${e.title}\n  ${estimateLine(e)}\n  ${e.url}`,
       ),
-      `- ${estimation.boundaries} Guidance: github-triage estimate --help`,
+      `- ${estimation.boundaries} Guidance: pdb estimate --help`,
     );
   };
   const ranked = report.rankedActions;
@@ -656,7 +656,7 @@ export function compactText(
       (estimation.eligible || estimation.ranked || estimation.conflicts.total)
     )
       rows.push(
-        `- Complexity assessment: ${estimation.eligible} eligible, ${estimation.ranked} ranked, ${estimation.shown} shown; ${estimation.conflicts.total} conflicting. Guidance: github-triage estimate --help`,
+        `- Complexity assessment: ${estimation.eligible} eligible, ${estimation.ranked} ranked, ${estimation.shown} shown; ${estimation.conflicts.total} conflicting. Guidance: pdb estimate --help`,
       );
   };
   const roleReasons = new Map(

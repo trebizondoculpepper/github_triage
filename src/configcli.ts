@@ -62,11 +62,11 @@ export interface ConfigRuntime {
   readonly env?: Environment;
 }
 
-export const configUsage = `Usage: github-triage config get KEY [--entry KEY | --harness NAME] [--json] [--repo owner/name]
-       github-triage config set KEY VALUE [--entry KEY | --harness NAME] [--json] [--repo owner/name]
-       github-triage config list [--entry KEY | --harness NAME] [--json] [--repo owner/name]
-       github-triage config convert [--prefer toml|json] [--json] [--repo owner/name]
-       github-triage config help [KEY] [--json]
+export const configUsage = `Usage: pdb config get KEY [--entry KEY | --harness NAME] [--json] [--repo owner/name]
+       pdb config set KEY VALUE [--entry KEY | --harness NAME] [--json] [--repo owner/name]
+       pdb config list [--entry KEY | --harness NAME] [--json] [--repo owner/name]
+       pdb config convert [--prefer toml|json] [--json] [--repo owner/name]
+       pdb config help [KEY] [--json]
 identity.* keys use the [agents.KEY] entry of the root agent-inbox.toml selected by --entry KEY,
 else by --harness ${SUPPORTED_HARNESSES.join("|")}, else by the detected harness.`;
 
@@ -199,7 +199,7 @@ function typedValue(entry: ConfigKey, text: string): ConfigValue {
   throw new ConfigUsageError(
     "invalid-value",
     `Invalid value for "${entry.key}": expected true or false, got ${JSON.stringify(text)}.`,
-    `github-triage config set ${entry.key} ${valueSyntax(entry)}`,
+    `pdb config set ${entry.key} ${valueSyntax(entry)}`,
   );
 }
 
@@ -226,7 +226,7 @@ const identityHelp = (entry: IdentityKey) => ({
   type: "string" as const,
   validValues: entry.validValues,
   description: entry.description,
-  set: `github-triage config set ${entry.key} ${entry.validValues === "agent name" ? "NAME" : entry.validValues.join("|")} --entry KEY`,
+  set: `pdb config set ${entry.key} ${entry.validValues === "agent name" ? "NAME" : entry.validValues.join("|")} --entry KEY`,
 });
 
 function helpResult(key: string | undefined) {
@@ -248,7 +248,7 @@ function helpResult(key: string | undefined) {
       defaultValue: entry.defaultValue,
       validValues: entry.type === "boolean" ? [true, false] : "non-empty text",
       description: entry.description,
-      set: `github-triage config set ${entry.key} ${valueSyntax(entry)}`,
+      set: `pdb config set ${entry.key} ${valueSyntax(entry)}`,
     })),
     identityKeys: identity.map(identityHelp),
   };
@@ -511,8 +511,8 @@ async function runIdentity(
 ): Promise<string> {
   const command =
     parsed.command === "get"
-      ? `github-triage config get ${parsed.key}`
-      : `github-triage config set ${parsed.key} ${parsed.value}`;
+      ? `pdb config get ${parsed.key}`
+      : `pdb config set ${parsed.key} ${parsed.value}`;
   // Validate the key (and value) first so an unknown key gets its own refusal.
   if (parsed.command === "set") validateIdentityValue(parsed.key, parsed.value);
   else identityKeyEntry(parsed.key);
@@ -553,7 +553,7 @@ async function runIdentity(
       record.fileExists && !record.entryExists ? `no [agents.${entry}] entry` : "",
       ...record.problems,
     ].filter(Boolean);
-    return `${parsed.key} = ${setting.value ?? "(unset)"} (${setting.source}; entry ${entry} in ${IDENTITY_FILE}, ${selectionText(where)})${notes.length ? `\n  ${notes.join("\n  ")}\n  Set: ${record.entryExists ? `github-triage config set ${parsed.key} ${parsed.key === "identity.name" ? "NAME" : "implementer|designer"}` : "github-triage config set identity.triage_role implementer|designer"}${flags(parsed, entry)}` : ""}\n`;
+    return `${parsed.key} = ${setting.value ?? "(unset)"} (${setting.source}; entry ${entry} in ${IDENTITY_FILE}, ${selectionText(where)})${notes.length ? `\n  ${notes.join("\n  ")}\n  Set: ${record.entryExists ? `pdb config set ${parsed.key} ${parsed.key === "identity.name" ? "NAME" : "implementer|designer"}` : "pdb config set identity.triage_role implementer|designer"}${flags(parsed, entry)}` : ""}\n`;
   }
   const write = await setIdentity(target, entry, parsed.key, parsed.value, {
     fs,
@@ -609,7 +609,7 @@ async function identityListing(
       path: IDENTITY_FILE,
       reason: resolution.reason,
       message: unresolvedText(resolution),
-      recovery: selectionCommands("github-triage config list", parsed, resolution).join("\n"),
+      recovery: selectionCommands("pdb config list", parsed, resolution).join("\n"),
     };
   }
   const entry = resolution.entry;

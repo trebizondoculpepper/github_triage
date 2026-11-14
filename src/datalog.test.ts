@@ -313,6 +313,6 @@ it("routes PR attention and designer duties to PR inspection", () => {
     const p = pr(1, ["IN_PROGRESS"]);
     p.labels = page([{ name: label }]);
     const row = run([], new Map(), { agent: "me", role: "designer" }, [p]).items[0];
-    expect(row.nextCommand).toBe("github-triage pr 1 --repo o/r");
+    expect(row.nextCommand).toBe("pdb pr 1 --repo o/r");
   }
 });

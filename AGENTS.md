@@ -2,7 +2,7 @@
 
 This is the shared, cross-platform contributor guide for every coding agent working in this repository, including Codex, Claude Code, OpenCode, Ori and other CLI, IDE or MCP clients. It applies on Windows, macOS and Linux; no particular agent harness or personal infrastructure is required. `AGENTS.md` is authoritative; `CLAUDE.md` is a compatibility entry point linked to this same file.
 
-Read [HANDOFF.md](HANDOFF.md) first. This is the standalone GitHub Triage project, extracted from poker_blocks at the owner's request. Its source is under `src/`; do not continue development in the game repository.
+Read [HANDOFF.md](HANDOFF.md) first. This is the standalone Presidential Daily Briefing project, extracted from poker_blocks at the owner's request. Its source is under `src/`; do not continue development in the game repository.
 
 ## Source language
 
@@ -12,11 +12,11 @@ Follow [the TypeScript architecture and migration contract](doc/design/typescrip
 
 ## Configuration and identity
 
-Prefer TOML for project-owned configuration. The local root-level `agent-inbox.toml` persists per-agent names and triage_role and must remain Git-ignored/non-versioned. Reuse existing entries and preserve unrelated keys; no service or communications check-in is required. Use config/setup commands rather than edit identity/settings directly. Shared repository settings live in `.github/triage.toml`; an earlier `.github/triage.json` stays readable until `github-triage config convert` (#160). npm manifests and workflow YAML retain their required formats. Follow doc/design/identity.md and doc/design/configuration-formats.md.
+Prefer TOML for project-owned configuration. The local root-level `agent-inbox.toml` persists per-agent names and triage_role and must remain Git-ignored/non-versioned. Reuse existing entries and preserve unrelated keys; no service or communications check-in is required. Use config/setup commands rather than edit identity/settings directly. Shared repository settings live in `.github/triage.toml`; an earlier `.github/triage.json` stays readable until `pdb config convert` (#160). npm manifests and workflow YAML retain their required formats. Follow doc/design/identity.md and doc/design/configuration-formats.md.
 
 ## Architecture and scope
 
-- Run the TypeScript CLI from source with `npm run triage` (tsx); use Vite+ for checks/tests/builds.
+- Run the TypeScript CLI from source with `npm run pdb` (tsx); use Vite+ for checks/tests/builds.
 - `github.ts` collects GitHub facts through existing authenticated `gh`, without a shell or new credentials. `dependencies.ts` owns native dependency queries and `deps add`/`remove`; `migration.ts` owns the read-only `deps migrate --plan` report (automatic apply is deferred, #48); `claims.ts` owns `claim` and `needs-human`; `delivery.ts` owns delivery records and their fold, `deliverables.ts` the `deliverables` commands (#189), and `completion.ts` the live delivery evidence, the pure completion evaluator and `complete` (#191). `team.ts` owns the read-only `team` view; `prstatus.ts` owns the read-only `pr N` progress report; `ticketdoctor.ts` owns the read-only `ticket-doctor` scan; `updates.ts` owns the npm version check (#51); `briefing.ts` owns registered workflow rules/policy, `compact.ts` presentation and `cli.ts` argument/filesystem orchestration.
 - Keep repository identities opaque. Extend registered workflow/rule/role handlers and declarative policy, not issue-number, named-agent or repository special cases.
 - Preserve schema versions, explicit freshness/completeness, full intake, offline/checkpoint safety and useful omission notices. Missing evidence is not approval.
@@ -42,8 +42,8 @@ Before committing run `npm run check`, `npm test` and `npm run build`. Use the i
 
 ```sh
 npm install                                   # also installs the Vite+ hooks (prepare)
-npm run triage -- --repo owner/repo [--json] [--issue 42] [--agent name]
-npm run triage -- deps 42 --repo owner/repo --tree
+npm run pdb -- --repo owner/repo [--json] [--issue 42] [--agent name]
+npm run pdb -- deps 42 --repo owner/repo --tree
 npm run check                                 # vp check (format, lint, type check) + examples tsc
 npm run fmt                                   # apply formatting
 npm test                                      # vp test run (Vitest)
@@ -62,7 +62,7 @@ Without `--repo`, the target repository is resolved by `gh repo view` from the c
 Be proactive: when one job finishes, find the next one rather than stopping to ask.
 
 1. **Your own open PRs come first.** An implementer's job is to get code merged, not to open PRs. Wait for CI and review, address every substantive finding (reviewers, bots, comments on the linked ticket), reply on each thread, and push until the PR is ready to merge. Wait in the background while reviews are pending; do not end the session because a review has not arrived yet.
-2. **Then pick a ticket with the triage tool** (`npm run triage`, `deps N`):
+2. **Then pick a ticket with the triage tool** (`npm run pdb`, `deps N`):
    - first, the ticket that unblocks the most downstream work (last open blocker for the most dependants);
    - failing that, a bug;
    - otherwise, the oldest ticket before newer ones.
@@ -72,7 +72,7 @@ Skip only work that someone else is visibly doing now: an `agent:` label, an ope
 
 ## Mirrored process proposal
 
-The owner requested a mirror of poker_blocks' design/implementation process. Review [doc/process.md](doc/process.md) and [doc/design-implementation.md](doc/design-implementation.md); [doc/poker-blocks-process.md](doc/poker-blocks-process.md) preserves historical process context with personal integration details removed. [Issue #12](https://github.com/trebizondoculpepper/github_triage/issues/12) asks this project to consider adoption and adaptations. These are review proposals; they do not silently override this guide or assert that branch protection/reviewer integrations exist.
+The owner requested a mirror of poker_blocks' design/implementation process. Review [doc/process.md](doc/process.md) and [doc/design-implementation.md](doc/design-implementation.md); [doc/poker-blocks-process.md](doc/poker-blocks-process.md) preserves historical process context with personal integration details removed. [Issue #12](https://github.com/trebizondoculpepper/presidential-daily-briefing/issues/12) asks this project to consider adoption and adaptations. These are review proposals; they do not silently override this guide or assert that branch protection/reviewer integrations exist.
 
 The [process adaptation audit](doc/reports/process-adaptation-audit.md) (#12) recommends retaining this guide and the focused merged contracts as active policy. The mirrored process remains context, not a second competing instruction source. Close tickets only when their stated acceptance is complete; completing a documentation phase alone does not finish its implementation or empirical follow-up.
 

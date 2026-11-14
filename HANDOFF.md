@@ -1,3 +1,5 @@
+> Historical extraction handoff. The current product is **Presidential Daily Briefing**, command `pdb`, at `trebizondoculpepper/presidential-daily-briefing`. Follow current AGENTS.md and merged contracts for implementation.
+
 # Handoff: standalone GitHub Triage
 
 The owner moved GitHub triage development from `poker_blocks` to this standalone public Vite+ project on 2026-11-12, for a new LLM to continue it. Read this before claiming work. No implementation claim is reserved for the extracting agent.

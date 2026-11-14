@@ -23,9 +23,9 @@ When installed behavior has not yet caught up with a merged contract, clearly di
 
 ## Surfaces and output budget
 
-`--help` has a short permanent Workflow section and a pointer to `github-triage process`. It remains local and credential-free. Disabling the recurring guide never removes on-demand help.
+`--help` has a short permanent Workflow section and a pointer to `pdb process`. It remains local and credential-free. Disabling the recurring guide never removes on-demand help.
 
-`github-triage process` renders the full available guide without querying GitHub. It supports the same role identifiers/default resolution as #1 when those are implemented; do not invent a competing role vocabulary or imply role grants permission. Until role selection ships, return the shared guide and state the limitation.
+`pdb process` renders the full available guide without querying GitHub. It supports the same role identifiers/default resolution as #1 when those are implemented; do not invent a competing role vocabulary or imply role grants permission. Until role selection ships, return the shared guide and state the limitation.
 
 As updated by [the Datalog live-experiment contract](datalog-live-experiment.md), ordinary compact briefings omit the guide by default. `--guide` or an explicit true `processGuide` setting enables it; JSON retains the structured `process` object. Use a maximum **900 Unicode code points** for guide text including its pointer; aim below the limit rather than padding to 600. Preserve actionable findings and their evidence before optional guide expansion. Under a smaller global output budget, emit only the pointer and report guide omission explicitly. Never truncate inside a command or silently drop a condition that changes its meaning.
 
@@ -33,9 +33,9 @@ When disabled, emit a one-line pointer with policy version instead of the guide 
 
 ## Minimal project configuration
 
-Implementation note (#71): the repository configuration service from #114/#116 landed after this contract, so the setting is the registered `processGuide` boolean key in `.github/triage.json`, set with `github-triage config set processGuide false`, rather than a separate `.github-triage.json`. Semantics below are unchanged; unknown keys in that shared file are refused by the service, so the briefing falls back to the default with a diagnostic rather than a warning.
+Implementation note (#71): the repository configuration service from #114/#116 landed after this contract, so the setting is the registered `processGuide` boolean key in `.github/triage.json`, set with `pdb config set processGuide false`, rather than a separate `.pdb.json`. Semantics below are unchanged; unknown keys in that shared file are refused by the service, so the briefing falls back to the default with a diagnostic rather than a warning.
 
-Use a committed `.github-triage.json` at the invoking Git project's worktree root:
+Use a committed `.pdb.json` at the invoking Git project's worktree root:
 
 ```json
 { "schemaVersion": 1, "processGuide": false }

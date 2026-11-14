@@ -3,17 +3,17 @@
  * Contract: doc/design/diagnostics.md, "#67: Ticket Doctor v2".
  *
  * Plans are suggestions only; nothing here runs a command. Every executable step is an argv
- * of a delivered command (github-triage, or a plain `gh issue edit` when no triage command
+ * of a delivered command (pdb, or a plain `gh issue edit` when no triage command
  * covers the label change), with --repo inside it. Human judgment is marked with `<UPPER>`
  * placeholders and listed per step; semantic choices are alternatives, never one pick.
  * Claim mutations are only ever addressed to the claimant themselves.
  */
 
 /** The executable that the suggestions name (package.json "bin"). */
-export const triageCommand = "github-triage";
+export const triageCommand = "pdb";
 
 /**
- * `command`: a delivered github-triage mutation. `inspect`: a read-only command.
+ * `command`: a delivered pdb mutation. `inspect`: a read-only command.
  * `manual`: no triage command covers it, so a plain `gh` edit is suggested instead.
  */
 export type StepKind = "command" | "inspect" | "manual";
