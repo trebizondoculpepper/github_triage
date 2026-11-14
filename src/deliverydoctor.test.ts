@@ -703,6 +703,38 @@ describe("closed-issue delivery drift (#192: S5, S16, S68 after closing)", () =>
     expect(r.closedScan?.complete).toBe(false);
   });
 
+  it("a closed ticket with only ignored records (non-writer or copied marker) is out of scope", async () => {
+    const byReader = post(record(48, "submit", { deliverables: [pr(68)] }), "reader");
+    const copied = post(record(99, "submit", { deliverables: [pr(68)] }));
+    const r = await closedDoctor([closedNode(48, "COMPLETED", [byReader, copied])], { 68: "open" });
+    expect(r.tickets).toEqual([]);
+    expect(r.closedScan).toMatchObject({ scanned: 1, withRecords: 0, complete: true });
+  });
+
+  it("a failed older comment page is incomplete coverage, not a crash or no record", async () => {
+    const fake = live({});
+    const query = async (q: string, v: Record<string, unknown>) => {
+      if (q.includes("states:CLOSED"))
+        return {
+          repository: {
+            issues: {
+              nodes: [closedNode(49, "COMPLETED", [], { older: true })],
+              pageInfo: { hasNextPage: false },
+            },
+          },
+        };
+      if (q.includes("comments(last:100,before:")) throw new Error("rate limited");
+      return fake.rt.query(q, v);
+    };
+    const closedDrift = await diagnoseClosedDrift(repo, time, {
+      trust,
+      live: { query: query as never, rest: fake.rt.rest },
+    });
+    expect(closedDrift.complete).toBe(false);
+    expect(closedDrift.warnings.join(" ")).toContain("rate limited");
+    expect(closedDrift.tickets).toEqual([]);
+  });
+
   it("the CLI refuses --since with --offline", async () => {
     await expect(
       main(["ticket-doctor", "--since", time, "--offline", "--cache", "x.json"], async () => {}, {

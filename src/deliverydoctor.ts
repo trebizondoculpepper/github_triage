@@ -374,12 +374,17 @@ export async function diagnoseClosedDrift(
   for (const node of nodes) {
     rt.signal?.throwIfAborted();
     scan.scanned++;
-    const history = await readDeliveryComments(
-      repository,
-      node.number,
-      node.comments,
-      rt.live.query,
-    );
+    let history: Awaited<ReturnType<typeof readDeliveryComments>>;
+    try {
+      history = await readDeliveryComments(repository, node.number, node.comments, rt.live.query);
+    } catch (error) {
+      // A failed older page (rate limit, network) is incomplete coverage, never "no record".
+      scan.complete = false;
+      scan.warnings.push(
+        `${node.url}: comment history could not be read (${error instanceof Error ? error.message : "unknown error"}); its delivery drift is unknown`,
+      );
+      continue;
+    }
     if (!history.comments.some((c) => parseDeliveryComment(c.body).kind !== "none")) {
       // An unseen older page may hold a record: that is unknown, never "no record".
       if (!history.complete) {
@@ -390,13 +395,16 @@ export async function diagnoseClosedDrift(
       }
       continue;
     }
-    scan.withRecords++;
     const { fold } = await readDeliveryFold(
       history.comments,
       history.complete,
       { repository, issue: node.number },
       rt.trust,
     );
+    // Only ignored markers (a verified non-writer's, or a copy bound to another issue) mean no
+    // delivery record: out of drift scope. An unknown fold stays in scope as unknown.
+    if (!fold.recordsUnknown && !fold.hasTrustedRecord) continue;
+    scan.withRecords++;
     const t: ClosedDriftTicket = {
       number: node.number,
       title: node.title,
