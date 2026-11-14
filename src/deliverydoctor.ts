@@ -41,6 +41,11 @@ export interface StaleTransfer {
   effective: string | null;
   effectiveUrl: string | null;
   effectiveHolder: string | null;
+  /**
+   * Responsible for the same scope after the whole fold (later valid transfers applied), or null
+   * when nobody is, or when the final fold is unknown and so cannot name anyone.
+   */
+  current: string | null;
   why: string;
 }
 
@@ -180,6 +185,13 @@ export async function diagnoseDelivery(
           url: urlOf.get(r.comment) ?? null,
           ...r.transfer,
           effectiveUrl: r.transfer.effective ? (urlOf.get(r.transfer.effective) ?? null) : null,
+          current: fold.recordsUnknown
+            ? null
+            : r.transfer.scope === "ticket"
+              ? fold.ticketResponsible
+              : (fold.members.find(
+                  (m) => deliverableLabel(m.deliverable) === r.transfer!.deliverable,
+                )?.responsible ?? null),
           why: r.why,
         });
     d.unverifiableTransfers = fold.unverifiableTransfers.map((c) => ({

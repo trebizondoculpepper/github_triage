@@ -212,15 +212,23 @@ function deliveryFindings(
       `Effective record ${t.effective ?? "none"}${t.effectiveUrl ? ` ${t.effectiveUrl}` : ""}; effective responsible ${t.effectiveHolder ?? "nobody"}.`,
       ...claimFact,
     ];
-    const holder = t.effectiveHolder;
+    // Recovery is addressed to whoever is responsible after the whole fold, never the holder at
+    // rejection time; an unknown final fold names nobody, so only inspection is offered.
+    const known = d.fold === "known";
+    const holder = known ? t.current : null;
+    facts.push(
+      known
+        ? `Currently responsible after all records: ${holder ?? "nobody"}.`
+        : "Current responsibility is unknown: a later record could not be read or trusted.",
+    );
     add(
       issue,
       "handoff-stale",
-      "candidate",
-      `Handoff ${t.sender} -> ${t.recipient} (${scope}) was rejected HANDOFF_STALE: ${holder ?? "nobody"} remains responsible. Nothing is transferred automatically.`,
+      known ? "candidate" : "unknown",
+      `Handoff ${t.sender} -> ${t.recipient} (${scope}) was rejected HANDOFF_STALE; ${known ? `${holder ?? "nobody"} is responsible now` : "current responsibility is unknown"}. Nothing is transferred automatically.`,
       [
         cmd.inspectIssue(n),
-        cmd.deliveryDryRun(n, holder ?? t.sender),
+        cmd.deliveryDryRun(n, holder ?? t.effectiveHolder ?? t.sender),
         ...(holder
           ? [
               cmd.deliveryHandoff(

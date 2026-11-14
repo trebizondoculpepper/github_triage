@@ -190,7 +190,7 @@ describe("delivery-aware Ticket Doctor (#192)", () => {
     const f = finding(r, 2, "handoff-stale");
     expect(f.certainty).toBe("candidate");
     expect(f.detail).toContain("alice -> carol (ticket)");
-    expect(f.detail).toContain("bob remains responsible");
+    expect(f.detail).toContain("bob is responsible now");
     expect(f.plan.facts.join("\n")).toContain(toCarol.url!);
     expect(f.plan.facts.join("\n")).toContain(toBob.url!);
     expect(f.plan.facts.join("\n")).toContain(`expected predecessor ${pred}`);
@@ -201,6 +201,49 @@ describe("delivery-aware Ticket Doctor (#192)", () => {
     expect(fresh?.runBy).toContain("bob");
     // Waiting on an open PR is not itself a finding.
     expect(kinds(r, 2)).toEqual(["handoff-stale"]);
+  });
+
+  it("S66 addresses recovery to the agent responsible after the whole fold, not the holder at rejection", async () => {
+    const submit = post(record(20, "submit", { deliverables: [pr(5)], membership: "complete" }));
+    const pred = String(submit.databaseId);
+    const toBob = post(
+      record(20, "handoff", { to: "bob", scope: "ticket", expectedResponsibilityRecord: pred }),
+    );
+    const toCarol = post(
+      record(20, "handoff", { to: "carol", scope: "ticket", expectedResponsibilityRecord: pred }),
+    );
+    const toDan = post(
+      record(20, "handoff", {
+        agent: "bob",
+        to: "dan",
+        scope: "ticket",
+        expectedResponsibilityRecord: String(toBob.databaseId),
+      }),
+    );
+    const r = await doctor([issue(20, ["bug"], [submit, toBob, toCarol, toDan])], { 5: "open" });
+    const f = finding(r, 20, "handoff-stale");
+    expect(f.detail).toContain("dan is responsible now");
+    const fresh = f.plan.steps.find((s) => s.choice?.startsWith("fresh-handoff"));
+    expect(fresh?.argv).toEqual(expect.arrayContaining(["--agent", "dan"]));
+    expect(fresh?.runBy).toContain("dan");
+    expect(f.plan.steps.some((s) => s.argv.includes("bob") && s.kind === "command")).toBe(false);
+  });
+
+  it("S66 offers inspection only when a later record leaves the final fold unknown", async () => {
+    const submit = post(record(21, "submit", { deliverables: [pr(5)], membership: "complete" }));
+    const pred = String(submit.databaseId);
+    const toBob = post(
+      record(21, "handoff", { to: "bob", scope: "ticket", expectedResponsibilityRecord: pred }),
+    );
+    const toCarol = post(
+      record(21, "handoff", { to: "carol", scope: "ticket", expectedResponsibilityRecord: pred }),
+    );
+    const unclear = post(record(21, "attach", { agent: "bob", deliverables: [pr(6)] }), "flaky");
+    const r = await doctor([issue(21, ["bug"], [submit, toBob, toCarol, unclear])], { 5: "open" });
+    const f = finding(r, 21, "handoff-stale");
+    expect(f.certainty).toBe("unknown");
+    expect(f.detail).toContain("current responsibility is unknown");
+    expect(f.plan.steps.every((s) => s.kind === "inspect")).toBe(true);
   });
 
   it("S66 exposes the rejected transfer on the shared fold", async () => {
