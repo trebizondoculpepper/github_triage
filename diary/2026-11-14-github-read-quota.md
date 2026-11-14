@@ -1,0 +1,3 @@
+# GitHub read quota incident
+
+Captured bounded sanitized query-cost/error evidence. Immediate all-state-history failure is a primary exhausted-quota response, while preceding inventory balances are inconsistent; no total-consumption attribution is claimed. Measured open issue/PR cost is 3/54. Created #292 research and focused #293–#295 technical follow-ups, reused #202/#203 experiments and reassessed their benefit. GraphQL was exhausted, so bounded administrative changes used the separately available REST interface and the existing provenance formatter; no tokens/private bodies or production fixes added.
