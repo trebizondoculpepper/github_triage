@@ -88,7 +88,14 @@ interface PrShape {
   review?: string | null;
   labels?: string[];
   /** Review evidence: approval or Codex receipt on the head, on an older commit, or none. */
-  evidence?: "approved" | "codex" | "codex-findings" | "stale" | "untrusted-codex" | "none";
+  evidence?:
+    | "approved"
+    | "approved-codex-findings"
+    | "codex"
+    | "codex-findings"
+    | "stale"
+    | "untrusted-codex"
+    | "none";
 }
 const codexReceipt = (n: number, sha: string, findings: boolean, login: string): Remote => ({
   databaseId: 90000 + n,
@@ -116,6 +123,8 @@ const evidence = (n: number, kind: PrShape["evidence"]) => {
       return { reviews: [approval(head)], comments: [] };
     case "stale":
       return { reviews: [approval("older")], comments: [codexReceipt(n, "older", false, bot)] };
+    case "approved-codex-findings":
+      return { reviews: [approval(head)], comments: [codexReceipt(n, head, true, bot)] };
     case "codex":
       return { reviews: [], comments: [codexReceipt(n, head, false, bot)] };
     case "codex-findings":
@@ -372,6 +381,8 @@ describe("accepted PRs needing refresh are integration actions (#182 S9)", () =>
       { mergeState: "BEHIND", evidence: "none" },
       { mergeState: "BEHIND", evidence: "stale" },
       { mergeState: "BEHIND", evidence: "codex-findings" },
+      // A current-head approval does not override Codex findings on the same head.
+      { mergeState: "BEHIND", evidence: "approved-codex-findings" },
       { mergeState: "BEHIND", evidence: "untrusted-codex" },
       { mergeable: "UNKNOWN", mergeState: "UNKNOWN", evidence: "none" },
     ] as Partial<PrShape>[]) {
