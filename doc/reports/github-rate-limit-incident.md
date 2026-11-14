@@ -22,6 +22,10 @@ These are individual observations, not a statistical benchmark or a promise of c
 
 `src/github.ts` collection currently fetches both repository inventories before focused issue handling. Each list page asks for up to 50 subjects. Common fields include full bodies, labels(first:100) and comments(first:100); PRs add closing references, review threads and their comments, reviews and check contexts. History repeats rich fields for all-state pages; source page caps bound traversal but do not make each query cheap. A rendered top-five/top-ten limit does not reduce collection. Cached output is available explicitly, but routine independent calls do not automatically share one verified collection.
 
+## Reconciliation with earlier cache research
+
+The earlier incremental-cache report (#198) recommended against caching the default snapshot because it took two requests. That request-count observation remains historical evidence, but it is insufficient to settle the current trade-off: those two calls now measure 57 primary points and substantial payload. Reassess reuse by cost, freshness and coverage, not call count alone. This is not proof that whole-snapshot caching is safe; the experiments must compare narrower collection with selective reuse and retain live mutable facts.
+
 ## Diagnostic gap
 
 The collector requests remaining/resetAt but not cost. Metrics count requests and wall time; two requests can hide a 3-versus-54 point difference. The gh boundary does not request response headers. `rateLimitFailure` retains bounded retry/reset metadata only if matching header text happens to be present, then emits a generic retry-after-reset message even when neither value is available. The structured discriminator checks RATE_LIMITED while the observed failure used RATE_LIMIT; stderr text happened to recognize it. Broad response-text matching can also confuse ordinary content with an error reason, so structured error/header parsing needs tests. This observation does not prove that the incident itself was a misclassification: its raw error was an actual exhausted-quota response.
