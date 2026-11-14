@@ -7439,6 +7439,17 @@ describe("role-shaped briefings (#1, doc/design/briefings.md)", () => {
       url: `https://github.com/${repo}/pull/5`,
       closingIssuesReferences: page([]),
       mergeStateStatus: "BEHIND",
+      // Approved on the current head, so BEHIND is an integration action (#182 S9).
+      reviews: page([
+        {
+          body: "",
+          url: "https://example.test/review",
+          author: { login: "reviewer" },
+          state: "APPROVED",
+          submittedAt: time,
+          commit: { oid: "abc123" },
+        },
+      ]),
     };
     const data = snapshot([issue(1)], [unverified, behind]);
     const r = await compact(data, { limit: 10, agent: "reader", role: "implementer" });

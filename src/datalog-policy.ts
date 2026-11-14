@@ -13,6 +13,7 @@ export const schema = Object.fromEntries(
     "closing",
     "check",
     "review",
+    "receipt",
     "thread",
     "matched",
     "overridden",
@@ -93,7 +94,7 @@ export const definitions: RuleDefinition[] = [
     2,
     3,
     "(pr-action ?t) (integrate-pr ?t)",
-    "Accepted at head {head} (verify passed, no fetched findings) but merge state is {mergeState}, mergeable {mergeable}; refresh mergeability or update the branch, then recheck before considering merge.",
+    "Accepted at head {head} (verify passed, head reviewed, no fetched findings) but merge state is {mergeState}, mergeable {mergeable}; refresh mergeability or update the branch, then recheck before considering merge.",
     ["pr-follow-up", "pr-integrate"],
   ),
   rule(
@@ -313,7 +314,9 @@ export const clauses = `[
 [(pr-review ?t) [?t "thread" ?c] [?c "resolved" false]]
 [(verified ?t) [?t "check" ?c] [?c "name" "verify"] [?c "outcome" "SUCCESS"]]
 [(clean-pr ?t) (pr ?t) [?t "pr-complete" true] [?t "draft" false] [?t "mergeable" "MERGEABLE"] [?t "merge-state" ?m] [1 "merge-state" ?m] (verified ?t) (not (pr-failure ?t)) (not (pr-pending ?t)) (not (pr-unknown ?t)) (not (pr-review ?t))]
-[(accepted-pr ?t) (pr ?t) [?t "pr-complete" true] [?t "draft" false] (verified ?t) (not (pr-failure ?t)) (not (pr-pending ?t)) (not (pr-unknown ?t)) (not (pr-review ?t)) (not [?t "mergeable" "CONFLICTING"])]
+[(head-reviewed ?t) [?t "head" ?h] [?t "review" ?r] [?r "review-state" "APPROVED"] [?r "review-commit" ?h]]
+[(head-reviewed ?t) [?t "head" ?h] [?t "receipt" ?c] [?c "receipt-commit" ?h] [?c "receipt-status" "completed"] [?c "receipt-findings" false]]
+[(accepted-pr ?t) (head-reviewed ?t) [?t "pr-complete" true] [?t "draft" false] (verified ?t) (not (pr-failure ?t)) (not (pr-pending ?t)) (not (pr-unknown ?t)) (not (pr-review ?t)) (not [?t "mergeable" "CONFLICTING"])]
 [(refresh-needed ?t) [?t "mergeable" ?m] [1 "unknown-mergeable" ?m]]
 [(refresh-needed ?t) [?t "merge-state" ?m] [1 "refresh-state" ?m]]
 [(integrate-pr ?t) (accepted-pr ?t) (refresh-needed ?t)]

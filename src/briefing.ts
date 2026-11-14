@@ -14,6 +14,7 @@ import type { SubjectAssessments } from "./assessments.js";
 import { labelEstimationReport } from "./complexitylabels.js";
 import type { LabelEstimationInput } from "./complexitylabels.js";
 import type { Action, Dependency, Issue, PullRequest, Snapshot } from "./types.js";
+import { headReviewed } from "./reviewevidence.js";
 
 export { urgencyBand };
 /** Briefing default for stale-claim signals (doc/design/briefings.md): two days. */
@@ -498,7 +499,8 @@ analysisRules.set("pull-requests", ({ snapshot, prs }) =>
       !unresolved.length &&
       !workflow.changesRequested.includes(pr.reviewDecision ?? "") &&
       !workflow.conflicts.includes(pr.mergeable) &&
-      !pr.isDraft;
+      !pr.isDraft &&
+      headReviewed(pr);
     if (
       accepted &&
       (workflow.unknownMergeable.includes(pr.mergeable) ||
@@ -509,7 +511,7 @@ analysisRules.set("pull-requests", ({ snapshot, prs }) =>
           "pr-integrate",
           pr,
           75,
-          `Accepted at the current head (verify passed, no fetched findings) but merge state is ${pr.mergeStateStatus}, mergeable ${pr.mergeable}.`,
+          `Accepted at the current head (verify passed, head reviewed, no fetched findings) but merge state is ${pr.mergeStateStatus}, mergeable ${pr.mergeable}.`,
           "Refresh mergeability or update the branch, then recheck the new head before considering merge. This is not approval.",
           "candidate",
         ),
@@ -573,7 +575,7 @@ export interface BriefingOptions {
    * Trusted delivery responsibility per pull request URL (#182 over #190 records). Additive to
    * `agent:` linkage for own follow-up; absent means not read, never "nobody responsible".
    */
-  responsible?: ReadonlyMap<string, string>;
+  responsible?: ReadonlyMap<string, readonly string[]>;
 }
 /** A bounded list: the first `limit` items plus how many were left out. */
 export interface Bounded<T> {

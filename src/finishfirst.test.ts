@@ -87,9 +87,47 @@ interface PrShape {
   mergeState?: string;
   review?: string | null;
   labels?: string[];
+  /** Review evidence: approval or Codex receipt on the head, on an older commit, or none. */
+  evidence?: "approved" | "codex" | "codex-findings" | "stale" | "untrusted-codex" | "none";
 }
+const codexReceipt = (n: number, sha: string, findings: boolean, login: string): Remote => ({
+  databaseId: 90000 + n,
+  body: `Reviewed.\n<!-- codex-review-state:v1 ${JSON.stringify({ code_review: { status: "completed", commit_sha: sha, has_unresolved_findings: findings } })} -->`,
+  url: `${pullUrl(n)}#issuecomment-9${n}`,
+  author: { __typename: "Bot", login },
+  createdAt: "2026-11-13T10:00:00Z",
+  lastEditedAt: null,
+  includesCreatedEdit: false,
+  editor: null,
+});
+const evidence = (n: number, kind: PrShape["evidence"]) => {
+  const head = `head${n}`;
+  const approval = (oid: string) => ({
+    body: "",
+    url: `${pullUrl(n)}#review`,
+    author: { login: "reviewer" },
+    state: "APPROVED",
+    submittedAt: "2026-11-13T10:00:00Z",
+    commit: { oid },
+  });
+  const bot = "chatgpt-codex-connector";
+  switch (kind) {
+    case "approved":
+      return { reviews: [approval(head)], comments: [] };
+    case "stale":
+      return { reviews: [approval("older")], comments: [codexReceipt(n, "older", false, bot)] };
+    case "codex":
+      return { reviews: [], comments: [codexReceipt(n, head, false, bot)] };
+    case "codex-findings":
+      return { reviews: [], comments: [codexReceipt(n, head, true, bot)] };
+    case "untrusted-codex":
+      return { reviews: [], comments: [codexReceipt(n, head, false, "someone")] };
+    default:
+      return { reviews: [], comments: [] };
+  }
+};
 const pr = (n: number, s: PrShape): PullRequest => ({
-  ...issue(n, s.labels ?? []),
+  ...issue(n, s.labels ?? [], evidence(n, s.evidence ?? "approved").comments),
   url: pullUrl(n),
   headRefOid: `head${n}`,
   headRefName: `branch-${n}`,
@@ -100,7 +138,7 @@ const pr = (n: number, s: PrShape): PullRequest => ({
   reviewDecision: s.review ?? null,
   closingIssuesReferences: page([{ number: s.closes, url: issueUrl(s.closes) }]),
   reviewThreads: page([]),
-  reviews: page([]),
+  reviews: page(evidence(n, s.evidence ?? "approved").reviews),
   commits: {
     nodes: [
       {
@@ -228,6 +266,30 @@ describe("own submitted PR follow-up survives the released claim (#182 S2)", () 
     expect(own.why.facts).not.toHaveProperty("responsible");
   });
 
+  it("keeps every responsible agent when one PR is required by several issues", async () => {
+    // PR 25 is a deliverable of #9 (submitted by `me`) and #10 (submitted by `other`).
+    const shared = (order: number[]): World => ({
+      issues: order.map((n) =>
+        issue(n, ["status:awaiting-review"], [submitted(n, 25, n === 9 ? "me" : "other")]),
+      ),
+      prs: [
+        pr(19, { closes: 2, checks: [["verify", "FAILURE"]] }),
+        pr(25, { closes: 9, review: "CHANGES_REQUESTED" }),
+      ],
+    });
+    for (const order of [
+      [9, 10],
+      [10, 9],
+    ]) {
+      const r = await cli(shared(order), "implementer");
+      expect(ranked(r)[0], `issue order ${order}`).toBe("pr-follow-up#25");
+      const own = r.rankedActions!.items[0] as unknown as { why: { facts: object } };
+      expect(own.why.facts).toMatchObject({ responsible: "me; other" });
+      const ts = await cli(shared(order), "implementer", typescript);
+      expect(next(ts)[0], `typescript, issue order ${order}`).toBe(25);
+    }
+  });
+
   it("the explicit TypeScript engine applies the same responsibility", async () => {
     const r = await cli(submittedWorld(), "implementer", typescript);
     expect(next(r).slice(0, 3)).toEqual([20, 19, 3]);
@@ -265,6 +327,7 @@ describe("accepted PRs needing refresh are integration actions (#182 S9)", () =>
   });
   for (const [label, shape] of [
     ["BEHIND", { mergeState: "BEHIND" }],
+    ["BEHIND with a Codex receipt on the head", { mergeState: "BEHIND", evidence: "codex" }],
     ["mergeability UNKNOWN", { mergeable: "UNKNOWN", mergeState: "UNKNOWN" }],
   ] as const)
     it(`${label} ranks an integrate action ahead of own work and pickup`, async () => {
@@ -305,11 +368,19 @@ describe("accepted PRs needing refresh are integration actions (#182 S9)", () =>
       { mergeState: "BEHIND", checks: [["verify", "MYSTERY"]] },
       { mergeState: "BEHIND", checks: [["lint", "SUCCESS"]] },
       { mergeState: "BLOCKED" },
+      // Acceptance needs attributable review evidence bound to the current head.
+      { mergeState: "BEHIND", evidence: "none" },
+      { mergeState: "BEHIND", evidence: "stale" },
+      { mergeState: "BEHIND", evidence: "codex-findings" },
+      { mergeState: "BEHIND", evidence: "untrusted-codex" },
+      { mergeable: "UNKNOWN", mergeState: "UNKNOWN", evidence: "none" },
     ] as Partial<PrShape>[]) {
       const r = await cli(world(shape), "implementer");
       expect(ranked(r), JSON.stringify(shape)).not.toContain("pr-follow-up#22");
       // Waiting on the PR never blocks own work or pickup.
       expect(ranked(r)).toEqual(["continue-implementation#6", "implement#7"]);
+      const ts = await cli(world(shape), "implementer", typescript);
+      expect(next(ts), JSON.stringify(shape)).not.toContain(22);
     }
   });
 });

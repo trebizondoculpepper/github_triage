@@ -16,8 +16,11 @@ import {
 } from "./delivery.js";
 
 export interface ResponsibilityFacts {
-  /** Deliverable (pull request) URL to the trusted responsible agent. */
-  responsible: Map<string, string>;
+  /**
+   * Deliverable (pull request) URL to every trusted responsible agent. Responsibility is
+   * (agent, issue, deliverable): one PR can be required by several issues with different agents.
+   */
+  responsible: Map<string, string[]>;
   /** Issue URLs whose delivery records exist but could not be folded, with the reasons. */
   unknown: { issue: string; because: string[] }[];
 }
@@ -58,7 +61,10 @@ export async function readSnapshotResponsibility(
     for (const member of fold.members)
       if (member.deliverable.kind === "pr" && member.responsible) {
         const url = pullUrl(member.deliverable.repository, member.deliverable.number);
-        facts.responsible.set(collected.get(url.toLowerCase()) ?? url, member.responsible);
+        const key = collected.get(url.toLowerCase()) ?? url;
+        const agents = facts.responsible.get(key) ?? [];
+        if (!agents.includes(member.responsible)) agents.push(member.responsible);
+        facts.responsible.set(key, agents);
       }
   }
   return facts;

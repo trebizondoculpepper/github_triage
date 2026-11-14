@@ -175,7 +175,7 @@ export function compactBriefing(
   // Trusted delivery responsibility (#182) keeps a submitted PR the viewer's own follow-up after
   // `submit` releases the `agent:` claim; absence of a record is not evidence of anything.
   const responsibleMine = (item: Subject): boolean =>
-    !!options.agent && options.responsible?.get(item.url) === options.agent;
+    !!options.agent && !!options.responsible?.get(item.url)?.includes(options.agent);
   const linkedMine = (item: Subject | undefined): boolean =>
     isMine(defined(item)) ||
     responsibleMine(defined(item)) ||

@@ -6,6 +6,7 @@ import type { Snapshot, Issue, PullRequest } from "./types.js";
 import type { SubjectAssessments } from "./assessments.js";
 import type { RankedAction, RankedActions, BlendedRole, ActionKind, Band } from "./blended.js";
 import type { PickupOrder } from "./ranking.js";
+import { codexMarker, codexReviewer } from "./reviewevidence.js";
 import {
   definitions,
   clauses,
@@ -36,7 +37,7 @@ export interface DatalogOptions {
    * Trusted delivery responsibility per deliverable URL (#190 records, read by #182). Additive to
    * `agent:` linkage; a deliverable absent here has no proven responsibility, never "nobody".
    */
-  responsible?: ReadonlyMap<string, string>;
+  responsible?: ReadonlyMap<string, readonly string[]>;
   /** Issues whose delivery records could not be folded; reported, never treated as absence. */
   responsibilityUnknown?: readonly string[];
   limit: number;
@@ -174,8 +175,7 @@ function normalize(
     }
     for (const p of s.closedByPullRequestsReferences?.nodes ?? [])
       if (p.state === "OPEN") put(id, "closing", ids.get(p.url) ?? nextId++);
-    const responsible = options.responsible?.get(s.url);
-    if (responsible) put(id, "responsible", responsible);
+    for (const agent of options.responsible?.get(s.url) ?? []) put(id, "responsible", agent);
     if (pr) {
       const rollup = pr.commits.nodes[0]?.commit.statusCheckRollup;
       for (const [k, v] of Object.entries({
@@ -200,6 +200,24 @@ function normalize(
         put(id, "check", c);
         put(c, "name", check.name ?? check.context ?? "unnamed");
         put(c, "outcome", check.conclusion ?? check.state ?? check.status ?? "UNKNOWN");
+      }
+      // Raw review evidence; the policy decides what binds to the current head (#182).
+      for (const review of pr.reviews.nodes) {
+        const r = nextId++;
+        put(id, "review", r);
+        put(r, "review-state", review.state);
+        if (review.commit?.oid) put(r, "review-commit", review.commit.oid);
+      }
+      for (const c of pr.comments.nodes) {
+        if ((c.author?.login ?? "").replace(/\[bot\]$/, "") !== codexReviewer) continue;
+        const state = codexMarker(c.body)?.code_review;
+        if (!state) continue;
+        const r = nextId++;
+        put(id, "receipt", r);
+        if (state.commit_sha) put(r, "receipt-commit", state.commit_sha);
+        if (state.status) put(r, "receipt-status", state.status);
+        if (typeof state.has_unresolved_findings === "boolean")
+          put(r, "receipt-findings", state.has_unresolved_findings);
       }
       for (const thread of pr.reviewThreads.nodes) {
         const c = nextId++;
