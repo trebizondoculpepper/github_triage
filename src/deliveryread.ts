@@ -353,8 +353,10 @@ export interface PrDelivery {
     closure: Closure | null;
     /** This PR is a trusted required member of that issue (null when records are unknown). */
     required: boolean | null;
+    /** Null is "nobody" only when `required` is known; with `required: null` it is unknown. */
     responsible: string | null;
     delivery: DeliveryView["delivery"] | null;
+    /** As `responsible`: unknown, not "nobody", whenever `required` is null. */
     ticketResponsible: string | null;
     followUp: FollowUp | null;
     followUpWhy: string | null;
