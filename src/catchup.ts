@@ -202,7 +202,7 @@ export function catchUp(snapshot: Snapshot, options: CatchUpOptions) {
   const detail = (kind: SubjectRef["kind"], number: number) =>
     kind === "pull-request"
       ? `gh pr view ${number} --repo ${repository}`
-      : `github-triage --repo ${repository} --issue ${number} --json`;
+      : `pdb --repo ${repository} --issue ${number} --json`;
   const rowId = (kind: SubjectRef["kind"], number: number, event: string) =>
     `${repository}#${kind}#${number}#${event}`;
   const items: Issue[] = [...snapshot.issues, ...snapshot.pullRequests];

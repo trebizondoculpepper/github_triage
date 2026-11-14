@@ -185,7 +185,7 @@ const current = () => {
       comment(
         30,
         1,
-        "Claimed by `ana` with `github-triage claim`.\n<!-- github-triage:claim:aaaa -->",
+        "Claimed by `ana` with `pdb claim`.\n<!-- github-triage:claim:aaaa -->",
         inside(6),
       ),
     ]),
@@ -196,7 +196,7 @@ const current = () => {
       comment(
         31,
         2,
-        "Claimed by `bo` with `github-triage claim`.\n<!-- github-triage:claim:bbbb -->",
+        "Claimed by `bo` with `pdb claim`.\n<!-- github-triage:claim:bbbb -->",
         inside(6),
       ),
     ]),
@@ -572,12 +572,7 @@ describe("repository catch-up aggregation (#169)", () => {
     submittedAt: at,
   });
   const claimOn = (n: number, id: number, at: string) =>
-    comment(
-      n,
-      id,
-      "Claimed by `ana` with `github-triage claim`.\n<!-- github-triage:claim:aaaa -->",
-      at,
-    );
+    comment(n, id, "Claimed by `ana` with `pdb claim`.\n<!-- github-triage:claim:aaaa -->", at);
 
   it("counts live reviews by their submission time through the real collector", async () => {
     const open = pr(50, [], "SUCCESS", {

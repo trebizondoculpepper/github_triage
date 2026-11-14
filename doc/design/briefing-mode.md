@@ -4,12 +4,12 @@ Contract for #163. Product question: “What changed in this repository, and wha
 
 ## CLI and comparison window
 
-Add the planned command `github-triage briefing`, with `--repo`, `--agent`, `--json`, `--limit`, `--max-chars`, `--cache` and `--no-update-check`. It is not installed by this documentation. Select at most one live window source:
+Add the planned command `pdb briefing`, with `--repo`, `--agent`, `--json`, `--limit`, `--max-chars`, `--cache` and `--no-update-check`. It is not installed by this documentation. Select at most one live window source:
 
 ```sh
-github-triage briefing --repo owner/repository --last 24h
-github-triage briefing --repo owner/repository --since 2026-11-13T09:00:00Z
-github-triage briefing --repo owner/repository --checkpoint /private/path/check-in.json
+pdb briefing --repo owner/repository --last 24h
+pdb briefing --repo owner/repository --since 2026-11-13T09:00:00Z
+pdb briefing --repo owner/repository --checkpoint /private/path/check-in.json
 ```
 
 Default: `--last 24h`. Durations are positive integers followed by `m`, `h` or `d`, meaning fixed elapsed UTC durations, not local calendar days. Reject zero, overflow, invalid timestamps and a future start before collection. `--since` uses the existing ISO-with-time/timezone validation and normalizes UTC. Reject combinations of `--last`, `--since` and `--checkpoint` rather than silently prefer one. Arbitrary historical end times/as-of reconstruction are outside this first slice.
@@ -82,7 +82,7 @@ Query cost: change-evidence mode reuses the existing all-state issue and PR quer
 
 ## Slice 3 implementation notes (#170)
 
-`src/catchupcli.ts` owns `github-triage briefing` (`cli.ts` only dispatches to it and supplies the checkpoint/cache file boundary). Every argument, including window combinations, duration/timestamp syntax, `--limit` 1–100 and `--max-chars` 1000–40000, is validated before any file or GitHub read; a future `--since`/checkpoint is rejected by `resolveWindow` before collection. The live run reads the checkpoint with the existing schema-version-1 reader, resolves one anchor T0, collects with `changeWindow`, writes `--cache` (the snapshot with its `changeEvidence` window and coverage), delivers the report, and only then atomically writes the checkpoint as `{schemaVersion: 1, repository, through: candidate}` when `catchUp` offered a candidate (complete report or complete baseline). Output, collection or cache-write failure ends the run before that write. A checkpoint write failure leaves stdout as the one delivered report, prints a sanitized recovery line on stderr and exits 1. Malformed, mismatched or unreadable checkpoint and cache files produce a structured refusal (`kind: "repository-briefing-refusal"` with `--json`, otherwise stderr), reporting only the error code, never resetting the file. `--offline --cache PATH` makes no GitHub or update calls, reports the recorded window with an `offline` object (cache time and age) and a text `OFFLINE:` line, and sets the checkpoint candidate to null; legacy caches report history `unavailable` with exit 2. Exit 0 also covers a complete baseline.
+`src/catchupcli.ts` owns `pdb briefing` (`cli.ts` only dispatches to it and supplies the checkpoint/cache file boundary). Every argument, including window combinations, duration/timestamp syntax, `--limit` 1–100 and `--max-chars` 1000–40000, is validated before any file or GitHub read; a future `--since`/checkpoint is rejected by `resolveWindow` before collection. The live run reads the checkpoint with the existing schema-version-1 reader, resolves one anchor T0, collects with `changeWindow`, writes `--cache` (the snapshot with its `changeEvidence` window and coverage), delivers the report, and only then atomically writes the checkpoint as `{schemaVersion: 1, repository, through: candidate}` when `catchUp` offered a candidate (complete report or complete baseline). Output, collection or cache-write failure ends the run before that write. A checkpoint write failure leaves stdout as the one delivered report, prints a sanitized recovery line on stderr and exits 1. Malformed, mismatched or unreadable checkpoint and cache files produce a structured refusal (`kind: "repository-briefing-refusal"` with `--json`, otherwise stderr), reporting only the error code, never resetting the file. `--offline --cache PATH` makes no GitHub or update calls, reports the recorded window with an `offline` object (cache time and age) and a text `OFFLINE:` line, and sets the checkpoint candidate to null; legacy caches report history `unavailable` with exit 2. Exit 0 also covers a complete baseline.
 
 ## Slice 4 implementation notes (#171)
 

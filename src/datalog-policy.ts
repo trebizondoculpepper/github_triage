@@ -418,15 +418,13 @@ export const denialsQuery =
   "[:find ?t ?r :in $ % :where (implementation-permit ?t) (implementation-deny ?t ?r)]";
 
 export const commandTemplates: Record<string, string> = {
-  detail: "github-triage --repo {repo} --issue {number} --json",
-  pr: "github-triage pr {number} --repo {repo}",
-  claim: "github-triage claim {number} --repo {repo} --agent {agent}{platformFlag}",
-  release:
-    "github-triage release {other} --repo {repo} --agent {agent} --as incomplete --note TEXT",
+  detail: "pdb --repo {repo} --issue {number} --json",
+  pr: "pdb pr {number} --repo {repo}",
+  claim: "pdb claim {number} --repo {repo} --agent {agent}{platformFlag}",
+  release: "pdb release {other} --repo {repo} --agent {agent} --as incomplete --note TEXT",
   complexity:
-    "github-triage estimate {number} --metric complexity --size SIZE --rationale TEXT --repo {repo}",
-  impact:
-    "github-triage estimate {number} --metric impact --size SIZE --rationale TEXT --repo {repo}",
+    "pdb estimate {number} --metric complexity --size SIZE --rationale TEXT --repo {repo}",
+  impact: "pdb estimate {number} --metric impact --size SIZE --rationale TEXT --repo {repo}",
 };
 export const commandKinds: Record<string, string> = {
   "estimate-complexity": "complexity",

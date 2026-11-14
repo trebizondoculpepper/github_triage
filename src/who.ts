@@ -193,11 +193,11 @@ export function ticketOwnership(
         : recorded.length === 1
           ? `recorded claim: ${recorded[0]}`
           : `conflicting recorded claims: ${recorded.join(", ")}`;
-  const triage = `github-triage --repo ${snapshot.repository}`;
+  const triage = `pdb --repo ${snapshot.repository}`;
   const next = [
     `${triage} --issue ${number}`,
-    ...prs.map((p) => `github-triage pr ${p.number} --repo ${snapshot.repository}`),
-    `github-triage team --repo ${snapshot.repository}`,
+    ...prs.map((p) => `pdb pr ${p.number} --repo ${snapshot.repository}`),
+    `pdb team --repo ${snapshot.repository}`,
   ];
   if (!complete)
     warnings.push(

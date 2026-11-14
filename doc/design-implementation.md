@@ -1,12 +1,12 @@
 # Proposed design and implementation responsibilities
 
-**Status: proposal for [adaptation review #12](https://github.com/trebizondoculpepper/github_triage/issues/12).** Mirrors poker_blocks' `AGENTS.md` sections “Recorded decisions”, “Checks before committing”, “Code Review Rules” and “Design and implementation ownership”, plus its process guide, at main commit `2dec9d10e81a21a9dfaa60fe89ac081eadb0b84e`. The [source process snapshot](poker-blocks-process.md) is retained as historical context with private integration details removed. This document translates the responsibilities to the standalone CLI; it does not import game rules or claim configured bot reviews.
+**Status: proposal for [adaptation review #12](https://github.com/trebizondoculpepper/presidential-daily-briefing/issues/12).** Mirrors poker_blocks' `AGENTS.md` sections “Recorded decisions”, “Checks before committing”, “Code Review Rules” and “Design and implementation ownership”, plus its process guide, at main commit `2dec9d10e81a21a9dfaa60fe89ac081eadb0b84e`. The [source process snapshot](poker-blocks-process.md) is retained as historical context with private integration details removed. This document translates the responsibilities to the standalone CLI; it does not import game rules or claim configured bot reviews.
 
 **Adaptation reviewed:** [the current-project audit](reports/process-adaptation-audit.md) recommends the active AGENTS/merged-contract process rather than wholesale adoption. This mirrored proposal is historical context; later owner decisions take precedence.
 
 ## Design owns initial decisions
 
-The design agent works with the user on initial behavior and architecture decisions, updates canonical contracts and prepares implementation tickets. For this project those contracts are [the CLI design](github-triage-cli.md) and [native issue dependencies](issue-dependencies.md). Each ticket identifies the applicable already merged sections and acceptance criteria.
+The design agent works with the user on initial behavior and architecture decisions, updates canonical contracts and prepares implementation tickets. For this project those contracts are [the CLI design](pdb-cli.md) and [native issue dependencies](issue-dependencies.md). Each ticket identifies the applicable already merged sections and acceptance criteria.
 
 Research is a joint responsibility. Either designer or implementer can inspect source, reproduce behavior, probe an API or contribute evidence about a concrete uncertainty. Design ownership does not reserve research to one role.
 

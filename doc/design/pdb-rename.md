@@ -1,10 +1,10 @@
 # Presidential Daily Briefing rename
 
-Owner decision, 2026-11-14. Delivery tickets #315–#320. The owner renamed the existing GitHub repository during this session; its canonical name is now `trebizondoculpepper/presidential_daily_briefing`. Preserve its history and immutable repository identity.
+Owner decision, 2026-11-14. Delivery tickets #315–#320. The owner renamed the existing GitHub repository during this session; its canonical name is now `trebizondoculpepper/presidential-daily-briefing`. Preserve its history and immutable repository identity.
 
 ## Names and rationale
 
-The product is **Presidential Daily Briefing**, replacing GitHub Triage. The primary executable is **`pdb`**, with **`pdb-mcp`** for the MCP server. The npm package is **`@trebizondoculpepper/presidential-daily-briefing`**. Keep the owner's underscore spelling for the GitHub slug; npm uses the hyphenated package name. Installation, version/update notices, generated recovery commands, current documentation, server identification and release metadata must agree.
+The product is **Presidential Daily Briefing**, replacing GitHub Triage. The primary executable is **`pdb`**, with **`pdb-mcp`** for the MCP server. The npm package is **`@trebizondoculpepper/presidential-daily-briefing`**. The owner's final GitHub slug and npm package both use hyphens. Installation, version/update notices, generated recovery commands, current documentation, server identification and release metadata must agree.
 
 This is a naming/distribution migration. It must not rewrite issue history, discard persisted workflow receipts, change action authority or weaken mutation safeguards. Datalog default adoption is the separate mission #326 and should be included in the verified source for the first renamed release when ready.
 
@@ -29,15 +29,15 @@ The project-owned local identity file proposed in #319 is `pdb.toml` at the Git 
 
 ## Repository and npm transition
 
-1. Verify canonical GitHub repository identity, remotes, CI and open PRs after the owner's rename. Update active package repository/bugs URLs and publisher instructions to the underscore GitHub slug.
+1. Verify canonical GitHub repository identity, remotes, CI and open PRs after the owner's rename. Update active package repository/bugs URLs and publisher instructions to the final hyphenated GitHub slug.
 2. Merge reviewed naming code with current-head required CI and a clean Codex or CodeRabbit review. Preserve all substantive review findings, even when the other provider is clean.
 3. Validate packed contents, installed `pdb` and `pdb-mcp`, generated advice, update-check registry target, both role queues and rollback. Python also has a `pdb` module; the installed executable is selected by PATH. Do not remove or overwrite an unrelated executable silently.
 4. Publish the new scoped package using the owner's existing npm account. npm cannot rename the existing package in place. First publication may require an authenticated maintainer bootstrap because trusted publisher configuration is package-specific. This one-time bootstrap is authorized for this rename: use only the exact reviewed/verified source, record gitHead and the chosen release version, and retain checks/packaging before publication. Never print credentials or commit local authentication.
 5. Start the new package at `0.6.0`, continuing after the existing `0.5.0` release without colliding with historical GitHub version tags. The source build placeholder is not release provenance. Subsequent releases use the normal explicit workflow and the new package's publication history. Configure/verify the new package's trusted publisher for the actual canonical repository and `publish.yml`; it does not inherit the old package's setup merely because the repository redirects.
-6. Verify the registry's new name/version/gitHead, install it globally, exercise the actual bins, then deprecate `@trebizondoculpepper/github-triage` with the new install command. Preserve its published versions; do not unpublish them. Existing old-name installs stay available while their update message points to the replacement.
+6. Verify the registry's new name/version/gitHead, install it globally and exercise the actual bins. The owner subsequently deleted the old npm package during the rename session. Respect that decision: do not attempt to deprecate a missing package or recreate it automatically. Existing local old-name installs can be replaced with the new package; old executable aliases remain compatibility entry points in the new distribution.
 
 The local npm account is authenticated as `trebizondoculpepper` on the owner's machine. Authentication is an operational precondition, not a credential to place in this document or repository. Any interactive npm authentication challenge is completed by the owner.
 
 ## Acceptance
 
-The canonical GitHub repository, npm package, installed executables and current help/docs all identify Presidential Daily Briefing. CLI and MCP packaged smoke/parity checks pass on the reviewed source. Old workflow records and explicitly preserved serialized identifiers remain readable. Record publication/install evidence and remaining publisher administration accurately; a docs-only merge does not complete runtime, identity migration or publication tickets.
+The canonical GitHub repository, npm package, installed executables and current help/docs all identify Presidential Daily Briefing. CLI and MCP packaged smoke/parity checks pass on the reviewed source. Old workflow records and explicitly preserved serialized identifiers remain readable. Record publication/install evidence and remaining publisher administration accurately; a docs-only merge does not complete runtime, identity migration or publication tickets. The owner's deletion supersedes the earlier planned deprecation step.

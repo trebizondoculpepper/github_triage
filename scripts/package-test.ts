@@ -4,7 +4,7 @@
  *
  * Packs the real npm archive, checks its contents against the allowlist, installs that exact
  * archive globally into an isolated temporary npm prefix (the recommended installation, #17),
- * and runs the installed `github-triage` executable through npm's bin link from separate
+ * and runs the installed `pdb` executable through npm's bin link from separate
  * working directories: help, invalid arguments, and the credential-free offline smoke checks.
  * Direct source or dist execution alone is not enough (#11).
  */
@@ -222,7 +222,20 @@ try {
     throw new Error("The package must not run install scripts on installation.");
   console.log("ok   installed globally into an isolated prefix without install scripts");
 
-  const bin = windows ? join(prefix, "github-triage.cmd") : join(prefix, "bin", "github-triage");
+  const bin = windows ? join(prefix, "pdb.cmd") : join(prefix, "bin", "pdb");
+  // Compatibility aliases are deliberately not renamed: existing launchers keep working.
+  for (const [legacyName, canonicalName] of [
+    ["github-triage", "pdb"],
+    ["github-triage-mcp", "pdb-mcp"],
+  ]) {
+    const legacyBin = windows ? join(prefix, `${legacyName}.cmd`) : join(prefix, "bin", legacyName);
+    const { stdout } = await run(windows ? `"${legacyBin}"` : legacyBin, ["--help"], {
+      shell: windows,
+    });
+    if (!stdout.startsWith(`Usage: ${canonicalName}`))
+      throw new Error(`Legacy alias ${legacyName} does not resolve to ${canonicalName}.`);
+  }
+  console.log("ok   legacy executable aliases resolve to the canonical PDB commands");
   // Separate working directories stand in for different project checkouts.
   const checkouts = [join(work, "checkout-a"), join(work, "checkout-b")];
   for (const dir of checkouts) await mkdir(dir);
@@ -317,9 +330,7 @@ try {
   );
   // The second bin (#25): a real SDK client completes a stdio round trip with the installed
   // MCP server. Listing tools needs no GitHub access or credentials.
-  const mcpBin = windows
-    ? join(prefix, "github-triage-mcp.cmd")
-    : join(prefix, "bin", "github-triage-mcp");
+  const mcpBin = windows ? join(prefix, "pdb-mcp.cmd") : join(prefix, "bin", "pdb-mcp");
   const transport = new StdioClientTransport({
     command: windows ? process.execPath : mcpBin,
     args: windows
@@ -343,24 +354,18 @@ try {
   } finally {
     await client.close();
   }
-  const mcpHelp = await run(
-    windows ? `"${join(prefix, "github-triage-mcp.cmd")}"` : mcpBin,
-    ["--help"],
-    {
-      shell: windows,
-    },
-  );
-  if (!mcpHelp.stdout.startsWith("Usage: github-triage-mcp"))
+  const mcpHelp = await run(windows ? `"${join(prefix, "pdb-mcp.cmd")}"` : mcpBin, ["--help"], {
+    shell: windows,
+  });
+  if (!mcpHelp.stdout.startsWith("Usage: pdb-mcp"))
     throw new Error("Installed MCP bin printed no help.");
   // #246: MCP help carries the same bundled impact guidance and the CLI commands for it.
   if (
     !mcpHelp.stdout.includes("Impact estimation guidance (version") ||
-    !mcpHelp.stdout.includes("github-triage estimate --help --metric impact")
+    !mcpHelp.stdout.includes("pdb estimate --help --metric impact")
   )
     throw new Error("Installed MCP help carries no impact guidance.");
-  console.log(
-    "ok   installed github-triage-mcp completes a stdio round trip (four read-only tools)",
-  );
+  console.log("ok   installed pdb-mcp completes a stdio round trip (four read-only tools)");
   // #260: installed CLI and MCP produce identical blended role queues from the same facts.
   const mcpCommand = windows
     ? { command: process.execPath, args: [join(packageDir, "dist", "mcp.mjs")] }
@@ -383,7 +388,7 @@ try {
     const env = {
       ...process.env,
       PATH: `${fakeDir}${delimiter}${process.env.PATH ?? ""}`,
-      GITHUB_TRIAGE_NO_UPDATE_CHECK: "1",
+      PDB_NO_UPDATE_CHECK: "1",
     };
     const want: Record<string, string> = {
       implementer: "estimate-complexity",
@@ -426,14 +431,14 @@ try {
   }
   // Optional read-only live smoke (#260): GITHUB_TRIAGE_PACKAGE_LIVE_REPO=owner/name uses the
   // real authenticated gh from this checkout. No labels, claims or other writes are made.
-  const live = process.env.GITHUB_TRIAGE_PACKAGE_LIVE_REPO;
+  const live = process.env.PDB_PACKAGE_LIVE_REPO ?? process.env.GITHUB_TRIAGE_PACKAGE_LIVE_REPO;
   if (live) {
     const revision = (await run("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
     const version = (
       await run(windows ? `"${bin}"` : bin, ["version", "--no-update-check"], { shell: windows })
     ).stdout.split("\n")[0];
     console.log(`live source revision ${revision}; executable ${bin} (${version})`);
-    const env = { ...process.env, GITHUB_TRIAGE_NO_UPDATE_CHECK: "1" };
+    const env = { ...process.env, PDB_NO_UPDATE_CHECK: "1" };
     const selected = await resolveEngineSetting(live, { cwd: root });
     for (const role of ["implementer", "designer"]) {
       const kinds = await blendedParity(

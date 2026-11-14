@@ -1305,7 +1305,7 @@ describe("submit (#190)", () => {
       /DRY RUN[\s\S]*gh issue comment 42[\s\S]*gh issue edit 42/,
     );
     expect(plan.ok && plan.retry).toBe(
-      `github-triage submit 42 --agent alice --pr ${pr.url} --membership open --repo ${repo}`,
+      `pdb submit 42 --agent alice --pr ${pr.url} --membership open --repo ${repo}`,
     );
     expect(state.writes).toEqual([]);
   });
@@ -1333,7 +1333,7 @@ describe("submit (#190)", () => {
       await planDeliverables(repo, submitReq({ prs: [pr.url] }), rt),
       "TARGET_MISMATCH",
     );
-    expect(plan.recovery[0]).toMatch(/^github-triage submit 42 .*--target/);
+    expect(plan.recovery[0]).toMatch(/^pdb submit 42 .*--target/);
     const explicit = await planDeliverables(
       repo,
       submitReq({ prs: [pr.url], target: { repository: repo, branch: "feature" } }),

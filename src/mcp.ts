@@ -67,9 +67,9 @@ export interface McpRuntime extends ReadRuntime {
   watcher?: Watcher;
 }
 
-export const mcpHelp = `Usage: github-triage-mcp [--project PATH] [--repo owner/name] [--agent NAME]
+export const mcpHelp = `Usage: pdb-mcp [--project PATH] [--repo owner/name] [--agent NAME]
                          [--entry KEY | --harness NAME] [--poll [--poll-interval-minutes N]]
-Read-only stdio MCP server for github-triage. Requires authenticated gh and Node 26+.
+Read-only stdio MCP server for Presidential Daily Briefing. Requires authenticated gh and Node 26+.
 Tools: triage_briefing, triage_issue, triage_dependencies, triage_events. Never changes GitHub.
   --project PATH        Local project checkout used to resolve the default repository
   --repo owner/name     Default repository (a tool's repo argument wins)
@@ -267,11 +267,11 @@ const failures = {
   "decision-engine-config":
     "Selected repository configuration could not be validated. Use the local CLI diagnostic for the configuration service's repair guidance, repair or restore the configuration, then retry.",
   "decision-engine-role":
-    "Datalog next actions require role implementer or designer. Rollback: github-triage config set briefing.engine typescript.",
+    "Datalog next actions require role implementer or designer. Rollback: pdb config set briefing.engine typescript.",
   "decision-engine-failed":
-    "Experimental Datalog evaluation failed; no fallback result was returned. Inspect the local CLI diagnostic or roll back: github-triage config set briefing.engine typescript.",
+    "Experimental Datalog evaluation failed; no fallback result was returned. Inspect the local CLI diagnostic or roll back: pdb config set briefing.engine typescript.",
   "repository-unresolved":
-    "No repository selected. Pass repo as owner/name on this call, or restart the server with --repo owner/name or --project /absolute/project/path, for example: github-triage-mcp --project /absolute/project/path",
+    "No repository selected. Pass repo as owner/name on this call, or restart the server with --repo owner/name or --project /absolute/project/path, for example: pdb-mcp --project /absolute/project/path",
   "collection-failed":
     "GitHub evidence could not be collected. Check gh authentication and repository access, then retry.",
   "invalid-window":
@@ -409,7 +409,7 @@ export function createServer(
   runtime: McpRuntime,
   version = "0.0.0",
 ): McpServer {
-  const server = new McpServer({ name: "github-triage", version });
+  const server = new McpServer({ name: "pdb", version });
   // Generic path redaction applies only to the service's local diagnostics (doc/design/mcp.md).
   const reader: McpRuntime = { ...runtime, redactDiagnostic: redactLocalText };
 
@@ -523,7 +523,7 @@ export function createServer(
     {
       title: "Triage briefing",
       description:
-        'Datalog next actions by default (implementer view unless role is supplied). Explicit TypeScript rollback: github-triage config set briefing.engine typescript. Evidence-linked action briefing for a GitHub repository: what needs attention and what to pick up next. Call at the start of work or with since to catch up. mode "briefing" returns the repository-wide what-changed report for a window (since, or last such as 24h; default last 24h); it never reads or advances a checkpoint. Actions default to ten next steps; catch-up defaults to five rows per section. In actions mode, role (implementer or designer) returns the blended queue for that role (rankedActions, role.next, estimation, impactEstimation) exactly as the CLI --role, and order (impact, oldest, newest) matches CLI --order.',
+        'Datalog next actions by default (implementer view unless role is supplied). Explicit TypeScript rollback: pdb config set briefing.engine typescript. Evidence-linked action briefing for a GitHub repository: what needs attention and what to pick up next. Call at the start of work or with since to catch up. mode "briefing" returns the repository-wide what-changed report for a window (since, or last such as 24h; default last 24h); it never reads or advances a checkpoint. Actions default to ten next steps; catch-up defaults to five rows per section. In actions mode, role (implementer or designer) returns the blended queue for that role (rankedActions, role.next, estimation, impactEstimation) exactly as the CLI --role, and order (impact, oldest, newest) matches CLI --order.',
       inputSchema: briefingInput,
       outputSchema: envelope,
       annotations,
@@ -740,7 +740,7 @@ if (isEntryPoint(process.argv[1])) {
       }
       const watcher = runtime.watcher;
       const handle = serveStdio(() => createServer(options, runtime, version ?? "0.0.0"), {
-        onerror: (error) => process.stderr.write(`github-triage-mcp: ${error.message}\n`),
+        onerror: (error) => process.stderr.write(`pdb-mcp: ${error.message}\n`),
       });
       if (watcher) {
         // Only this process owns the timer: EOF, disconnect or a signal stops it for good.
@@ -756,9 +756,7 @@ if (isEntryPoint(process.argv[1])) {
       }
     }
   } catch (error) {
-    process.stderr.write(
-      `github-triage-mcp: ${error instanceof Error ? error.message : String(error)}\n`,
-    );
+    process.stderr.write(`pdb-mcp: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;
   }
 }

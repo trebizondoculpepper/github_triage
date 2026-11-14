@@ -382,7 +382,7 @@ describe("estimate --metric impact records and revises (#245)", () => {
     expect(t.mutations[0]!.vars).toMatchObject({
       name: "impact:L",
       color: IMPACT_LABEL_COLOR,
-      description: "Impact estimate L (github-triage estimate)",
+      description: "Impact estimate L (pdb estimate)",
     });
     // Impact reads comment authority and the description edit time.
     expect(t.queries[0]).toContain("author { __typename login }");
@@ -545,7 +545,7 @@ describe("estimate --metric impact records and revises (#245)", () => {
     const t = harness({ config: "schemaVersion = 1\n[impact]\nenabled = false\n" });
     expect(await t.call(...impactArgs, "--json")).toBe(2);
     expect(t.json()).toMatchObject({ status: "disabled", code: "disabled" });
-    expect(t.json().recovery).toBe("Opt in with: github-triage config set impact.enabled true");
+    expect(t.json().recovery).toBe("Opt in with: pdb config set impact.enabled true");
     expect(t.mutations).toEqual([]);
     expect(await t.call("--size", "S", "--rationale", "one module", "--json")).toBe(0);
     expect(t.json().status).toBe("recorded");
@@ -588,10 +588,10 @@ describe("complexity estimate output stays byte-compatible (#245 regression)", (
       repository: "R_1",
       name: "complexity:M",
       color: "c5def5",
-      description: "Complexity estimate M (github-triage estimate)",
+      description: "Complexity estimate M (pdb estimate)",
     });
     expect(t.remote.comments[0]!.body).toBe(
-      '<!-- github-triage:complexity-estimate v2 {"schemaVersion":2,"kind":"complexity\\u002destimate","storage":"labels","size":"M","previous":["S"],"rationale":"r","assumptions":["x"],"references":["#1"],"estimator":"a","revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","guidanceVersion":1,"recordedAt":"2026\\u002d11\\u002d13T12:00:00.000Z"} -->\n**Complexity estimate: M** (was S) — recorded with github-triage, guidance version 1.\n\nRationale: r\n\nAssumptions:\n- x\n\nReference anchors: #1\n\nEstimator: a · Revision: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\nThe label complexity:M is the current size; this comment records why. Estimating does not claim, unblock or re-rank this ticket.',
+      '<!-- github-triage:complexity-estimate v2 {"schemaVersion":2,"kind":"complexity\\u002destimate","storage":"labels","size":"M","previous":["S"],"rationale":"r","assumptions":["x"],"references":["#1"],"estimator":"a","revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","guidanceVersion":1,"recordedAt":"2026\\u002d11\\u002d13T12:00:00.000Z"} -->\n**Complexity estimate: M** (was S) — recorded with pdb, guidance version 1.\n\nRationale: r\n\nAssumptions:\n- x\n\nReference anchors: #1\n\nEstimator: a · Revision: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\nThe label complexity:M is the current size; this comment records why. Estimating does not claim, unblock or re-rank this ticket.',
     );
     expect(t.out.at(-1)).toBe(
       "Complexity estimate for owner/name#7: S -> M\nCreated repository label complexity:M.\nLabels: +complexity:M -complexity:S.\nProvenance: https://c/1\nStatus: recorded\n",
@@ -797,7 +797,7 @@ describe("Ticket Doctor impact findings (#245)", () => {
     ]);
     const fix = finding!.plan.steps.find((s) => s.argv[1] === "estimate")!;
     expect(fix.argv).toEqual([
-      "github-triage",
+      "pdb",
       "estimate",
       "7",
       "--metric",

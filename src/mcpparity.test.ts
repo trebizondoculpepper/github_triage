@@ -186,7 +186,7 @@ describe("CLI and MCP report identical blended queues (#260)", () => {
     const items = (mcp.result.rankedActions as { items: Record<string, unknown>[] }).items;
     expect(items[0]).toMatchObject({
       kind: "implement",
-      nextCommand: `github-triage claim 1 --repo ${repo} --agent me`,
+      nextCommand: `pdb claim 1 --repo ${repo} --agent me`,
     });
     expect(kinds(mcp.result)).not.toContain("implement#8");
     expect(mcp.result.rankedActions).toEqual(cli.rankedActions);

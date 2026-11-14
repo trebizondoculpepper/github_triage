@@ -1,18 +1,20 @@
 {
-  "name": "@trebizondoculpepper/github-triage",
+  "name": "@trebizondoculpepper/presidential-daily-briefing",
   "version": "0.1.0",
-  "description": "Evidence-linked GitHub issue and pull request briefings for coding agents",
+  "description": "Presidential Daily Briefing: evidence-linked GitHub work queues for coding agents",
   "bugs": {
-    "url": "https://github.com/trebizondoculpepper/github_triage/issues"
+    "url": "https://github.com/trebizondoculpepper/presidential-daily-briefing/issues"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/trebizondoculpepper/github_triage.git"
+    "url": "git+https://github.com/trebizondoculpepper/presidential-daily-briefing.git"
   },
   "bin": {
     "github-triage": "dist/cli.mjs",
-    "github-triage-mcp": "dist/mcp.mjs"
+    "github-triage-mcp": "dist/mcp.mjs",
+    "pdb": "dist/cli.mjs",
+    "pdb-mcp": "dist/mcp.mjs"
   },
   "files": [
     "dist/cli.mjs",
@@ -37,7 +39,8 @@
     "package-test": "tsx scripts/package-test.ts",
     "release": "tsx scripts/release.ts",
     "make-prerelease": "tsx scripts/make-prerelease.ts",
-    "mcp": "tsx src/mcp.ts"
+    "mcp": "tsx src/mcp.ts",
+    "pdb": "tsx src/cli.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.4.0",

@@ -389,9 +389,7 @@ const opFor = (r: DeliverablesRequest): DeliveryOp =>
 /** The exact command line for a request, as shown in retries and recoveries. */
 export function deliverablesCommand(repository: string, r: DeliverablesRequest): string {
   const parts = [
-    r.action === "submit"
-      ? `github-triage submit ${r.number}`
-      : `github-triage deliverables ${r.number} ${r.action}`,
+    r.action === "submit" ? `pdb submit ${r.number}` : `pdb deliverables ${r.number} ${r.action}`,
   ];
   if (r.action === "membership" && r.membership) parts.push(r.membership);
   parts.push(`--agent ${r.agent}`);
@@ -554,7 +552,7 @@ export async function planDeliverables(
   const r = request;
   const { number, agent } = r;
   const op = opFor(r);
-  const cmd = (text: string): string => `github-triage ${text} --repo ${repository}`;
+  const cmd = (text: string): string => `pdb ${text} --repo ${repository}`;
   const retry = deliverablesCommand(repository, r);
   const inspect = cmd(`--issue ${number}`);
   const refuse = (
@@ -872,8 +870,8 @@ export async function planDeliverables(
   ): DeliverablesAccepted => {
     const body = [
       r.action === "submit"
-        ? `Submitted by \`${agent}\` with \`github-triage submit\`: **${describe}**. Releasing the claim; ${agent} stays responsible for follow-up until completion or a recorded handoff.`
-        : `Delivery record by \`${agent}\`${record.login ? ` (${record.login})` : ""} with \`github-triage deliverables ${r.action}${r.legacy ? " --legacy" : ""}\`: **${describe}**.`,
+        ? `Submitted by \`${agent}\` with \`pdb submit\`: **${describe}**. Releasing the claim; ${agent} stays responsible for follow-up until completion or a recorded handoff.`
+        : `Delivery record by \`${agent}\`${record.login ? ` (${record.login})` : ""} with \`pdb deliverables ${r.action}${r.legacy ? " --legacy" : ""}\`: **${describe}**.`,
       "",
       ...(record.reason ? [`**Reason:** ${record.reason}`, ""] : []),
       ...(record.evidence ? [`Evidence: ${record.evidence}`, ""] : []),
@@ -1363,7 +1361,7 @@ export async function planDeliverables(
         return refuse(
           "VOID_NOT_APPLICABLE",
           facts,
-          `Comment ${target} is not a malformed trusted delivery record; void never removes a parsable record (use detach, retarget or membership) or an unsupported-version one (upgrade github-triage).`,
+          `Comment ${target} is not a malformed trusted delivery record; void never removes a parsable record (use detach, retarget or membership) or an unsupported-version one (upgrade pdb).`,
           [inspect],
         );
       return accepted(
@@ -1450,7 +1448,7 @@ export async function reworkAuthority(
   agent: string,
   rt: DeliverablesRuntime,
 ): Promise<ReworkAuthority> {
-  const cmd = (text: string): string => `github-triage ${text} --repo ${repository}`;
+  const cmd = (text: string): string => `pdb ${text} --repo ${repository}`;
   const refusal = (error: string, prerequisite: string, recovery: string[]): ReworkAuthority => ({
     refusal: { error, prerequisite, recovery },
   });
@@ -1675,16 +1673,16 @@ export function deliverablesText(
   return lines.join("\n") + "\n";
 }
 
-export const deliverablesUsage = `Usage: github-triage deliverables N attach --agent NAME --pr URL [--pr URL...] [--target owner/name:branch] [--membership complete|open] [--reason TEXT]
-       github-triage deliverables N attach --legacy --agent NAME (--pr URL | --commit owner/name@SHA)... [--target owner/name:branch] [--membership open] --reason TEXT
-       github-triage deliverables N detach --agent NAME --pr URL --reason TEXT
-       github-triage deliverables N retarget --agent NAME --pr URL --target owner/name:branch --reason TEXT
-       github-triage deliverables N handoff --agent NAME --to NAME [--pr URL] --reason TEXT
-       github-triage deliverables N membership complete|open --agent NAME --reason TEXT
-       github-triage deliverables N attest [--legacy] --agent NAME --reason TEXT [--evidence URL]
-       github-triage deliverables N reassign --agent NAME --to NAME --reason TEXT
-       github-triage deliverables N reset --agent NAME --as ready|incomplete --reason TEXT
-       github-triage deliverables N void --agent NAME --comment ID --reason TEXT
+export const deliverablesUsage = `Usage: pdb deliverables N attach --agent NAME --pr URL [--pr URL...] [--target owner/name:branch] [--membership complete|open] [--reason TEXT]
+       pdb deliverables N attach --legacy --agent NAME (--pr URL | --commit owner/name@SHA)... [--target owner/name:branch] [--membership open] --reason TEXT
+       pdb deliverables N detach --agent NAME --pr URL --reason TEXT
+       pdb deliverables N retarget --agent NAME --pr URL --target owner/name:branch --reason TEXT
+       pdb deliverables N handoff --agent NAME --to NAME [--pr URL] --reason TEXT
+       pdb deliverables N membership complete|open --agent NAME --reason TEXT
+       pdb deliverables N attest [--legacy] --agent NAME --reason TEXT [--evidence URL]
+       pdb deliverables N reassign --agent NAME --to NAME --reason TEXT
+       pdb deliverables N reset --agent NAME --as ready|incomplete --reason TEXT
+       pdb deliverables N void --agent NAME --comment ID --reason TEXT
   Every form also takes [--dry-run] [--json] [--repo owner/name].`;
 
 export const deliverablesHelp = `${deliverablesUsage}
@@ -1830,7 +1828,7 @@ export function deliverablesArguments(args: string[]) {
 }
 
 export const submitUsage =
-  "Usage: github-triage submit N --agent NAME [--pr URL...] [--target owner/name:branch] [--membership open] [--dry-run] [--json] [--repo owner/name]";
+  "Usage: pdb submit N --agent NAME [--pr URL...] [--target owner/name:branch] [--membership open] [--dry-run] [--json] [--repo owner/name]";
 
 export const submitHelp = `${submitUsage}
 Hand over finished implementation work (#190, doc/design/delivery-lifecycle.md D3): record the

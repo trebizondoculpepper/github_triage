@@ -304,7 +304,7 @@ export type DependencyAction = "add" | "remove";
 export function commentFor(action: DependencyAction, blockers: number[], note: string): string {
   const verb = action === "add" ? "Added" : "Removed";
   const noun = blockers.length === 1 ? "dependency" : "dependencies";
-  return `${verb} native blocked-by ${noun}: ${blockers.map((n) => `#${n}`).join(", ")}.\n\nWhy: ${note}\n\nRecorded with \`github-triage deps ${action}\`; labels are unchanged (doc/issue-dependencies.md).`;
+  return `${verb} native blocked-by ${noun}: ${blockers.map((n) => `#${n}`).join(", ")}.\n\nWhy: ${note}\n\nRecorded with \`pdb deps ${action}\`; labels are unchanged (doc/issue-dependencies.md).`;
 }
 
 export type ChangeStatus = "apply" | "refused" | "noop" | "done" | "failed" | "skipped";

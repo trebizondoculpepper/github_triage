@@ -1,5 +1,5 @@
 /**
- * `github-triage briefing`: the repository catch-up command (#170, slice 3 of
+ * `pdb briefing`: the repository catch-up command (#170, slice 3 of
  * doc/design/briefing-mode.md). Argument validation, the checkpoint and cache files and the
  * offline mode live here; window resolution is `changes.ts`, collection `github.ts` and the
  * report `catchup.ts`. GitHub is only read. The checkpoint is written last, only after the
@@ -118,10 +118,10 @@ export interface BriefingRuntime {
 }
 
 export const briefingUsage =
-  "Usage: github-triage briefing [--repo owner/name] [--last DURATION | --since ISO | --checkpoint PATH] [--agent NAME] [--json] [--limit N] [--max-chars N] [--cache PATH] [--no-update-check]\n       github-triage briefing --offline --cache PATH [--repo owner/name] [--agent NAME] [--json] [--limit N] [--max-chars N]";
+  "Usage: pdb briefing [--repo owner/name] [--last DURATION | --since ISO | --checkpoint PATH] [--agent NAME] [--json] [--limit N] [--max-chars N] [--cache PATH] [--no-update-check]\n       pdb briefing --offline --cache PATH [--repo owner/name] [--agent NAME] [--json] [--limit N] [--max-chars N]";
 
 export const briefingHelp = `${briefingUsage}
-(From a source checkout, use npm run triage -- briefing ...)
+(From a source checkout, use npm run pdb -- briefing ...)
 Read-only repository catch-up: what changed in a window, and what needs attention now.
 Five sections: owner attention (always first), completed/disposed, progress, blockers/risks,
 current activity. History sections use the window; the others are current observations.
@@ -147,7 +147,7 @@ Scope: issues and pull requests (reviews, checks, workflow labels, claims, nativ
 Not covered: releases, npm publication, deployments, file diffs, transient label history.
 A merged PR is not proof of a release. Agent names are reported attribution, not
 authenticated identity. Missing evidence is reported as unknown, never as no change.
-Example: github-triage briefing --repo owner/name --checkpoint ~/.config/github-triage/owner-name.json
+Example: pdb briefing --repo owner/name --checkpoint ~/.config/pdb/owner-name.json
 Exit: 0 complete; 2 incomplete or unavailable evidence; 1 invalid arguments, operational
 failure or checkpoint write failure (stderr says how to recover).
 `;
@@ -327,7 +327,7 @@ async function deliver(
         "cache",
         cache,
         describe(error),
-        `Refresh it live: github-triage briefing${options.repo ? ` --repo ${options.repo}` : ""} --cache ${cache}`,
+        `Refresh it live: pdb briefing${options.repo ? ` --repo ${options.repo}` : ""} --cache ${cache}`,
       );
     }
   } else {

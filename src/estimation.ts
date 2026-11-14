@@ -171,7 +171,7 @@ export function sizeReport(
       } else {
         size = reading.size;
         state = "estimated";
-        if (!recorded) reasons.push("no recorded rationale (value set outside github-triage)");
+        if (!recorded) reasons.push("no recorded rationale (value set outside pdb)");
         else {
           if (recorded.size !== size) {
             state = "stale";
@@ -276,9 +276,7 @@ export function estimationText(report: EstimationReport): string[] {
     lines.push(`  ${f.rule}: ${f.detail} Next: ${f.next.join(" | ")}`);
   if (report.queue) {
     for (const e of report.queue.items)
-      lines.push(
-        `#${e.number} ${e.title} — ${estimateLine(e)}\n  github-triage estimate --help; ${e.url}`,
-      );
+      lines.push(`#${e.number} ${e.title} — ${estimateLine(e)}\n  pdb estimate --help; ${e.url}`);
     if (report.queue.omitted) lines.push(`${report.queue.omitted} more omitted; increase --limit.`);
   }
   const shown = report.conflicts.slice(0, MAX_CONFLICT_LINES);

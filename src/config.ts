@@ -51,7 +51,7 @@ export const CONFIG_PATHS: Readonly<Record<ConfigFormat, string>> = {
 };
 
 /** The command that converts the JSON file to TOML (#160). */
-export const CONVERT_COMMAND = "github-triage config convert";
+export const CONVERT_COMMAND = "pdb config convert";
 
 /** The schema version this build writes. */
 export const CURRENT_SCHEMA_VERSION = 1;
@@ -79,7 +79,7 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
     defaultValue: "datalog",
     choices: ["typescript", "datalog"],
     description:
-      "Next-action decision engine: datalog (default) or explicit typescript rollback. Datalog uses --role implementer or designer, defaulting to the implementer view; rollback: github-triage config set briefing.engine typescript.",
+      "Next-action decision engine: datalog (default) or explicit typescript rollback. Datalog uses --role implementer or designer, defaulting to the implementer view; rollback: pdb config set briefing.engine typescript.",
   },
   {
     key: "complexity.enabled",
@@ -103,7 +103,7 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
     nullable: false,
     defaultValue: false,
     description:
-      "Whether briefings include the compact workflow guide (#71). false omits the footer; --guide/--no-guide override per run and `github-triage process` always shows the full guide.",
+      "Whether briefings include the compact workflow guide (#71). false omits the footer; --guide/--no-guide override per run and `pdb process` always shows the full guide.",
   },
 ];
 
@@ -134,7 +134,7 @@ export function retiredKeyNotices(config: LoadedConfig): {
   return config.retired.map((key) => ({
     key,
     detail: `${config.path} contains the retired key ${key} (${RETIRED_CONFIG_KEYS.find((entry) => entry.key === key)?.reason ?? "no longer supported"}); it is ignored.`,
-    next: `github-triage config set complexity.enabled ${enabled}`,
+    next: `pdb config set complexity.enabled ${enabled}`,
   }));
 }
 
@@ -429,7 +429,7 @@ export function parseConfig(
     throw new ConfigError(
       "unsupported-version",
       `${path} uses schema version ${storedVersion}; this build supports up to ${schema.version}.`,
-      "Upgrade github-triage to a release that supports this schema. The file was not changed.",
+      "Upgrade pdb to a release that supports this schema. The file was not changed.",
     );
   }
   let document: Record<string, unknown> = { ...data };
@@ -583,7 +583,7 @@ export async function loadConfig(
 
 /** Header written at the top of the TOML file; comments are not otherwise preserved. */
 export const TOML_HEADER =
-  "# Shared github-triage repository settings (not secrets, not agent identity).\n# Change them with `github-triage config set KEY VALUE`; see `github-triage config help`.\n\n";
+  "# Shared pdb repository settings (not secrets, not agent identity).\n# Change them with `pdb config set KEY VALUE`; see `pdb config help`.\n\n";
 
 /** Serialise values in the canonical current-schema layout of the given format. */
 export function serializeConfig(

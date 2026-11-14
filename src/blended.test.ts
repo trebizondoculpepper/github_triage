@@ -450,7 +450,7 @@ describe("rankedActions through collect() (#248)", () => {
       reasonCodes: ["easy-win", "impact-current", "complexity-current"],
       impact: { state: "current", size: "L" },
       complexity: { state: "current", size: "S" },
-      nextCommand: `github-triage claim 1 --repo ${repo} --agent me`,
+      nextCommand: `pdb claim 1 --repo ${repo} --agent me`,
     });
     // A blocked ticket (#7) may be assessed but is never implementation pickup; another agent's
     // claim (#8) can be estimated (no claim) but never picked up; parked work (#9) is absent; a
@@ -464,7 +464,7 @@ describe("rankedActions through collect() (#248)", () => {
     // #259: the implementer's complexity inspection carries the Ticket Doctor fix as its command.
     expect(inspect).toMatchObject({
       band: 5,
-      nextCommand: `github-triage estimate 6 --metric complexity --size SIZE --rationale TEXT --repo ${repo}`,
+      nextCommand: `pdb estimate 6 --metric complexity --size SIZE --rationale TEXT --repo ${repo}`,
       inspection: null,
     });
     expect(ranked.items.at(-1)).toMatchObject({
@@ -587,7 +587,7 @@ describe("implementer estimation counts and NEXT STEPS (#259)", () => {
     expect(steps).toContain("— implement (easy-win, impact-current, complexity-current)");
     expect(steps).toContain("— estimate-complexity (assessment, cross-role-boost");
     expect(steps).toContain(
-      `Next: github-triage estimate 4 --metric complexity --size SIZE --rationale TEXT --repo ${repo}`,
+      `Next: pdb estimate 4 --metric complexity --size SIZE --rationale TEXT --repo ${repo}`,
     );
     expect(steps).toContain(
       "- Complexity assessment: 4 eligible, 3 ranked, 2 shown; 1 conflicting.",
@@ -641,8 +641,8 @@ describe("implementer estimation counts and NEXT STEPS (#259)", () => {
     expect(easy).toMatchObject({
       kind: "implement",
       target: url(1),
-      nextCommand: `github-triage release 3 --repo ${repo} --agent me --as incomplete --note TEXT`,
-      thenCommand: `github-triage claim 1 --repo ${repo} --agent me`,
+      nextCommand: `pdb release 3 --repo ${repo} --agent me --as incomplete --note TEXT`,
+      thenCommand: `pdb claim 1 --repo ${repo} --agent me`,
     });
     expect(report.actions.items).toContain(url(3));
   });
@@ -682,22 +682,20 @@ describe("generated commands are runnable for the viewer (#248 review)", () => {
     const a = implement(
       input([subject(7, ["platform:claude-code"])], [], { platform: "claude-code" }),
     );
-    expect(a.nextCommand).toBe(
-      `github-triage claim 7 --repo ${repo} --agent me --platform claude-code`,
-    );
+    expect(a.nextCommand).toBe(`pdb claim 7 --repo ${repo} --agent me --platform claude-code`);
   });
 
   it("omits --platform for an unrestricted ticket", () => {
     const a = implement(input([subject(7)], [], { platform: "claude-code" }));
-    expect(a.nextCommand).toBe(`github-triage claim 7 --repo ${repo} --agent me`);
+    expect(a.nextCommand).toBe(`pdb claim 7 --repo ${repo} --agent me`);
   });
 
   it("shows the release handoff before claiming a second implementation", () => {
     const a = implement(input([subject(7), subject(3)], [3]));
     expect(a.nextCommand).toBe(
-      `github-triage release 3 --repo ${repo} --agent me --as incomplete --note TEXT`,
+      `pdb release 3 --repo ${repo} --agent me --as incomplete --note TEXT`,
     );
-    expect(a.thenCommand).toBe(`github-triage claim 7 --repo ${repo} --agent me`);
+    expect(a.thenCommand).toBe(`pdb claim 7 --repo ${repo} --agent me`);
     expect(a.reasonCodes).toContain("release-active-claim-first");
   });
 

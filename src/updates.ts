@@ -10,9 +10,10 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join, sep } from "node:path";
 
-export const packageName = "@trebizondoculpepper/github-triage";
+export const packageName = "@trebizondoculpepper/presidential-daily-briefing";
 export const defaultTimeoutMs = 1500;
-export const optOutEnv = "GITHUB_TRIAGE_NO_UPDATE_CHECK";
+export const optOutEnv = "PDB_NO_UPDATE_CHECK";
+export const legacyOptOutEnv = "GITHUB_TRIAGE_NO_UPDATE_CHECK";
 
 export interface ParsedVersion {
   major: number;
@@ -200,7 +201,7 @@ export async function checkForUpdate({
 /** The one-line advisory, or null when nothing should be said routinely. */
 export function updateAdvisory(result: UpdateCheckResult): string | null {
   return result.status === "newer" && result.notify !== false
-    ? `github-triage ${result.available} is available (installed ${result.installed}). Update with: ${result.command}`
+    ? `pdb ${result.available} is available (installed ${result.installed}). Update with: ${result.command}`
     : null;
 }
 

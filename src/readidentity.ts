@@ -63,7 +63,7 @@ export interface ReadIdentityOptions {
 }
 
 const recovery =
-  "Pass agent, or start the server with --agent NAME, --entry KEY or --harness NAME; persist a name with github-triage config set identity.triage_role ROLE --entry KEY.";
+  "Pass agent, or start the server with --agent NAME, --entry KEY or --harness NAME; persist a name with pdb config set identity.triage_role ROLE --entry KEY.";
 
 const unresolved = (reason: string, entry: string | null = null): ReadIdentity => ({
   agent: null,

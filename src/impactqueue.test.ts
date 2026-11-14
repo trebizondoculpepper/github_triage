@@ -224,9 +224,9 @@ describe("impact guidance in CLI and MCP help from one definition (#246)", () =>
   it("puts the same definition in MCP help with runnable CLI commands", () => {
     expect(mcpHelp).toContain(impactGuidanceSummary());
     for (const band of impactGuidance.bands) expect(mcpHelp).toContain(band.guidance);
-    expect(mcpHelp).toContain("github-triage estimate --help --metric impact");
+    expect(mcpHelp).toContain("pdb estimate --help --metric impact");
     expect(mcpHelp).toContain(
-      "github-triage estimate N --metric impact --size SIZE --rationale TEXT --repo owner/name",
+      "pdb estimate N --metric impact --size SIZE --rationale TEXT --repo owner/name",
     );
     // Help never contains shell comments.
     expect(impactGuidanceSummary()).not.toMatch(/(^|\s)#\s/m);
@@ -258,7 +258,7 @@ describe("designer impact queue through collect() (#246)", () => {
       reasonCodes: expect.arrayContaining(["cross-role-boost", "impact-unassessed"]),
       complexity: { state: "current", size: "XS" },
       impact: { state: "unassessed", size: null },
-      nextCommand: `github-triage estimate 1 --metric impact --size SIZE --rationale TEXT --repo ${repo}`,
+      nextCommand: `pdb estimate 1 --metric impact --size SIZE --rationale TEXT --repo ${repo}`,
       thenCommand: null,
     });
     // Blocked work is assessed under assumptions; it is never a pickup for the designer either.
@@ -272,12 +272,12 @@ describe("designer impact queue through collect() (#246)", () => {
     expect(items.find((i) => i.target === url(2))).toMatchObject({
       kind: "inspect-assessment",
       impact: { state: "invalid", size: null },
-      nextCommand: `github-triage estimate 2 --metric impact --size SIZE --rationale TEXT --replace-invalid --repo ${repo}`,
+      nextCommand: `pdb estimate 2 --metric impact --size SIZE --rationale TEXT --replace-invalid --repo ${repo}`,
       inspection: null,
     });
     const conflict = items.find((i) => i.target === url(3));
     expect(conflict?.nextCommand).toBe(
-      `github-triage estimate 3 --metric impact --size SIZE --rationale TEXT --repo ${repo}`,
+      `pdb estimate 3 --metric impact --size SIZE --rationale TEXT --repo ${repo}`,
     );
     expect(conflict?.reasonCodes).not.toContain("cross-role-boost");
   });
@@ -297,7 +297,7 @@ describe("designer impact queue through collect() (#246)", () => {
       invalid: 1,
       // #5 (provenance author unknown) and #12 (truncated labels): never queued.
       unknown: 2,
-      guidance: "github-triage estimate --help --metric impact",
+      guidance: "pdb estimate --help --metric impact",
       boundaries: expect.stringContaining("no claim"),
     });
     expect(report.rankedActions).toMatchObject({ total: 7, omitted: 4 });
@@ -317,10 +317,10 @@ describe("designer impact queue through collect() (#246)", () => {
     expect(next).toContain("- #1 Ticket 1 — assess-impact (assessment, cross-role-boost");
     expect(next).toContain("impact unassessed · complexity XS");
     expect(next).toContain(
-      `Next: github-triage estimate 1 --metric impact --size SIZE --rationale TEXT --repo ${repo}`,
+      `Next: pdb estimate 1 --metric impact --size SIZE --rationale TEXT --repo ${repo}`,
     );
     expect(next).toContain(
-      "- Impact assessment: 4 eligible, 3 ranked, 1 shown; 1 conflicting, 1 invalid, 2 unknown. Guidance: github-triage estimate --help --metric impact",
+      "- Impact assessment: 4 eligible, 3 ranked, 1 shown; 1 conflicting, 1 invalid, 2 unknown. Guidance: pdb estimate --help --metric impact",
     );
     // Order in text matches the JSON ranking.
     expect(next.indexOf("#10 Ticket 10")).toBeLessThan(next.indexOf("#1 Ticket 1"));

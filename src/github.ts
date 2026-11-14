@@ -211,7 +211,7 @@ export async function locateIssue(
         state: "moved",
         destination: { repository: destination, number: destNumber, url: htmlUrl },
         detail: `Transferred to ${String(htmlUrl)}. It is not this project's work, and the destination's ownership is not assumed.`,
-        next: `npm run --silent triage -- --repo ${destination} --issue ${String(destNumber)} --json`,
+        next: `npm run --silent pdb -- --repo ${destination} --issue ${String(destNumber)} --json`,
       };
     if (prop(body, "pull_request"))
       return {

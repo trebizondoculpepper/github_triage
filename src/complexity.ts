@@ -108,7 +108,7 @@ export const complexityGuidance: ComplexityGuidance = {
   ],
 };
 
-/** Plain-text rendering used by `github-triage estimate --help`. */
+/** Plain-text rendering used by `pdb estimate --help`. */
 export function complexityGuidanceText(g: ComplexityGuidance = complexityGuidance): string {
   return guidanceText(
     "Complexity estimation guidance",

@@ -553,9 +553,9 @@ export async function planClaim(
 ): Promise<ClaimPlan> {
   const { number, agent, branch = null, platform = null, rework = false } = request;
   const { item, claims, repoLabels } = await readTicket(repository, number, agent, query);
-  const triage = `github-triage --repo ${repository}`;
+  const triage = `pdb --repo ${repository}`;
   // Subcommands are dispatched on the first argument, so they must precede options.
-  const command = (text: string): string => `github-triage ${text} --repo ${repository}`;
+  const command = (text: string): string => `pdb ${text} --repo ${repository}`;
   if (!item)
     return refuse("TICKET_NOT_FOUND", { number }, `#${number} must exist.`, [`${triage} --json`]);
   if (item.__typename !== "Issue")
@@ -623,7 +623,7 @@ export async function planClaim(
       "--repo",
       repository,
       "--body",
-      `Claimed by \`${agent}\`${branch ? ` on branch \`${branch}\`` : ""} with \`github-triage claim\`.\n\n${op}`,
+      `Claimed by \`${agent}\`${branch ? ` on branch \`${branch}\`` : ""} with \`pdb claim\`.\n\n${op}`,
     ],
   });
   if (label(item, mine)) {
@@ -887,7 +887,7 @@ export async function planClaim(
       "--repo",
       repository,
       "--body",
-      `Claimed by \`${agent}\`${branch ? ` on branch \`${branch}\`` : ""} with \`github-triage claim\`${rework ? " for review rework" : ""}. Removed: ${remove.map((l) => `\`${l}\``).join(", ")}.\n\n${op}`,
+      `Claimed by \`${agent}\`${branch ? ` on branch \`${branch}\`` : ""} with \`pdb claim\`${rework ? " for review rework" : ""}. Removed: ${remove.map((l) => `\`${l}\``).join(", ")}.\n\n${op}`,
     ],
   });
   return {
@@ -902,7 +902,7 @@ export async function planClaim(
             ...ignoredNote(ignored),
             ...(deliveryPath
               ? [
-                  `Rework by the ticket-responsible agent: after the claim, a delivery record reopens membership (membership open, reason "rework claim"); finish with github-triage submit ${number} --agent ${agent} --repo ${repository}.`,
+                  `Rework by the ticket-responsible agent: after the claim, a delivery record reopens membership (membership open, reason "rework claim"); finish with pdb submit ${number} --agent ${agent} --repo ${repository}.`,
                 ]
               : []),
           ],
@@ -922,7 +922,7 @@ export async function planNeedsHuman(
 ): Promise<ClaimPlan> {
   const { number, agent, designer, why, questions } = request;
   const { item, repoLabels } = await readTicket(repository, number, agent, query, designer);
-  const triage = `github-triage --repo ${repository}`;
+  const triage = `pdb --repo ${repository}`;
   if (!item)
     return refuse("TICKET_NOT_FOUND", { number }, `#${number} must exist.`, [`${triage} --json`]);
   if (item.__typename !== "Issue")
@@ -1082,8 +1082,8 @@ export async function planRelease(
   permission: PermissionLookup = permissionLookup(repository),
 ): Promise<ClaimPlan> {
   const { number, agent, outcome, note = null, pr = null, change = null } = request;
-  const triage = `github-triage --repo ${repository}`;
-  const command = (text: string): string => `github-triage ${text} --repo ${repository}`;
+  const triage = `pdb --repo ${repository}`;
+  const command = (text: string): string => `pdb ${text} --repo ${repository}`;
   const deliverable = pr ?? change;
   const prState = pr ? await readPullRequest(pr, query) : null;
   const preliminary =
@@ -1329,7 +1329,7 @@ export async function planRelease(
       repository,
       "--body",
       [
-        `Handoff by \`${agent}\` with \`github-triage release\`: **${describe}**. Releasing the claim.`,
+        `Handoff by \`${agent}\` with \`pdb release\`: **${describe}**. Releasing the claim.`,
         "",
         ...(pr
           ? [`Pull request: ${pr}${prState ? ` (${prState})` : " (state unknown)"}`, ""]
@@ -1384,7 +1384,7 @@ export async function applyPlan(
   const done = steps.filter((s) => s.status === "done").length;
   let conflict: string | null = null;
   let unverified: string | null = null;
-  const verify = `Verify with: github-triage who ${plan.facts.number} --repo ${repository} (or github-triage --repo ${repository} --issue ${plan.facts.number})${plan.retry ? `; the same command is safe to re-run: ${plan.retry}` : ""}.`;
+  const verify = `Verify with: pdb who ${plan.facts.number} --repo ${repository} (or pdb --repo ${repository} --issue ${plan.facts.number})${plan.retry ? `; the same command is safe to re-run: ${plan.retry}` : ""}.`;
   if (!failed && plan.recheck && done) {
     try {
       const mine = claimPolicy.owner(plan.recheck.agent);

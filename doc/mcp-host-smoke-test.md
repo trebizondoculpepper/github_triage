@@ -16,11 +16,11 @@ From this repository on the commit under test:
 npm ci
 npm run build
 npm pack
-npm install --global ./trebizondoculpepper-github-triage-<version>.tgz
-github-triage-mcp --help
+npm install --global ./trebizondoculpepper-pdb-<version>.tgz
+pdb-mcp --help
 ```
 
-`--help` must print usage on stdout and exit 0. Do not use `npx -y github-triage-mcp`: the executable is not a separate npm package.
+`--help` must print usage on stdout and exit 0. Do not use `npx -y pdb-mcp`: the executable is not a separate npm package.
 
 ## 2. Check stdio framing without a host
 
@@ -28,10 +28,10 @@ Run the server with stdin closed after one request to confirm stdout carries onl
 
 ```sh
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"manual","version":"0"}}}' \
-  | github-triage-mcp --project /absolute/project/path
+  | pdb-mcp --project /absolute/project/path
 ```
 
-Expect exactly one JSON line whose `result.serverInfo.name` is `github-triage` and whose `result.protocolVersion` is `2025-06-18`: the server echoes a supported requested version, and answers an unsupported one with its own latest (`2025-11-25` from package 0.1.0). Any non-JSON line on stdout is a failure.
+Expect exactly one JSON line whose `result.serverInfo.name` is `pdb` and whose `result.protocolVersion` is `2025-06-18`: the server echoes a supported requested version, and answers an unsupported one with its own latest (`2025-11-25` from package 0.1.0). Any non-JSON line on stdout is a failure.
 
 Real hosts negotiate their own version, so record what they use rather than expecting a fixed value. Observed: Ori 0.17.0-alpha sends `initialize` at `2025-11-25` ([Ori report](reports/agent-platforms/ori-mcp-acceptance.md)); Claude Code 2.1.325 sends `server/discover` at `2026-07-28` with no `initialize` ([Claude Code report](reports/agent-platforms/claude-code-mcp-acceptance.md)).
 
@@ -40,7 +40,7 @@ Real hosts negotiate their own version, so record what they use rather than expe
 Use the generic stdio configuration (README):
 
 ```json
-{ "command": "github-triage-mcp", "args": ["--project", "/absolute/project/path"] }
+{ "command": "pdb-mcp", "args": ["--project", "/absolute/project/path"] }
 ```
 
 Add `"--agent", "NAME"` to focus reads. Always pass `--project` (or `--repo`): some hosts start servers in an unrelated working directory (#271). Register it through the host's own configuration mechanism; do not let any tool here write host configuration. Restart or reload the host.
@@ -55,7 +55,7 @@ Host notes:
 In the host, without relying on a paid model turn where the host offers a direct tool-call or inspection view:
 
 1. Confirm the host lists exactly `triage_briefing`, `triage_issue`, `triage_dependencies` and `triage_events`. `triage_events` reports disabled status unless the server was started with `--poll`.
-2. Call `triage_briefing` with no arguments. Compare with `github-triage --repo owner/name` run at the same time: same repository, same findings modulo fetch time.
+2. Call `triage_briefing` with no arguments. Compare with `pdb --repo owner/name` run at the same time: same repository, same findings modulo fetch time.
 3. Call `triage_issue` with a known open issue number, then with a nonexistent number (expect an incomplete result with a diagnosis, not an error dump).
 4. Call `triage_dependencies` with an issue that has native blockers, then with `tree: true`.
 5. Call `triage_briefing` with an invalid `repo` such as `bad` (expect an argument validation error, no stack trace, no local paths). Some hosts (Ori) reject it against the advertised input schema before the server sees it; record which side rejected it.

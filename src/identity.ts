@@ -351,7 +351,7 @@ export function generateName(taken: ReadonlySet<string>, random: () => number): 
   throw new ConfigError(
     "conflict",
     "Could not generate an unused agent name.",
-    "Choose one explicitly with github-triage config set identity.name NAME --entry KEY.",
+    "Choose one explicitly with pdb config set identity.name NAME --entry KEY.",
   );
 }
 

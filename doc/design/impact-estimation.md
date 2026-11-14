@@ -75,7 +75,7 @@ Recognized labels: `impact:XS`, `impact:S`, `impact:M`, `impact:L`, `impact:XL`,
 One command, extended rather than duplicated:
 
 ```
-github-triage estimate N --metric impact --size SIZE --rationale TEXT [--assumption TEXT]...
+pdb estimate N --metric impact --size SIZE --rationale TEXT [--assumption TEXT]...
          [--reference REF]... [--agent NAME] [--replace SIZE] [--replace-invalid] [--json]
 ```
 
@@ -138,7 +138,7 @@ The shared reader returns, per ticket and per metric, one paired state, which is
 | `unknown`    | Labels truncated, comment history incomplete, or provenance author/editor permission unknown                                 |
 | `disabled`   | `impact.enabled` is false                                                                                                    |
 
-A label with no github-triage provenance (set by hand) is `current` with the reason "no recorded rationale", matching complexity today. `size` is non-null only for `current` and `stale`. The existing classifier lumps invalid into `conflicting`, and the existing `complexity.state` keeps doing so; only the new paired projection separates them, using the classifier's `unrecognized` list, for both metrics. Missing evidence is `unknown` or `unassessed`, never a default size. Changes to dependants do not make an impact estimate stale automatically: no graph traversal.
+A label with no pdb provenance (set by hand) is `current` with the reason "no recorded rationale", matching complexity today. `size` is non-null only for `current` and `stale`. The existing classifier lumps invalid into `conflicting`, and the existing `complexity.state` keeps doing so; only the new paired projection separates them, using the classifier's `unrecognized` list, for both metrics. Missing evidence is `unknown` or `unassessed`, never a default size. Changes to dependants do not make an impact estimate stale automatically: no graph traversal.
 
 ## Invalid labels and Ticket Doctor
 
@@ -161,7 +161,7 @@ Impact assessment is not an always-last list. Per blended-action-queues.md it is
 - Candidates: open tickets whose impact state is `unassessed` or `stale`. Blocked tickets are included under stated assumptions and remain implementation-ineligible. `conflict` and `invalid` produce an inspection action in band 5 with the Ticket Doctor fix as `nextCommand`, never a boost. `unknown` is reported in context with its reason and omission count, not queued as executable.
 - Cross-role boost: complexity `current` XS or S with impact `unassessed`/`stale` sorts first within band 5. Remaining assessments follow, then the standard within-band keys (urgency, immediate-unlock score, incomplete before unstarted, creation time, identity). Per blended-action-queues.md an assessment's immediate-unlock score is zero, because assessing does not change any ticket's eligibility; the ticket's proven unlock count is shown as context only and never sorts assessments.
 - Above it for designers: addressed attention (1), actionable delivery follow-up (2), and existing unblock duties (3): decisions blocking active work, agreed decisions needing documentation, design review. Below it: ordinary new design (6).
-- Assessment acquires no claim. `nextCommand` is `github-triage estimate N --metric impact --size <SIZE> --rationale <RATIONALE> --repo owner/name`.
+- Assessment acquires no claim. `nextCommand` is `pdb estimate N --metric impact --size <SIZE> --rationale <RATIONALE> --repo owner/name`.
 - Expanded/compact designer reports add an `impactEstimation` object shaped like the existing estimation object (`status`, `eligible`, `ranked`, `shown`, `offered`, conflicts and unknown counts, guidance version). Existing objects keep their schema versions.
 
 A focused designer view equivalent to `--estimate` is not required; it may be added in #246 only if it reuses the same queue result.

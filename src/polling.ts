@@ -858,7 +858,7 @@ export function eventsReport(watcher: Watcher | null, cursor: string | undefined
       status: null,
       complete: false,
       guidance:
-        "Polling is disabled. Restart github-triage-mcp with --poll (and --repo) to watch a repository, or call triage_briefing (with since) for current evidence.",
+        "Polling is disabled. Restart pdb-mcp with --poll (and --repo) to watch a repository, or call triage_briefing (with since) for current evidence.",
       supportedDetectors: [...eventKinds],
       unsupportedDetectors: [],
       items: [],
