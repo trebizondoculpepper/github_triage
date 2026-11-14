@@ -34,6 +34,7 @@ import {
   prDelivery,
   prDeliveryLines,
   readIssuesDelivery,
+  reportFollowUpFacts,
   teamResponsibilities,
   teamResponsibilityLines,
 } from "./deliveryread.js";
@@ -1045,7 +1046,7 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
       live.trust && live.live
         ? prDelivery(
             status.pullRequest.url,
-            status.blockers,
+            reportFollowUpFacts(status),
             status.pullRequest.state === "OPEN",
             await readIssuesDelivery(
               repository,

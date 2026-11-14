@@ -19,15 +19,18 @@ import { ticketDoctor } from "./ticketdoctor.js";
 import type { TicketDoctorReport } from "./ticketdoctor.js";
 import type { Issue, PullRequest, Snapshot } from "./github/types.js";
 import {
+  classifyFollowUp,
   deliveryFields,
   deliveryRead,
   prDelivery,
   prDeliveryLines,
   readIssuesDelivery,
+  reportFollowUpFacts,
   teamResponsibilities,
   teamResponsibilityLines,
 } from "./deliveryread.js";
 import { readBriefing } from "./service.js";
+import type { PrStatusReport } from "./prstatus.js";
 import type { TeamAgent } from "./team.js";
 
 const repo = "owner/name";
@@ -822,16 +825,51 @@ describe("stale claims beside delivery responsibility (#192)", () => {
 
 describe("delivery, responsibility and closure on read surfaces (#192)", () => {
   /** A snapshot PR with the evidence the briefing collects. */
-  const snapPr = (n: number, rollup: string | null, review: string | null, unresolved = false) =>
+  /** A snapshot PR with the evidence the briefing collects (verify check, head, reviews). */
+  const snapPr = (
+    n: number,
+    verify: string | null,
+    {
+      decision = null as string | null,
+      mergeState = "BLOCKED",
+      mergeable = "MERGEABLE",
+      approvedOn = null as string | null,
+      codexClean = false,
+      unresolved = false,
+    } = {},
+  ) =>
     ({
       number: n,
       url: prLink(n),
       state: "OPEN",
       isDraft: false,
-      mergeable: "MERGEABLE",
-      reviewDecision: review,
+      headRefOid: `head${n}`,
+      mergeable,
+      mergeStateStatus: mergeState,
+      reviewDecision: decision,
       reviewThreads: page(unresolved ? [{ isResolved: false }] : []),
-      commits: { nodes: [{ commit: { statusCheckRollup: rollup ? { state: rollup } : null } }] },
+      reviews: page(approvedOn ? [{ state: "APPROVED", commit: { oid: approvedOn } }] : []),
+      comments: page(
+        codexClean
+          ? [
+              {
+                author: { login: "chatgpt-codex-connector" },
+                body: `<!-- codex-review-state:v1 ${JSON.stringify({ code_review: { status: "completed", commit_sha: `head${n}`, has_unresolved_findings: false } })} -->`,
+              },
+            ]
+          : [],
+      ),
+      commits: {
+        nodes: [
+          {
+            commit: {
+              statusCheckRollup: verify
+                ? { state: verify, contexts: page([{ name: "verify", conclusion: verify }]) }
+                : null,
+            },
+          },
+        ],
+      },
     }) as unknown as PullRequest;
   const read = async (
     issues: Issue[],
@@ -852,16 +890,26 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
   const submitted = (n: number, prs: number[], membership: "open" | "complete" = "complete") =>
     post(record(n, "submit", { deliverables: prs.map(pr), membership }));
 
-  it("distinguishes waiting, actionable failure and accepted-but-unmerged, with responsibility", async () => {
+  it("classifies follow-up from current-head evidence, as the briefing's PR rules do", async () => {
+    const prs = [
+      snapPr(80, "PENDING"),
+      snapPr(81, "FAILURE"),
+      snapPr(82, "SUCCESS", { approvedOn: "head82", mergeState: "CLEAN" }),
+      snapPr(83, "SUCCESS", { decision: "REVIEW_REQUIRED" }),
+      // GitHub kept an approval from an older head: not acceptance (#341 headReviewed).
+      snapPr(84, "SUCCESS", { decision: "APPROVED", approvedOn: "old" }),
+      snapPr(85, "SUCCESS", { mergeState: "BEHIND" }),
+      snapPr(86, "SUCCESS", { codexClean: true, mergeState: "UNKNOWN" }),
+      snapPr(87, "SUCCESS", { approvedOn: "head87", mergeState: "BEHIND" }),
+      snapPr(88, "SUCCESS", { mergeState: "CLEAN" }),
+      snapPr(89, "SUCCESS", { unresolved: true }),
+      snapPr(90, "SUCCESS", { mergeable: "CONFLICTING" }),
+    ];
+    const nums = prs.map((p) => p.number);
     const r = await read(
-      [issue(60, ["bug"], [submitted(60, [80, 81, 82, 83])])],
-      [
-        snapPr(80, "PENDING", null),
-        snapPr(81, "FAILURE", null),
-        snapPr(82, "SUCCESS", "APPROVED"),
-        snapPr(83, "SUCCESS", "REVIEW_REQUIRED"),
-      ],
-      { 80: "open", 81: "open", 82: "open", 83: "open" },
+      [issue(60, ["bug"], [submitted(60, nums)])],
+      prs,
+      Object.fromEntries(nums.map((n) => [n, "open" as const])),
     );
     const [t] = r.tickets;
     expect(t.delivery).toBe("submitted");
@@ -870,16 +918,37 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
     expect(t.deliverables.map((m) => [m.followUp, m.followUpWhy])).toEqual([
       ["waiting", "awaiting checks"],
       ["actionable", "failing checks on the current head"],
-      ["actionable", "accepted but not merged: merge or update the branch"],
-      ["waiting", "awaiting review"],
+      ["actionable", "accepted on the current head but not merged: inspect, then consider merge"],
+      ["waiting", "awaiting current-head review"],
+      ["waiting", "awaiting current-head review"],
+      ["actionable", "behind its base: update the branch"],
+      ["actionable", "accepted on the current head: refresh mergeability (integrate)"],
+      [
+        "actionable",
+        "accepted on the current head but behind its base: update the branch (integrate)",
+      ],
+      ["actionable", "clean merge state: inspect the current head, then consider merge"],
+      ["actionable", "unresolved review threads"],
+      ["actionable", "merge conflict"],
     ]);
     expect(t.deliverables.every((m) => m.responsible === "alice")).toBe(true);
+  });
+
+  it("an unverifiable legacy release is unknown delivery, with its diagnostics", async () => {
+    const legacy = await release("alice", { pr: prLink(9) });
+    const r = await read(
+      [issue(74, ["bug"], [{ ...legacy, author: { __typename: "User", login: "flaky" } }])],
+      [],
+      {},
+    );
+    expect(r.tickets[0]).toMatchObject({ delivery: "unknown" });
+    expect(r.tickets[0].because.join(" ")).toContain("could not be verified");
   });
 
   it("partial delivery shows the merged member as done and the rest outstanding", async () => {
     const r = await read(
       [issue(61, ["bug"], [submitted(61, [84, 85])])],
-      [snapPr(85, "PENDING", null)],
+      [snapPr(85, "PENDING")],
       { 84: { merged: "m84" }, 85: "open" },
       { m84: "behind" },
     );
@@ -960,7 +1029,7 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
   it("team lists responsibilities after the claim is gone, with count, and no limit", async () => {
     const r = await read(
       [issue(66, ["bug"], [submitted(66, [88])]), issue(67, ["bug"], [submitted(67, [89])])],
-      [snapPr(88, "PENDING", null), snapPr(89, "FAILURE", null)],
+      [snapPr(88, "PENDING"), snapPr(89, "FAILURE")],
       { 88: "open", 89: "open" },
     );
     const agents = teamResponsibilities([] as TeamAgent[], r);
@@ -1002,13 +1071,20 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
       rest: fake.rt.rest,
       trust,
     });
-    const waiting = prDelivery(
-      prLink(90),
-      ["1 check(s) still pending: waiting"],
-      true,
-      issuesRead,
-      repo,
-    );
+    const facts = {
+      draft: false,
+      complete: true,
+      failing: false,
+      pending: false,
+      unknownChecks: false,
+      verified: true,
+      changesRequested: false,
+      unresolvedThreads: false,
+      mergeable: "MERGEABLE",
+      mergeState: "BLOCKED",
+      headReviewed: false,
+    };
+    const waiting = prDelivery(prLink(90), { ...facts, pending: true }, true, issuesRead, repo);
     expect(waiting.issues).toEqual([
       expect.objectContaining({
         number: 68,
@@ -1020,12 +1096,26 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
       expect.objectContaining({ number: 69, required: false, delivery: null }),
       expect.objectContaining({ number: 70, required: null, delivery: "unknown" }),
     ]);
-    expect(prDelivery(prLink(90), [], true, issuesRead, repo).issues[0]).toMatchObject({
-      followUp: "actionable",
-      followUpWhy: "accepted on the current head but not merged: merge or update the branch",
+    // A missing required approval (verified, merge BLOCKED, no head review) is waiting.
+    expect(prDelivery(prLink(90), facts, true, issuesRead, repo).issues[0]).toMatchObject({
+      followUp: "waiting",
+      followUpWhy: "awaiting current-head review",
     });
     expect(
-      prDelivery(prLink(90), ["changes requested"], true, issuesRead, repo).issues[0].followUp,
+      prDelivery(
+        prLink(90),
+        { ...facts, headReviewed: true, mergeState: "CLEAN" },
+        true,
+        issuesRead,
+        repo,
+      ).issues[0],
+    ).toMatchObject({
+      followUp: "actionable",
+      followUpWhy: "accepted on the current head but not merged: inspect, then consider merge",
+    });
+    expect(
+      prDelivery(prLink(90), { ...facts, changesRequested: true }, true, issuesRead, repo).issues[0]
+        .followUp,
     ).toBe("actionable");
     expect(prDeliveryLines(waiting).join("\n")).toContain(
       "#70 open: delivery unknown; required unknown",
@@ -1114,5 +1204,116 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
       expect.objectContaining({ agent: "alice", claims: [], responsibilities: expect.any(Array) }),
     ]);
     expect(await run(["team", "--repo", repo])).toContain("alice: responsible for 2 item(s)");
+  });
+
+  it("pr N facts come from the status report's structured fields and #341 head acceptance", () => {
+    const report = {
+      pullRequest: {
+        draft: false,
+        head: "h1",
+        mergeable: "MERGEABLE",
+        mergeState: "BLOCKED",
+        reviewDecision: "REVIEW_REQUIRED",
+      },
+      checks: {
+        required: { class: "passed" },
+        counts: { passed: 1, pending: 0, cancelled: 0, failed: 0, unknown: 0 },
+      },
+      threads: { unresolved: [], omitted: 0 },
+      reviews: [{ state: "APPROVED", reviewedCommit: "old" }],
+      receipts: [],
+      completeness: { complete: true, warnings: [] },
+    } as unknown as PrStatusReport;
+    expect(classifyFollowUp(reportFollowUpFacts(report))).toEqual([
+      "waiting",
+      "awaiting current-head review",
+    ]);
+    const codex = {
+      ...report,
+      receipts: [
+        {
+          by: "chatgpt-codex-connector",
+          codexState: {
+            code_review: { status: "completed", commit_sha: "h1", has_unresolved_findings: false },
+          },
+        },
+      ],
+      pullRequest: { ...report.pullRequest, mergeState: "BEHIND" },
+    } as unknown as PrStatusReport;
+    expect(classifyFollowUp(reportFollowUpFacts(codex))[1]).toBe(
+      "accepted on the current head but behind its base: update the branch (integrate)",
+    );
+  });
+
+  describe("briefing completeness, intake scope and cancellation", () => {
+    const many = (count: number) =>
+      Array.from({ length: count }, (_, i) =>
+        issue(200 + i, ["bug"], [submitted(200 + i, [600 + i])]),
+      );
+    const fakeFor = (count: number) =>
+      live(Object.fromEntries(Array.from({ length: count }, (_, i) => [600 + i, "open" as const])));
+    const permission = async (_path: string) => ({
+      status: 200,
+      body: { user: { login: "writer" }, role_name: "write" },
+    });
+    const runtime = (snap: Snapshot, fake: ReturnType<typeof live>, extra = {}) => ({
+      collect: async () => snap,
+      dependencyReport: async () => ({}) as never,
+      now: () => new Date(time),
+      query: fake.rt.query as never,
+      rest: async (path: string) =>
+        path.includes("/collaborators/") ? permission(path) : fake.rt.rest(path),
+      ...extra,
+    });
+
+    it("the evaluation cap makes the briefing incomplete", async () => {
+      const count = deliveryDoctorTicketCap + 1;
+      const read = await readBriefing(runtime(snapshot(many(count)), fakeFor(count)), {
+        repository: repo,
+        limit: 10,
+        maxChars: 4000,
+      });
+      if (read.kind !== "report") throw new Error("unavailable");
+      expect(read.complete).toBe(false);
+      expect(read.report.completeness.warnings.join(" ")).toContain("1 more with delivery records");
+    });
+
+    it("an explicit intake evaluates its own ticket even past the cap", async () => {
+      const count = deliveryDoctorTicketCap + 5;
+      const last = 200 + count - 1;
+      const read = await readBriefing(runtime(snapshot(many(count)), fakeFor(count)), {
+        repository: repo,
+        issue: last,
+        limit: 10,
+        maxChars: 4000,
+      });
+      if (read.kind !== "report") throw new Error("unavailable");
+      expect(read.report.delivery?.tickets).toEqual([
+        expect.objectContaining({ number: last, delivery: "submitted" }),
+      ]);
+    });
+
+    it("binds delivery requests to the request's cancellation signal", async () => {
+      const fake = fakeFor(1);
+      const seen: (AbortSignal | undefined)[] = [];
+      const controller = new AbortController();
+      await readBriefing(
+        {
+          ...runtime(snapshot(many(1)), fake),
+          query: undefined,
+          queryWith: (signal?: AbortSignal) => {
+            seen.push(signal);
+            return fake.rt.query as never;
+          },
+          rest: async (path: string, options?: { signal?: AbortSignal }) => {
+            seen.push(options?.signal);
+            return path.includes("/collaborators/") ? permission(path) : fake.rt.rest(path);
+          },
+        },
+        { repository: repo, limit: 10, maxChars: 4000, signal: controller.signal },
+      );
+      expect(seen.length).toBeGreaterThan(1);
+      expect(seen.every((x) => x === controller.signal)).toBe(true);
+    });
   });
 });

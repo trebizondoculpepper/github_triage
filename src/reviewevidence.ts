@@ -1,6 +1,6 @@
 /** Attributable review evidence shared by prstatus and both briefing engines (#182). */
 import { selected } from "./github/github.js";
-import type { CodexMarker } from "./prstatus.js";
+import type { CodexMarker, CodexReviewState } from "./prstatus.js";
 import type { PullRequest } from "./github/types.js";
 
 /** Codex's machine-readable review state embedded in a comment body, if any. */
@@ -23,22 +23,35 @@ export const codexReviewer = "chatgpt-codex-connector";
  * evidence is not acceptance, and a Codex receipt reporting findings on the head vetoes it.
  */
 export function headReviewed(pr: PullRequest): boolean {
-  const head = pr.headRefOid;
-  const codex = pr.comments.nodes
-    .filter((c) => (c.author?.login ?? "").replace(/\[bot\]$/, "") === codexReviewer)
-    .map((c) => codexMarker(c.body)?.code_review);
+  return headAccepted(
+    pr.headRefOid,
+    pr.reviews.nodes.map((r) => ({ state: r.state, commit: r.commit?.oid ?? null })),
+    pr.comments.nodes.map((c) => ({
+      by: c.author?.login ?? "",
+      state: codexMarker(c.body)?.code_review,
+    })),
+  );
+}
+
+/**
+ * The same acceptance rule over plain review facts, so reports that do not hold a snapshot PR
+ * (`pr N`'s status report) apply it identically rather than re-deriving it (#192).
+ */
+export function headAccepted(
+  head: string,
+  reviews: { state: string; commit: string | null }[],
+  codexStates: { by: string; state: CodexReviewState | undefined }[],
+): boolean {
+  const codex = codexStates
+    .filter((c) => c.by.replace(/\[bot\]$/, "") === codexReviewer)
+    .map((c) => c.state);
   // As in prstatus.ts: Codex findings on the current head block, whatever else approves it.
   if (codex.some((s) => s?.commit_sha === head && s.has_unresolved_findings === true)) return false;
   return (
-    pr.reviews.nodes.some((r) => r.state === "APPROVED" && r.commit?.oid === head) ||
-    pr.comments.nodes.some((c) => {
-      if ((c.author?.login ?? "").replace(/\[bot\]$/, "") !== codexReviewer) return false;
-      const state = codexMarker(c.body)?.code_review;
-      return (
-        state?.commit_sha === head &&
-        state.status === "completed" &&
-        state.has_unresolved_findings === false
-      );
-    })
+    reviews.some((r) => r.state === "APPROVED" && r.commit === head) ||
+    codex.some(
+      (s) =>
+        s?.commit_sha === head && s.status === "completed" && s.has_unresolved_findings === false,
+    )
   );
 }

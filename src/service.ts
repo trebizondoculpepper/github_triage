@@ -173,12 +173,22 @@ export async function presentBriefing(
         diagnostics: [],
       };
   // #192: one shared fold/evaluator read for CLI and MCP; an issue intake shows its own ticket.
-  const read = deliveryRead(snapshot, await diagnoseDelivery(snapshot, { trust, live, signal }));
-  const delivery = options.issue
-    ? { ...read, tickets: read.tickets.filter((t) => t.number === options.issue) }
-    : read;
+  // An explicit intake evaluates only its own ticket, so the evaluation cap never skips it.
+  const scoped = options.issue
+    ? { ...snapshot, issues: snapshot.issues.filter((i) => i.number === options.issue) }
+    : snapshot;
+  const delivery = deliveryRead(scoped, await diagnoseDelivery(scoped, { trust, live, signal }));
+  const base = compact ?? expanded;
   const report = {
-    ...(compact ?? expanded),
+    ...base,
+    // Delivery omissions (the evaluation cap) make the briefing incomplete, never silently clean.
+    completeness: delivery.complete
+      ? base.completeness
+      : {
+          ...base.completeness,
+          complete: false,
+          warnings: [...base.completeness.warnings, ...delivery.omissions],
+        },
     decisionEngine,
     ...(delivery.tickets.length || !delivery.complete ? { delivery } : {}),
   };
@@ -208,6 +218,8 @@ export interface ReadRuntime {
   rest?: Rest;
   /** #192: live GraphQL reads for delivery evidence; absent means delivery is not evaluated. */
   query?: Query;
+  /** #192: GraphQL bound to a request's cancellation signal (production: `ghQueryWith`). */
+  queryWith?: (signal?: AbortSignal) => Query;
   /** Clock for freshness ages; defaults to the system clock. */
   now?: () => Date;
   /** Rewrites locally generated diagnostics (not GitHub evidence) for remote consumers. */
@@ -290,7 +302,14 @@ export async function readBriefing(
       : undefined,
     request.signal,
     undefined,
-    runtime.rest && runtime.query ? { query: runtime.query, rest: runtime.rest } : undefined,
+    // Delivery requests are bound to the request's cancellation signal, like collection.
+    runtime.rest && (runtime.queryWith || runtime.query)
+      ? {
+          query: runtime.queryWith ? runtime.queryWith(request.signal) : runtime.query!,
+          rest: (path, options) =>
+            runtime.rest!(path, { ...options, signal: options?.signal ?? request.signal }),
+        }
+      : undefined,
   );
   return { kind: "report", ...presented };
 }

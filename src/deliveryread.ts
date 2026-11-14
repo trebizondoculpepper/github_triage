@@ -17,6 +17,9 @@ import type { Query, Rest } from "./github/github.js";
 import type { Closure, DeliveryDiagnosis, IssueDeliveryDiagnosis } from "./deliverydoctor.js";
 import type { MemberState, TicketDelivery } from "./completion.js";
 import type { Issue, PullRequest, Snapshot } from "./github/types.js";
+import { prChecks, workflow } from "./briefing.js";
+import type { PrStatusReport } from "./prstatus.js";
+import { headAccepted, headReviewed } from "./reviewevidence.js";
 
 /**
  * Follow-up for one required deliverable: `waiting` on checks or review (attention released,
@@ -64,31 +67,138 @@ export interface DeliveryRead {
 }
 
 const prLabel = /^([\w.-]+\/[\w.-]+)#(\d+)$/;
-const failing = new Set(["FAILURE", "ERROR"]);
+/**
+ * Structured follow-up facts for one open PR's current head, from either a snapshot PR or a
+ * `pr N` status report, so every read surface classifies the same evidence the same way.
+ */
+export interface FollowUpFacts {
+  draft: boolean;
+  /** All check, thread and review evidence for the head was read. */
+  complete: boolean;
+  failing: boolean;
+  pending: boolean;
+  /** A check outcome outside the known pass/failure/unfinished sets. */
+  unknownChecks: boolean;
+  /** The repository's verify check passed on the head. */
+  verified: boolean;
+  changesRequested: boolean;
+  unresolvedThreads: boolean;
+  mergeable: string;
+  mergeState: string;
+  /** #341 acceptance: approval or a clean Codex receipt bound to the current head, no veto. */
+  headReviewed: boolean;
+}
+
+/**
+ * Follow-up from current-head evidence, mirroring the briefing's PR rules (#182/#341:
+ * `pr-failed-checks`, `pr-review`, `pr-conflicts`, `pr-pending`, `pr-integrate`,
+ * `pr-inspect-merge`). Only positive evidence decides; anything missing is unknown.
+ */
+export function classifyFollowUp(f: FollowUpFacts): [FollowUp, string] {
+  if (f.draft) return ["actionable", "draft: the responsible agent finishes it"];
+  if (!f.complete) return ["unknown", "check, thread or review evidence is incomplete"];
+  if (f.failing) return ["actionable", "failing checks on the current head"];
+  if (f.changesRequested) return ["actionable", "changes requested"];
+  if (f.unresolvedThreads) return ["actionable", "unresolved review threads"];
+  if (workflow.conflicts.includes(f.mergeable)) return ["actionable", "merge conflict"];
+  if (f.pending) return ["waiting", "awaiting checks"];
+  if (f.unknownChecks || !f.verified)
+    return ["unknown", "the verify check is missing or has an unrecognised outcome"];
+  if (f.mergeState === "BEHIND")
+    return [
+      "actionable",
+      f.headReviewed
+        ? "accepted on the current head but behind its base: update the branch (integrate)"
+        : "behind its base: update the branch",
+    ];
+  if (f.headReviewed) {
+    if (
+      workflow.unknownMergeable.includes(f.mergeable) ||
+      workflow.refreshMergeStates.includes(f.mergeState)
+    )
+      return ["actionable", "accepted on the current head: refresh mergeability (integrate)"];
+    if (workflow.currentMergeStates.includes(f.mergeState))
+      return [
+        "actionable",
+        "accepted on the current head but not merged: inspect, then consider merge",
+      ];
+    return [
+      "actionable",
+      `accepted on the current head but merge state is ${f.mergeState}: inspect the branch rules`,
+    ];
+  }
+  // As the briefing's clean-pr rule: a clean merge state is follow-up even before head review.
+  if (
+    workflow.mergeable.includes(f.mergeable) &&
+    workflow.currentMergeStates.includes(f.mergeState)
+  )
+    return ["actionable", "clean merge state: inspect the current head, then consider merge"];
+  return ["waiting", "awaiting current-head review"];
+}
+
+/** Facts from a PR as the snapshot collects it. */
+export function snapshotFollowUpFacts(pr: PullRequest, warnings: string[]): FollowUpFacts {
+  const checks = prChecks(pr);
+  const known = [...workflow.pass, ...workflow.failure, ...workflow.unfinished];
+  return {
+    draft: !!pr.isDraft,
+    complete:
+      !warnings.some((w) => w.startsWith(pr.url)) &&
+      !!pr.reviewThreads &&
+      !pr.reviewThreads.pageInfo?.hasNextPage,
+    failing: checks.some((c) => workflow.failure.includes(c.outcome)),
+    pending: checks.some((c) => workflow.unfinished.includes(c.outcome)),
+    unknownChecks: checks.some((c) => !known.includes(c.outcome)),
+    verified: checks.some(
+      (c) => c.name === workflow.verify && workflow.verifySuccess.includes(c.outcome),
+    ),
+    changesRequested: workflow.changesRequested.includes(pr.reviewDecision ?? ""),
+    unresolvedThreads: pr.reviewThreads.nodes.some((t) => !t.isResolved),
+    mergeable: pr.mergeable,
+    mergeState: pr.mergeStateStatus ?? "UNKNOWN",
+    headReviewed: headReviewed(pr),
+  };
+}
+
+/** Facts from `pr N`'s fresh status report (structured fields, never blocker prose). */
+export function reportFollowUpFacts(r: PrStatusReport): FollowUpFacts {
+  const count = (k: string) => r.checks.counts[k] ?? 0;
+  return {
+    draft: r.pullRequest.draft,
+    complete: r.completeness.complete,
+    failing: count("failed") + count("cancelled") > 0,
+    pending: count("pending") > 0,
+    unknownChecks: count("unknown") > 0,
+    verified: r.checks.required?.class === "passed",
+    changesRequested: workflow.changesRequested.includes(r.pullRequest.reviewDecision ?? ""),
+    unresolvedThreads: r.threads.unresolved.length + r.threads.omitted > 0,
+    mergeable: r.pullRequest.mergeable,
+    mergeState: r.pullRequest.mergeState,
+    headReviewed: headAccepted(
+      r.pullRequest.head,
+      r.reviews.map((v) => ({ state: v.state, commit: v.reviewedCommit })),
+      r.receipts.map((c) => ({ by: c.by, state: c.codexState?.code_review })),
+    ),
+  };
+}
 
 /** Follow-up of an open member from the snapshot's own PR evidence (current head only). */
-function openFollowUp(pr: PullRequest | undefined, draft: boolean): [FollowUp, string] {
+function openFollowUp(
+  pr: PullRequest | undefined,
+  draft: boolean,
+  warnings: string[],
+): [FollowUp, string] {
   if (draft) return ["actionable", "draft: the responsible agent finishes it"];
   if (!pr)
     return ["unknown", "the pull request is not in this read; its checks and review are unknown"];
-  const rollup = pr.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state ?? null;
-  const threads = pr.reviewThreads;
-  if (rollup && failing.has(rollup)) return ["actionable", "failing checks on the current head"];
-  if (pr.reviewDecision === "CHANGES_REQUESTED") return ["actionable", "changes requested"];
-  if (threads?.nodes.some((t) => !t.isResolved)) return ["actionable", "unresolved review threads"];
-  if (pr.mergeable === "CONFLICTING") return ["actionable", "merge conflict"];
-  if (!rollup || !threads || threads.pageInfo?.hasNextPage)
-    return ["unknown", "check or review evidence is missing or truncated"];
-  if (rollup !== "SUCCESS") return ["waiting", "awaiting checks"];
-  if (pr.reviewDecision === "APPROVED")
-    return ["actionable", "accepted but not merged: merge or update the branch"];
-  return ["waiting", "awaiting review"];
+  return classifyFollowUp(snapshotFollowUpFacts(pr, warnings));
 }
 
 function memberView(
   repository: string,
   d: IssueDeliveryDiagnosis,
   prs: Map<string, PullRequest>,
+  warnings: string[],
 ): DeliverableView[] {
   const evaluated = d.evaluation?.perDeliverable;
   return d.members.map((m, i) => {
@@ -126,6 +236,7 @@ function memberView(
             ? prs.get(url.toLowerCase())
             : undefined,
           e.state === "draft",
+          warnings,
         );
     }
     return { ...base, target: e.target, state: e.state, why: e.why, followUp, followUpWhy };
@@ -138,10 +249,11 @@ export function deliveryView(
   issue: Pick<Issue, "number" | "url" | "state" | "stateReason">,
   d: IssueDeliveryDiagnosis,
   prs: Map<string, PullRequest>,
+  warnings: string[] = [],
 ): DeliveryView {
   const known = d.fold === "known";
   const delivery: DeliveryView["delivery"] =
-    d.fold !== "known"
+    d.fold !== "known" || (!d.trustedRecord && d.legacy?.status === "unknown")
       ? "unknown"
       : !d.trustedRecord && d.legacy?.status === "trusted"
         ? "legacy"
@@ -151,13 +263,20 @@ export function deliveryView(
   const because =
     d.fold !== "known"
       ? d.unknownBecause
-      : delivery === "legacy"
-        ? ["only a legacy v1 done handoff exists; its membership is unknown and is never inferred"]
-        : delivery === "none"
-          ? ["no trusted delivery record exists"]
-          : d.evaluation
-            ? [...d.evaluation.because, ...d.evaluation.overrides]
-            : [d.notEvaluated ?? "delivery was not evaluated"];
+      : delivery === "unknown"
+        ? [
+            "a legacy v1 done handoff exists but its author's authority could not be verified",
+            ...(d.legacy?.unverified ?? []),
+          ]
+        : delivery === "legacy"
+          ? [
+              "only a legacy v1 done handoff exists; its membership is unknown and is never inferred",
+            ]
+          : delivery === "none"
+            ? ["no trusted delivery record exists"]
+            : d.evaluation
+              ? [...d.evaluation.because, ...d.evaluation.overrides]
+              : [d.notEvaluated ?? "delivery was not evaluated"];
   const agent = d.ticketResponsible ?? "<AGENT>";
   return {
     number: issue.number,
@@ -173,7 +292,7 @@ export function deliveryView(
           members: d.members,
         }
       : null,
-    deliverables: known ? memberView(repository, d, prs) : [],
+    deliverables: known ? memberView(repository, d, prs, warnings) : [],
     next: [
       `pdb --issue ${issue.number} --json --repo ${repository}`,
       ...(known && d.trustedRecord
@@ -194,7 +313,15 @@ export function deliveryRead(snapshot: Snapshot, diagnosis: DeliveryDiagnosis): 
       return !!d && (d.fold !== "known" || d.trustedRecord || !!d.legacy);
     })
     .sort((a, b) => a.number - b.number)
-    .map((i) => deliveryView(snapshot.repository, i, diagnosis.issues.get(i.number)!, prs));
+    .map((i) =>
+      deliveryView(
+        snapshot.repository,
+        i,
+        diagnosis.issues.get(i.number)!,
+        prs,
+        snapshot.warnings ?? [],
+      ),
+    );
   return {
     tickets,
     complete: !diagnosis.warnings.length,
@@ -364,10 +491,9 @@ export interface PrDelivery {
   complete: boolean;
   omissions: string[];
 }
-const waitingBlocker = /waiting|pending|no reaction|not yet covered|still computing/;
 export function prDelivery(
   prUrl: string,
-  blockers: string[],
+  facts: FollowUpFacts,
   open: boolean,
   read: Awaited<ReturnType<typeof readIssuesDelivery>>,
   repository: string,
@@ -393,16 +519,10 @@ export function prDelivery(
       ...read.closures.map(({ number, closure }) => {
         const view = views.get(number) ?? null;
         const member = view?.deliverables.find((m) => m.url?.toLowerCase() === prUrl.toLowerCase());
-        // This PR's follow-up comes from this report's own fresh blockers.
-        const followUp: FollowUp | null = !member
-          ? null
-          : !open || member.state === "unknown" || member.state === "not-evaluated"
-            ? member.followUp
-            : !blockers.length
-              ? "actionable"
-              : blockers.every((b) => waitingBlocker.test(b))
-                ? "waiting"
-                : "actionable";
+        // This PR's follow-up comes from this report's own fresh, structured evidence.
+        const [fresh, freshWhy] = classifyFollowUp(facts);
+        const own = !!member && open && (member.state === "open" || member.state === "draft");
+        const followUp: FollowUp | null = !member ? null : own ? fresh : member.followUp;
         return {
           number,
           repository,
@@ -412,13 +532,7 @@ export function prDelivery(
           delivery: view ? view.delivery : null,
           ticketResponsible: view?.responsibility?.ticket ?? null,
           followUp,
-          followUpWhy: !member
-            ? null
-            : followUp === member.followUp
-              ? member.followUpWhy
-              : blockers.length
-                ? blockers.join("; ")
-                : "accepted on the current head but not merged: merge or update the branch",
+          followUpWhy: !member ? null : own ? freshWhy : member.followUpWhy,
         };
       }),
       ...outside,
