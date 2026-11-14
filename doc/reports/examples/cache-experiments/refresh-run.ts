@@ -12,6 +12,7 @@
  */
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import {
   STRATEGIES,
   advanceManifest,
@@ -101,7 +102,7 @@ interface Measure {
   note?: string;
 }
 
-class Live {
+export class Live {
   readonly log: Measure[] = [];
   requests = { core: 0, graphql: 0 };
   constructor(
@@ -146,16 +147,23 @@ const MANIFEST_QUERY = (
     totalCount pageInfo{hasNextPage endCursor}
     nodes{ number state updatedAt ${conn === "pullRequests" ? "headRefOid" : ""} } } } }`;
 
-async function readManifest(
+export interface ManifestRead {
+  manifest: Manifest | undefined; // the previous manifest when this read did not advance
+  advanced: boolean;
+  diagnostic?: string;
+}
+
+export async function readManifest(
   live: Live,
   owner: string,
   name: string,
   previous?: Manifest,
-): Promise<Manifest | undefined> {
+  maxPages = 10,
+): Promise<ManifestRead> {
   const pages: ManifestPage[] = [];
   for (const conn of ["issues", "pullRequests"] as const) {
     let cursor: string | undefined;
-    for (let page = 0; page < 10; page++) {
+    for (let page = 0; page < maxPages; page++) {
       const args = [
         "graphql",
         "-f",
@@ -196,7 +204,20 @@ async function readManifest(
     if (pages[pages.length - 1]?.hasNextPage)
       pages.push({ ok: false, entries: [], hasNextPage: false });
   }
-  return advanceManifest(previous, pages, Date.now()).manifest;
+  return advanceManifest(previous, pages, Date.now());
+}
+
+/**
+ * Describe a manifest read for the report. A read that did not advance is reported as stale with
+ * its diagnostic and the original observation time, never as an unchanged refresh.
+ */
+export function manifestStatus(read: ManifestRead): Record<string, unknown> {
+  return {
+    advanced: read.advanced,
+    coverage: read.advanced ? "complete" : "stale",
+    diagnostic: read.diagnostic,
+    observedAt: read.manifest ? new Date(read.manifest.observedAt).toISOString() : null,
+  };
 }
 
 async function liveRun(): Promise<void> {
@@ -219,8 +240,11 @@ async function liveRun(): Promise<void> {
   const run = state.manifest ? "warm" : "cold";
   report.run = run;
 
-  const manifest = await readManifest(live, owner, name, state.manifest);
-  if (manifest && state.manifest) report.diff = diffManifest(state.manifest, manifest);
+  const read = await readManifest(live, owner, name, state.manifest);
+  const manifest = read.manifest;
+  report.manifest = manifestStatus(read);
+  if (read.advanced && manifest && state.manifest)
+    report.diff = diffManifest(state.manifest, manifest);
   report.manifestEntries = manifest?.entries.length;
 
   const pr = arg("--pr");
@@ -345,5 +369,7 @@ async function liveRun(): Promise<void> {
   console.log(JSON.stringify(report, null, 2));
 }
 
-if (process.argv.includes("--live")) await liveRun();
-else fixtureReport();
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  if (process.argv.includes("--live")) await liveRun();
+  else fixtureReport();
+}

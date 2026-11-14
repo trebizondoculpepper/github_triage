@@ -7,6 +7,8 @@ import {
   manifestOf,
   baselineWorld,
   runScenarios,
+  RECONCILE_MINUTES,
+  warmRefresh,
   type ManifestEntry,
 } from "./refresh.js";
 
@@ -99,6 +101,46 @@ describe("conditional refresh experiment (#202)", () => {
       kind: "transport-error",
       message: "connection reset",
     });
+  });
+
+  it("stops on a secondary rate limit while primary quota remains", () => {
+    expect(
+      classifyGh({
+        exitCode: 1,
+        stdout:
+          "HTTP/2.0 403 Forbidden\nRetry-After: 60\nX-Ratelimit-Remaining: 4900\n\n" +
+          '{"message":"You have exceeded a secondary rate limit."}',
+        stderr: "",
+      }),
+    ).toEqual({ kind: "http-error", status: 403, rateLimited: true });
+    expect(
+      classifyGh({
+        exitCode: 1,
+        stdout:
+          "HTTP/2.0 403 Forbidden\nX-Ratelimit-Remaining: 4900\n\n" +
+          '{"message":"You have exceeded a secondary rate limit"}',
+        stderr: "",
+      }),
+    ).toMatchObject({ rateLimited: true });
+    expect(
+      classifyGh({
+        exitCode: 1,
+        stdout: 'HTTP/2.0 403 Forbidden\nX-Ratelimit-Remaining: 4900\n\n{"message":"no access"}',
+        stderr: "",
+      }),
+    ).toMatchObject({ rateLimited: false });
+  });
+
+  it("reconciles with a full re-read after the interval instead of reusing old facts", () => {
+    const previous = baselineWorld();
+    const next = baselineWorld();
+    next.now += RECONCILE_MINUTES + 1;
+    const c = warmRefresh("manifest+live", previous, next);
+    expect(c.reconciliations).toBe(1);
+    expect(c.validatedHits).toBe(0);
+    const inside = baselineWorld();
+    inside.now += RECONCILE_MINUTES - 1;
+    expect(warmRefresh("manifest+live", previous, inside).reconciliations).toBe(0);
   });
 
   it("reuses a 304 only for the exact stored resource, validator and context", () => {

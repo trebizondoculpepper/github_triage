@@ -208,8 +208,14 @@ export function classifyGh(result: GhResult): HttpOutcome {
       lastModified: headers.get("last-modified"),
       body,
     };
+  // Primary exhaustion, or a secondary limit: a Retry-After hint or the secondary-limit message
+  // while the primary remaining count is still non-zero.
   const rateLimited =
-    status === 429 || (status === 403 && headers.get("x-ratelimit-remaining") === "0");
+    status === 429 ||
+    (status === 403 &&
+      (headers.get("x-ratelimit-remaining") === "0" ||
+        headers.has("retry-after") ||
+        /secondary rate limit/i.test(body)));
   return { kind: "http-error", status, rateLimited };
 }
 
@@ -271,6 +277,7 @@ export interface Counters {
   validatedHits: number; // facts reused after a successful revalidation
   ttlHits: number; // facts reused with no revalidation (stale/unvalidated)
   liveFacts: number; // facts read fresh
+  reconciliations: number; // timed or coverage-gap full re-reads
   missedChanges: number; // facts whose reused value differs from truth
   missedFacts: string[];
 }
@@ -286,12 +293,15 @@ function zero(): Counters {
     validatedHits: 0,
     ttlHits: 0,
     liveFacts: 0,
+    reconciliations: 0,
     missedChanges: 0,
     missedFacts: [],
   };
 }
 
 const factsOf = (s: Subject): readonly FactKind[] => (s.kind === "pr" ? PR_FACTS : ISSUE_FACTS);
+/** Experimental control from the contract: full selected re-read at least every 30 minutes. */
+export const RECONCILE_MINUTES = 30;
 const GRAPHQL_FULL_PAGE = 25; // nested selections force small pages
 const GRAPHQL_MANIFEST_PAGE = 100;
 
@@ -385,6 +395,13 @@ export function warmRefresh(
           coverage: "partial",
           entries: current.entries.slice(0, Math.ceil(current.entries.length / 2)),
         };
+      // Reconcile with a full re-read when the last full read is older than the interval or the
+      // manifest has a coverage gap; reused facts are only validated inside that window.
+      if (next.now - previous.now >= RECONCILE_MINUTES || current.coverage !== "complete") {
+        c.reconciliations++;
+        view = fullRead(next, c);
+        break;
+      }
       const diff = diffManifest(prior, current);
       view = cached;
       for (const key of diff.removed) view.delete(key);
@@ -525,6 +542,8 @@ export interface Scenario {
   /** Expected missed changes per strategy, frozen before evaluation. */
   expected: Record<StrategyId, number>;
   manifestCoverage?: Manifest["coverage"];
+  /** Fixture minutes since the cache's last full read; defaults to 5 (inside the interval). */
+  elapsed?: number;
 }
 
 function edit(world: World, key: string, fact: FactKind, bump: boolean): void {
@@ -660,8 +679,8 @@ export const SCENARIOS: readonly Scenario[] = [
     apply: (w) => {
       w.subjects = w.subjects.filter((s) => s.key !== "pr#120");
     },
-    // The stale record is kept, so the deletion is missed but nothing is wrongly deleted.
-    expected: MISSED(1, 1),
+    // Absence from a partial manifest proves nothing; the coverage gap forces a full re-read.
+    expected: MISSED(0, 0),
   },
   {
     id: "R15",
@@ -673,6 +692,22 @@ export const SCENARIOS: readonly Scenario[] = [
       w.subjects.push({ key: "issue#31", kind: "issue", state: "OPEN", updatedAt: w.now, facts });
     },
     expected: MISSED(0, 0, ISSUE_FACTS.length),
+  },
+  {
+    id: "R16",
+    name: "assignment changed, 31 minutes after the last full read",
+    bump: "assumed-not",
+    elapsed: RECONCILE_MINUTES + 1,
+    apply: (w) => edit(w, "issue#8", "assignees", false),
+    expected: MISSED(0, 0),
+  },
+  {
+    id: "R17",
+    name: "review dismissed, 31 minutes after the last full read",
+    bump: "assumed-not",
+    elapsed: RECONCILE_MINUTES + 1,
+    apply: (w) => edit(w, "pr#101", "reviews", false),
+    expected: MISSED(0, 0),
   },
 ];
 
@@ -688,6 +723,7 @@ export function runScenarios(scenarios: readonly Scenario[] = SCENARIOS): Scenar
   return scenarios.map((sc) => {
     const previous = baselineWorld();
     const next = baselineWorld();
+    next.now += sc.elapsed ?? 5;
     sc.apply(next);
     const results = {} as Record<StrategyId, Counters>;
     const failures: string[] = [];
