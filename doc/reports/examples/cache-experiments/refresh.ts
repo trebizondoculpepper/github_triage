@@ -317,6 +317,7 @@ export interface Counters {
   ttlHits: number; // facts reused with no revalidation (stale/unvalidated)
   liveFacts: number; // facts read fresh
   reconciliations: number; // timed or coverage-gap full re-reads
+  diagnosisReads: number; // reads of subjects that left a complete manifest
   missedChanges: number; // facts whose reused value differs from truth
   missedFacts: string[];
 }
@@ -333,6 +334,7 @@ function zero(): Counters {
     ttlHits: 0,
     liveFacts: 0,
     reconciliations: 0,
+    diagnosisReads: 0,
     missedChanges: 0,
     missedFacts: [],
   };
@@ -443,7 +445,16 @@ export function warmRefresh(
       }
       const diff = diffManifest(prior, current);
       view = cached;
-      for (const key of diff.removed) view.delete(key);
+      // Absence from a complete manifest means transferred, deleted or no longer accessible.
+      // One direct read per subject (404, 301 or 403; charged, not a 304) diagnoses which before
+      // the cached record is dropped.
+      for (const key of diff.removed) {
+        c.restRequests++;
+        c.corePoints++;
+        c.diagnosisReads++;
+        c.bytes += HEADERS_ONLY_BYTES;
+        view.delete(key);
+      }
       const hydrate = [...diff.added, ...diff.changed];
       if (hydrate.length) {
         const pages = chunks(hydrate.length, GRAPHQL_FULL_PAGE);
@@ -764,6 +775,15 @@ export const SCENARIOS: readonly Scenario[] = [
     elapsed: RECONCILE_MINUTES + 1,
     apply: (w) => edit(w, "pr#101", "reviews", false),
     expected: MISSED(0, 0),
+  },
+  {
+    id: "R18",
+    name: "two issues transferred away or made inaccessible (complete manifest)",
+    bump: "observed",
+    apply: (w) => {
+      w.subjects = w.subjects.filter((s) => s.key !== "issue#11" && s.key !== "issue#12");
+    },
+    expected: MISSED(0, 0, 2),
   },
 ];
 

@@ -168,6 +168,19 @@ describe("conditional refresh experiment (#202)", () => {
     expect(r15!.results.conditional.missedChanges).toBe(0);
   });
 
+  it("charges a diagnosis read for each subject that leaves a complete manifest", () => {
+    const [r0] = runScenarios(SCENARIOS.filter((x) => x.id === "R0"));
+    const [r13] = runScenarios(SCENARIOS.filter((x) => x.id === "R13"));
+    const [r18] = runScenarios(SCENARIOS.filter((x) => x.id === "R18"));
+    for (const st of ["manifest", "manifest+live"] as const) {
+      expect(r13!.results[st].diagnosisReads).toBe(1);
+      expect(r18!.results[st].diagnosisReads).toBe(2);
+      expect(r18!.results[st].restRequests).toBe(r0!.results[st].restRequests + 2);
+      expect(r18!.results[st].corePoints).toBe(2);
+      expect(r18!.results[st].missedChanges).toBe(0);
+    }
+  });
+
   it("refreshes a PR head through the pull resource", () => {
     expect(restResourceFor("core", "pr")).toBe("pull");
     expect(restResourceFor("core", "issue")).toBe("issue");
