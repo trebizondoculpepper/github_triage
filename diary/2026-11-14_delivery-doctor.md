@@ -25,3 +25,7 @@ Unknown evidence stays unknown at every step: offline or without a permission bo
 ## Next Steps
 
 Closed-issue drift (S5, S16, S68) with a bounded read; delivery, responsibility and closure in briefing JSON, `pr`, `who`, `team` and MCP with parity.
+
+## Follow-up: closed drift and read surfaces
+
+Second and third slices of #192. `ticket-doctor --since` evaluates recently closed tickets with delivery records (S5, S16, S68 after close) in a bounded window, and stale-claim findings state responsibility. A shared presentation module (`src/deliveryread.ts`) turns the same diagnosis into the `delivery` block for briefing JSON, the MCP read tools (through the shared read service), Ticket Doctor JSON, `who`, `team` and `pr`. Two corrections surfaced during self-review: a ticket whose collected comment history is truncated is now unknown rather than record-free, and an effective completion ends responsibility on read surfaces.

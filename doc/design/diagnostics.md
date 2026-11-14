@@ -52,7 +52,14 @@ Closed-issue drift (S5, S16, S68 after closing) runs only with an explicit `tick
 
 Stale claims: `stale-agent-activity` now also states the ticket's delivery responsibility, and the deliverables the stale claimant is responsible for, or that responsibility is unknown. Releasing a claim never ends responsibility and inactivity never transfers it; the supported recovery stays the claimant-only release.
 
-Not yet in this slice: delivery, responsibility and closure fields in briefing JSON, `pr`, `who`, `team` and the MCP read tools.
+Read surfaces (src/deliveryread.ts) present the same diagnosis, so every surface agrees:
+
+- Briefing JSON, and through the same read service the MCP `triage_briefing` and `triage_issue` tools, gain an additive `delivery` block, present only when a collected ticket carries a delivery or v1 release record, or its comment history is truncated. An issue intake shows only its own ticket. Each ticket has `closure`, `records` (`known`, `unknown` or `unread`), `delivery` (the evaluator's verdict, or `not-evaluated` when live evidence was not read), `because`, `responsibility` (ticket-responsible agent, since when, and per-deliverable agents; `null` when the records are not known, which is unknown, never "nobody"), and `deliverables` with live state and `followUp`: `waiting` (awaiting checks or review), `actionable` (failing checks, changes requested, unresolved threads, conflict, draft, closed unmerged, merged off target, or accepted but unmerged), `none` (merged into target) or `unknown`. Ticket Doctor JSON carries the same block.
+- `who N` JSON gains `closure`, `delivery` (that view, or `null` when a complete history has no record) and `responsibility`. Its text output appends the delivery lines.
+- `team` lists each agent's responsibilities (S18: count and age, no limit), including agents whose claims are gone. Its JSON gains `responsibilities` per agent and a `delivery` block when any ticket is in scope. Tickets whose responsibility is unknown are listed as such.
+- `pr N` gains `delivery` for the issues the PR is linked to close: whether the PR is a required member (`null` when the records are unknown), its responsible agent, the issue's verdict and closure, and its follow-up derived from this report's own fresh blockers. Records on issues it is not linked to are outside this read (`scope: "closing-references"`).
+
+An effective `complete` on a closed issue ends responsibility in every surface. Offline, or without both permission and query boundaries, records are `unread` and nothing is evaluated.
 
 ## Complexity label consistency
 

@@ -28,6 +28,16 @@ import { pullRequestReviewHistory, reviewHistoryText } from "./reviewhistory.js"
 import { doctorStaleHours, ticketDoctor, ticketDoctorText } from "./ticketdoctor.js";
 import { diagnoseClosedDrift, diagnoseDelivery } from "./deliverydoctor.js";
 import {
+  deliveryFields,
+  deliveryLines,
+  deliveryRead,
+  prDelivery,
+  prDeliveryLines,
+  readIssuesDelivery,
+  teamResponsibilities,
+  teamResponsibilityLines,
+} from "./deliveryread.js";
+import {
   applyPlan,
   claimPolicy,
   claimText,
@@ -568,13 +578,26 @@ export async function checkpointSince(
     throw error;
   }
 }
+/** #192: per-run delivery boundaries; offline, or without injected ones, nothing is read. */
+const deliveryBoundaries = (runtime: Runtime, repository: string, offline: boolean) =>
+  !offline && runtime.rest && runtime.query
+    ? {
+        trust: markerTrust(permissionLookup(repository, runtime.rest)),
+        live: { query: runtime.query, rest: runtime.rest },
+      }
+    : {};
+
+/** Appends lines to a text report that ends with a newline (unchanged when there are none). */
+const appendLines = (text: string, lines: string[]): string =>
+  lines.length ? `${text.replace(/\n$/, "")}\n${lines.join("\n")}\n` : text;
+
 export async function main(
   args: string[],
   output: Output = (text) =>
     new Promise<void>((resolve, reject) =>
       process.stdout.write(text, (error) => (error ? reject(error) : resolve())),
     ),
-  runtime: Runtime = { collect, currentRepository, dependencyReport, rest: ghRest },
+  runtime: Runtime = { collect, currentRepository, dependencyReport, rest: ghRest, query: ghQuery },
 ): Promise<number> {
   // Version check (#51, cached daily per user by #65): runs alongside the command, bounded by a short timeout, and reports
   // only on stderr so JSON on stdout stays valid. --offline and opt-outs mean no network.
@@ -717,7 +740,10 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
       offline: !!values.offline,
       impactEnabled: impact !== "disabled",
     });
-    await output(values.json ? JSON.stringify(report, null, 2) + "\n" : ticketDoctorText(report));
+    // #192: the same delivery block as the briefing, for tickets with delivery evidence.
+    const read = deliveryRead(snapshot, delivery);
+    const json = read.tickets.length ? { ...report, delivery: read } : report;
+    await output(values.json ? JSON.stringify(json, null, 2) + "\n" : ticketDoctorText(report));
     return report.completeness.complete ? 0 : 2;
   }
   if (args[0] === "submit" || args[0] === "deliverables") {
@@ -869,7 +895,27 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
       now: runtime.now?.() ?? new Date(),
       offline: !!values.offline,
     });
-    await output(values.json ? JSON.stringify(view, null, 2) + "\n" : teamText(view));
+    // #192: responsibilities per agent (S18 inventory), including agents with no claim.
+    const read = deliveryRead(
+      snapshot,
+      await diagnoseDelivery(
+        snapshot,
+        deliveryBoundaries(runtime, snapshot.repository, !!values.offline),
+      ),
+    );
+    const report = read.tickets.length
+      ? { ...view, agents: teamResponsibilities(view.agents, read), delivery: read }
+      : view;
+    await output(
+      values.json
+        ? JSON.stringify(report, null, 2) + "\n"
+        : appendLines(
+            teamText(view),
+            read.tickets.length
+              ? teamResponsibilityLines(report.agents, read, runtime.now?.() ?? new Date())
+              : [],
+          ),
+    );
     return view.completeness.complete ? 0 : 2;
   }
   if (args[0] === "who") {
@@ -900,13 +946,26 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
           issue: number,
         });
     if (!values.offline && values.cache) await atomicJson(values.cache, snapshot);
-    const report = ticketOwnership(snapshot, number, {
+    const ownership = ticketOwnership(snapshot, number, {
       staleHours,
       now: runtime.now?.() ?? new Date(),
       offline: !!values.offline,
     });
+    // #192: delivery, responsibility and closure from the shared fold and evaluator.
+    const read = deliveryRead(
+      snapshot,
+      await diagnoseDelivery(
+        snapshot,
+        deliveryBoundaries(runtime, snapshot.repository, !!values.offline),
+      ),
+    );
+    const view = read.tickets.find((t) => t.number === number) ?? null;
+    const issue = snapshot.issues.find((i) => i.number === number);
+    const report = issue ? { ...ownership, ...deliveryFields(issue, view) } : ownership;
     await output(
-      values.json ? JSON.stringify(report, null, 2) + "\n" : ticketOwnershipText(report),
+      values.json
+        ? JSON.stringify(report, null, 2) + "\n"
+        : appendLines(ticketOwnershipText(ownership), deliveryLines(view)),
     );
     return report.completeness.complete ? 0 : 2;
   }
@@ -968,13 +1027,33 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
       );
       return history.completeness.complete ? 0 : 2;
     }
-    const report = await pullRequestStatus(
+    const status = await pullRequestStatus(
       repository,
       Number(positionals[0]),
       runtime.query ?? ghQuery,
     );
-    await output(values.json ? JSON.stringify(report, null, 2) + "\n" : prStatusText(report));
-    return report.completeness.complete ? 0 : 2;
+    // #192: delivery and responsibility for the issues this PR is linked to close.
+    const live = deliveryBoundaries(runtime, repository, false);
+    const delivery =
+      live.trust && live.live
+        ? prDelivery(
+            status.pullRequest.url,
+            status.blockers,
+            status.pullRequest.state === "OPEN",
+            await readIssuesDelivery(
+              repository,
+              status.linkedIssues.map((i) => i.number),
+              { ...live.live, trust: live.trust },
+            ),
+          )
+        : null;
+    const report = delivery ? { ...status, delivery } : status;
+    await output(
+      values.json
+        ? JSON.stringify(report, null, 2) + "\n"
+        : appendLines(prStatusText(status), delivery ? prDeliveryLines(delivery) : []),
+    );
+    return status.completeness.complete ? 0 : 2;
   }
   if (args[0] === "deps") {
     const values = depsArgumentsFor(args.slice(1));
@@ -1088,6 +1167,12 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
     // request, so trusted provenance is then unknown. Without an injected boundary, likewise.
     !options.offline && runtime.rest
       ? markerTrust(permissionLookup(snapshot.repository, runtime.rest))
+      : undefined,
+    undefined,
+    undefined,
+    // #192: delivery evidence is read live only on a live read with both boundaries.
+    !options.offline && runtime.rest && runtime.query
+      ? { query: runtime.query, rest: runtime.rest }
       : undefined,
   );
   const checkpoint = options.checkpoint

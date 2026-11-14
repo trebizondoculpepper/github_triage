@@ -17,7 +17,19 @@ import type { RepositoryPermission, RestAnswer } from "./github/github.js";
 import { evaluationRevision } from "./completion.js";
 import { ticketDoctor } from "./ticketdoctor.js";
 import type { TicketDoctorReport } from "./ticketdoctor.js";
-import type { Issue, Snapshot } from "./github/types.js";
+import type { Issue, PullRequest, Snapshot } from "./github/types.js";
+import { evaluationRevision } from "./completion.js";
+import {
+  deliveryFields,
+  deliveryRead,
+  prDelivery,
+  prDeliveryLines,
+  readIssuesDelivery,
+  teamResponsibilities,
+  teamResponsibilityLines,
+} from "./deliveryread.js";
+import { readBriefing } from "./service.js";
+import type { TeamAgent } from "./team.js";
 
 const repo = "owner/name";
 const time = "2026-11-14T10:00:00.000Z";
@@ -806,5 +818,278 @@ describe("stale claims beside delivery responsibility (#192)", () => {
       false,
     );
     expect(f.plan.facts.join(" ")).toContain("Delivery responsibility is unknown");
+  });
+});
+
+describe("delivery, responsibility and closure on read surfaces (#192)", () => {
+  /** A snapshot PR with the evidence the briefing collects. */
+  const snapPr = (n: number, rollup: string | null, review: string | null, unresolved = false) =>
+    ({
+      number: n,
+      url: prLink(n),
+      state: "OPEN",
+      isDraft: false,
+      mergeable: "MERGEABLE",
+      reviewDecision: review,
+      reviewThreads: page(unresolved ? [{ isResolved: false }] : []),
+      commits: { nodes: [{ commit: { statusCheckRollup: rollup ? { state: rollup } : null } }] },
+    }) as unknown as PullRequest;
+  const read = async (
+    issues: Issue[],
+    prs: PullRequest[],
+    livePrs: Record<number, LivePr>,
+    compare = {},
+    withTrust = true,
+  ) => {
+    const snap = { ...snapshot(issues), pullRequests: prs } as Snapshot;
+    return deliveryRead(
+      snap,
+      await diagnoseDelivery(snap, {
+        trust: withTrust ? trust : undefined,
+        live: withTrust ? live(livePrs, compare).rt : undefined,
+      }),
+    );
+  };
+  const submitted = (n: number, prs: number[], membership: "open" | "complete" = "complete") =>
+    post(record(n, "submit", { deliverables: prs.map(pr), membership }));
+
+  it("distinguishes waiting, actionable failure and accepted-but-unmerged, with responsibility", async () => {
+    const r = await read(
+      [issue(60, ["bug"], [submitted(60, [80, 81, 82, 83])])],
+      [
+        snapPr(80, "PENDING", null),
+        snapPr(81, "FAILURE", null),
+        snapPr(82, "SUCCESS", "APPROVED"),
+        snapPr(83, "SUCCESS", "REVIEW_REQUIRED"),
+      ],
+      { 80: "open", 81: "open", 82: "open", 83: "open" },
+    );
+    const [t] = r.tickets;
+    expect(t.delivery).toBe("submitted");
+    expect(t.closure).toBe("open");
+    expect(t.responsibility?.ticket).toBe("alice");
+    expect(t.deliverables.map((m) => [m.followUp, m.followUpWhy])).toEqual([
+      ["waiting", "awaiting checks"],
+      ["actionable", "failing checks on the current head"],
+      ["actionable", "accepted but not merged: merge or update the branch"],
+      ["waiting", "awaiting review"],
+    ]);
+    expect(t.deliverables.every((m) => m.responsible === "alice")).toBe(true);
+  });
+
+  it("partial delivery shows the merged member as done and the rest outstanding", async () => {
+    const r = await read(
+      [issue(61, ["bug"], [submitted(61, [84, 85])])],
+      [snapPr(85, "PENDING", null)],
+      { 84: { merged: "m84" }, 85: "open" },
+      { m84: "behind" },
+    );
+    expect(r.tickets[0].delivery).toBe("partial");
+    expect(r.tickets[0].deliverables.map((m) => m.followUp)).toEqual(["none", "waiting"]);
+  });
+
+  it("offline, responsibility is unknown (null), never nobody, and delivery is unknown", async () => {
+    const r = await read([issue(62, ["bug"], [submitted(62, [86])])], [], {}, {}, false);
+    expect(r.tickets[0]).toMatchObject({
+      records: "unread",
+      delivery: "unknown",
+      responsibility: null,
+    });
+    expect(deliveryFields(issue(62, []), r.tickets[0]).responsibility).toBeNull();
+  });
+
+  it("no record in a complete history means nobody responsible; truncated history is unknown", async () => {
+    const none = await read([issue(63, ["bug"])], [], {});
+    expect(none.tickets).toEqual([]);
+    expect(deliveryFields(issue(63, []), null)).toEqual({
+      closure: "open",
+      delivery: null,
+      responsibility: { ticket: null, since: null, members: [] },
+    });
+    const long = { ...issue(64, ["bug"]), comments: page([], true) } as Issue;
+    const truncated = await read([long], [], {});
+    expect(truncated.tickets[0]).toMatchObject({
+      records: "unknown",
+      delivery: "unknown",
+      responsibility: null,
+    });
+  });
+
+  it("an effective completion on a closed issue ends responsibility; closure is reported beside delivery", async () => {
+    const submit = submitted(65, [87]);
+    const snap0 = snapshot([issue(65, ["bug"], [submit])]);
+    const { fold } = await readDeliveryFold([submit], true, { repository: repo, issue: 65 }, trust);
+    const done = post(
+      record(65, "complete", {
+        verdict: "delivered",
+        evaluatedAt: "2026-11-13T09:59:00Z",
+        evaluationRevision: evaluationRevision(fold),
+      }),
+    );
+    const closed = {
+      ...issue(65, ["bug"], [submit, done]),
+      state: "CLOSED",
+      stateReason: "COMPLETED",
+    } as Issue;
+    expect(snap0.issues).toHaveLength(1);
+    const r = await read([closed], [], { 87: { merged: "m87" } }, { m87: "behind" });
+    expect(r.tickets[0]).toMatchObject({ closure: "closed-completed", delivery: "delivered" });
+    expect(r.tickets[0].responsibility).toMatchObject({
+      ticket: null,
+      members: [{ responsible: null }],
+    });
+  });
+
+  it("team lists responsibilities after the claim is gone, with count, and no limit", async () => {
+    const r = await read(
+      [issue(66, ["bug"], [submitted(66, [88])]), issue(67, ["bug"], [submitted(67, [89])])],
+      [snapPr(88, "PENDING", null), snapPr(89, "FAILURE", null)],
+      { 88: "open", 89: "open" },
+    );
+    const agents = teamResponsibilities([] as TeamAgent[], r);
+    expect(agents).toHaveLength(1);
+    expect(agents[0].agent).toBe("alice");
+    expect(agents[0].claims).toEqual([]);
+    expect(agents[0].responsibilities?.map((x) => [x.number, x.scope, x.followUp])).toEqual([
+      [66, "ticket", null],
+      [66, "deliverable", "waiting"],
+      [67, "ticket", null],
+      [67, "deliverable", "actionable"],
+    ]);
+    const text = teamResponsibilityLines(agents, r, new Date(time)).join("\n");
+    expect(text).toContain("alice: responsible for 4 item(s) (no limit)");
+  });
+
+  it("pr N names the issues requiring it, the responsible agent and its follow-up from fresh blockers", async () => {
+    const fake = live({ 90: "open" });
+    const issueNode = (n: number, comments: DeliveryComment[]) => ({
+      number: n,
+      title: "T",
+      url: `https://github.com/${repo}/issues/${n}`,
+      state: "OPEN",
+      stateReason: null,
+      closedByPullRequestsReferences: page([]),
+      comments: { nodes: comments, pageInfo: { hasPreviousPage: false, startCursor: null } },
+    });
+    const nodes: Record<number, ReturnType<typeof issueNode>> = {
+      68: issueNode(68, [submitted(68, [90])]),
+      69: issueNode(69, []),
+      70: issueNode(70, [post(record(70, "submit", { deliverables: [pr(90)] }), "flaky")]),
+    };
+    const query = async (q: string, v: Record<string, unknown>) =>
+      q.includes("issue(number:$number){number title")
+        ? { repository: { issue: nodes[Number(v.number)] } }
+        : fake.rt.query(q, v);
+    const issuesRead = await readIssuesDelivery(repo, [68, 69, 70], {
+      query: query as never,
+      rest: fake.rt.rest,
+      trust,
+    });
+    const waiting = prDelivery(prLink(90), ["1 check(s) still pending: waiting"], true, issuesRead);
+    expect(waiting.issues).toEqual([
+      expect.objectContaining({
+        number: 68,
+        required: true,
+        responsible: "alice",
+        followUp: "waiting",
+        delivery: "submitted",
+      }),
+      expect.objectContaining({ number: 69, required: false, delivery: null }),
+      expect.objectContaining({ number: 70, required: null, delivery: "unknown" }),
+    ]);
+    expect(prDelivery(prLink(90), [], true, issuesRead).issues[0]).toMatchObject({
+      followUp: "actionable",
+      followUpWhy: "accepted on the current head but not merged: merge or update the branch",
+    });
+    expect(prDelivery(prLink(90), ["changes requested"], true, issuesRead).issues[0].followUp).toBe(
+      "actionable",
+    );
+    expect(prDeliveryLines(waiting).join("\n")).toContain(
+      "#70 open: delivery unknown; required unknown",
+    );
+  });
+
+  it("the briefing JSON carries the same delivery block through the CLI and the shared MCP read service", async () => {
+    const snap = snapshot([issue(71, ["bug", "status:awaiting-review"], [submitted(71, [91])])]);
+    const fake = live({ 91: { merged: "m91" } }, { m91: "behind" });
+    const rest = async (path: string) =>
+      path.includes("/collaborators/")
+        ? { status: 200, body: { user: { login: "writer" }, role_name: "write" } }
+        : fake.rt.rest(path);
+    let text = "";
+    await main(
+      ["--repo", repo, "--json"],
+      async (t) => {
+        text += t;
+      },
+      {
+        collect: async () => snap,
+        currentRepository: async () => repo,
+        dependencyReport: async () => ({}) as never,
+        now: () => new Date(time),
+        query: fake.rt.query as never,
+        rest,
+        updateCheck: async () => ({ status: "skipped" }) as never,
+      },
+    );
+    const cli = JSON.parse(text) as { delivery: unknown };
+    const mcp = await readBriefing(
+      {
+        collect: async () => snap,
+        dependencyReport: async () => ({}) as never,
+        now: () => new Date(time),
+        query: fake.rt.query as never,
+        rest,
+      },
+      { repository: repo, limit: 10, maxChars: 4000 },
+    );
+    if (mcp.kind !== "report") throw new Error("unavailable");
+    expect(mcp.report.delivery).toEqual(cli.delivery);
+    expect(cli.delivery).toMatchObject({
+      tickets: [
+        { number: 71, delivery: "delivered", closure: "open", responsibility: { ticket: "alice" } },
+      ],
+    });
+  });
+
+  it("who and team add delivery, responsibility and closure through the CLI", async () => {
+    const snap = snapshot([issue(72, ["bug"], [submitted(72, [92])])]);
+    const fake = live({ 92: "open" });
+    const runtime = {
+      collect: async () => snap,
+      currentRepository: async () => repo,
+      now: () => new Date(time),
+      query: fake.rt.query as never,
+      rest: async (path: string) =>
+        path.includes("/collaborators/")
+          ? { status: 200, body: { user: { login: "writer" }, role_name: "write" } }
+          : fake.rt.rest(path),
+      updateCheck: async () => ({ status: "skipped" }) as never,
+    };
+    const run = async (args: string[]) => {
+      let out = "";
+      await main(
+        args,
+        async (t) => {
+          out += t;
+        },
+        runtime,
+      );
+      return out;
+    };
+    const who = JSON.parse(await run(["who", "72", "--repo", repo, "--json"]));
+    expect(who).toMatchObject({
+      closure: "open",
+      delivery: { delivery: "submitted", records: "known" },
+      responsibility: { ticket: "alice" },
+    });
+    expect(await run(["who", "72", "--repo", repo])).toContain(
+      "Delivery: submitted (records known)",
+    );
+    const team = JSON.parse(await run(["team", "--repo", repo, "--json"]));
+    expect(team.agents).toEqual([
+      expect.objectContaining({ agent: "alice", claims: [], responsibilities: expect.any(Array) }),
+    ]);
+    expect(await run(["team", "--repo", repo])).toContain("alice: responsible for 2 item(s)");
   });
 });

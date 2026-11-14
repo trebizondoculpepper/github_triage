@@ -12,7 +12,10 @@ import type { EngineSetting, DecisionEngineMetadata } from "./config/engine-sett
  * in their own modules and are never reachable through this service.
  */
 import { collect, IssueUnavailable, permissionLookup } from "./github/github.js";
-import type { IssueDiagnosis, Rest } from "./github/github.js";
+import type { IssueDiagnosis, Query, Rest } from "./github/github.js";
+import { diagnoseDelivery } from "./deliverydoctor.js";
+import { deliveryRead } from "./deliveryread.js";
+import type { DeliveryRead } from "./deliveryread.js";
 import { markerTrust } from "./delivery.js";
 import { readSnapshotResponsibility } from "./responsibility.js";
 import type { TrustDecision } from "./delivery.js";
@@ -47,6 +50,11 @@ export interface PresentOptions extends Omit<BriefingOptions, "estimation" | "as
 export interface PresentedBriefing {
   report: (ReturnType<typeof compactBriefing> | ReturnType<typeof briefing>) & {
     decisionEngine: DecisionEngineMetadata;
+    /**
+     * #192: delivery, responsibility and closure, present only when a collected ticket carries a
+     * delivery or v1 release record (or its history is truncated). Absent means none in scope.
+     */
+    delivery?: DeliveryRead;
   };
   text: string;
   complete: boolean;
@@ -61,9 +69,10 @@ export async function presentBriefing(
   redactDiagnostic?: (text: string) => string,
   trust?: TrustDecision,
   signal?: AbortSignal,
-  loadEngine: () => Promise<
-    Pick<typeof import("./rules/datalog/datalog.js"), "evaluateDatalog">
-  > = () => import("./rules/datalog/datalog.js"),
+  loadEngine: () => Promise<Pick<typeof import("./rules/datalog/datalog.js"), "evaluateDatalog">> = () =>
+    import("./rules/datalog/datalog.js"),
+  /** #192: live PR and compare reads for delivery; absent (offline) means not evaluated. */
+  live?: { query: Query; rest: Rest },
 ): Promise<PresentedBriefing> {
   // Sizes come from the snapshot's labels (#152); only configuration is read here.
   const collected = await collectLabelEstimationInput(snapshot.repository, estimationRuntime);
@@ -162,7 +171,16 @@ export async function presentBriefing(
         coverage: { scope: options.full || options.issue ? "intake" : "next-actions" },
         diagnostics: [],
       };
-  const report = { ...(compact ?? expanded), decisionEngine };
+  // #192: one shared fold/evaluator read for CLI and MCP; an issue intake shows its own ticket.
+  const read = deliveryRead(snapshot, await diagnoseDelivery(snapshot, { trust, live, signal }));
+  const delivery = options.issue
+    ? { ...read, tickets: read.tickets.filter((t) => t.number === options.issue) }
+    : read;
+  const report = {
+    ...(compact ?? expanded),
+    decisionEngine,
+    ...(delivery.tickets.length || !delivery.complete ? { delivery } : {}),
+  };
   const engineHeader = experimental
     ? `Decision engine: Datalog (policy ${experimental.decisionEngine.policyVersion}; ${experimental.decisionEngine.rulesHash.slice(0, 12)})\n`
     : "";
@@ -187,6 +205,8 @@ export interface ReadRuntime {
    * Absent means no permission requests: trusted provenance is then reported as unknown.
    */
   rest?: Rest;
+  /** #192: live GraphQL reads for delivery evidence; absent means delivery is not evaluated. */
+  query?: Query;
   /** Clock for freshness ages; defaults to the system clock. */
   now?: () => Date;
   /** Rewrites locally generated diagnostics (not GitHub evidence) for remote consumers. */
@@ -268,6 +288,8 @@ export async function readBriefing(
       ? markerTrust(permissionLookup(request.repository, runtime.rest, request.signal))
       : undefined,
     request.signal,
+    undefined,
+    runtime.rest && runtime.query ? { query: runtime.query, rest: runtime.rest } : undefined,
   );
   return { kind: "report", ...presented };
 }
