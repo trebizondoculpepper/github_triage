@@ -5,6 +5,8 @@ export type Page<T> = {
   totalCount?: number;
 };
 export type Comment = {
+  /** Stable numeric id; orders delivery records (#182). Absent from older caches: order unknown. */
+  databaseId?: number;
   body: string;
   url: string;
   /** `__typename` and the edit fields (#247) are absent from older caches: authority unknown. */
@@ -74,7 +76,10 @@ export type PullRequest = Issue & {
     comments: Page<Comment>;
   }>;
   /** `submittedAt` is the review event time; null for a pending review. */
-  reviews: Page<Comment & { state: string; submittedAt?: string | null }>;
+  /** `commit` is the reviewed head (#182); absent from older caches: review head unknown. */
+  reviews: Page<
+    Comment & { state: string; submittedAt?: string | null; commit?: { oid: string } | null }
+  >;
   commits: {
     nodes: { commit: { statusCheckRollup: { state: string; contexts: Page<Check> } | null } }[];
   };

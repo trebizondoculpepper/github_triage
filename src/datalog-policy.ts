@@ -4,6 +4,7 @@ export const schema = Object.fromEntries(
   [
     "label",
     "owner",
+    "responsible",
     "platform",
     "attention",
     "blocker",
@@ -12,6 +13,7 @@ export const schema = Object.fromEntries(
     "closing",
     "check",
     "review",
+    "receipt",
     "thread",
     "matched",
     "overridden",
@@ -85,6 +87,15 @@ export const definitions: RuleDefinition[] = [
     "(pr-action ?t) (clean-pr ?t)",
     "Current verify passes at head {head}; inspect the diff and review evidence, then consider merge.",
     ["pr-follow-up", "pr-inspect-merge"],
+  ),
+  rule(
+    "D-PR-INTEGRATE",
+    "pr-follow-up",
+    2,
+    3,
+    "(pr-action ?t) (integrate-pr ?t)",
+    "Accepted at head {head} (verify passed, head reviewed, no fetched findings) but merge state is {mergeState}, mergeable {mergeable}; refresh mergeability or update the branch, then recheck before considering merge.",
+    ["pr-follow-up", "pr-integrate"],
   ),
   rule(
     "D-DECIDE",
@@ -248,6 +259,7 @@ export const clauses = `[
 [(claimed ?t) [?t "owner" ?a]]
 [(mine ?t) [1 "agent" ?a] [?t "owner" ?a]]
 [(mine-linked ?t) (mine ?t)]
+[(mine-linked ?t) [1 "agent" ?a] [?t "responsible" ?a]]
 [(mine-linked ?t) [?t "closes" ?i] (mine ?i)]
 [(addressed ?t) [1 "agent" ?a] [?t "attention" ?a]]
 [(parked ?t) [?t "label" "status:parked"]]
@@ -302,13 +314,21 @@ export const clauses = `[
 [(pr-review ?t) [?t "thread" ?c] [?c "resolved" false]]
 [(verified ?t) [?t "check" ?c] [?c "name" "verify"] [?c "outcome" "SUCCESS"]]
 [(clean-pr ?t) (pr ?t) [?t "pr-complete" true] [?t "draft" false] [?t "mergeable" "MERGEABLE"] [?t "merge-state" ?m] [1 "merge-state" ?m] (verified ?t) (not (pr-failure ?t)) (not (pr-pending ?t)) (not (pr-unknown ?t)) (not (pr-review ?t))]
+[(head-reviewed ?t) [?t "head" ?h] [?t "review" ?r] [?r "review-state" "APPROVED"] [?r "review-commit" ?h]]
+[(head-reviewed ?t) [?t "head" ?h] [?t "receipt" ?c] [?c "receipt-commit" ?h] [?c "receipt-status" "completed"] [?c "receipt-findings" false]]
+[(head-findings ?t) [?t "head" ?h] [?t "receipt" ?c] [?c "receipt-commit" ?h] [?c "receipt-findings" true]]
+[(accepted-pr ?t) (head-reviewed ?t) (not (head-findings ?t)) [?t "pr-complete" true] [?t "draft" false] (verified ?t) (not (pr-failure ?t)) (not (pr-pending ?t)) (not (pr-unknown ?t)) (not (pr-review ?t)) (not [?t "mergeable" "CONFLICTING"])]
+[(refresh-needed ?t) [?t "mergeable" ?m] [1 "unknown-mergeable" ?m]]
+[(refresh-needed ?t) [?t "merge-state" ?m] [1 "refresh-state" ?m]]
+[(integrate-pr ?t) (accepted-pr ?t) (refresh-needed ?t)]
 [(follow-up ?t) (pr-failure ?t)]
 [(follow-up ?t) (pr-review ?t)]
 [(follow-up ?t) (pr ?t) [?t "mergeable" "CONFLICTING"]]
 [(follow-up ?t) (clean-pr ?t)]
+[(follow-up ?t) (integrate-pr ?t)]
 [(own-follow-up ?t) (mine-linked ?t) (follow-up ?t)]
 [(pr-action ?t) (pr ?t) [1 "role" "implementer"]]
-[(pr-action ?t) (pr ?t) [1 "role" "designer"] (design-pr ?t) (mine-linked ?t)]
+[(pr-action ?t) [1 "role" "designer"] (design-pr ?t) (mine-linked ?t)]
 ]`;
 export const constants: Record<string, (string | number | boolean)[]> = {
   small: ["XS", "S"],
@@ -352,6 +372,8 @@ export const constants: Record<string, (string | number | boolean)[]> = {
     "EXPECTED",
   ],
   "merge-state": ["CLEAN", "HAS_HOOKS", "UNSTABLE"],
+  "refresh-state": ["BEHIND", "UNKNOWN"],
+  "unknown-mergeable": ["UNKNOWN"],
 };
 // Every sort column is inferred by these queries; the host only executes this descriptor.
 export const comparison = [
@@ -449,6 +471,7 @@ export const commonWitnesses: Record<string, string> = {
   impactState: '[?t "impact-state" ?value]',
   complexityState: '[?t "complexity-state" ?value]',
   head: '[?t "head" ?value]',
+  responsible: '[?t "responsible" ?value]',
 };
 export const witnessClauses: Record<string, Record<string, string>> = {
   "D-ATTENTION": { addressedAgent: '[1 "agent" ?value] [?t "attention" ?value]' },
@@ -461,6 +484,11 @@ export const witnessClauses: Record<string, Record<string, string>> = {
     unresolvedThreads: '[?t "thread" ?c] [?c "resolved" false] [(str "unresolved") ?value]',
   },
   "D-PR-CONFLICT": { mergeable: '[?t "mergeable" ?value]' },
+  "D-PR-INTEGRATE": {
+    mergeable: '[?t "mergeable" ?value]',
+    mergeState: '[?t "merge-state" ?value]',
+    verify: '[?t "check" ?c] [?c "name" "verify"] [?c "outcome" ?value]',
+  },
   "D-PR-MERGE": {
     verify: '[?t "check" ?c] [?c "name" "verify"] [?c "outcome" ?value]',
     complete: '[?t "pr-complete" ?value]',

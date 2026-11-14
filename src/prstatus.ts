@@ -10,6 +10,8 @@
  * approval.
  */
 import { workflow } from "./briefing.js";
+import { codexMarker } from "./reviewevidence.js";
+export { codexMarker };
 import { ghQuery, prop, selected } from "./github.js";
 import type { Query } from "./github.js";
 
@@ -90,7 +92,7 @@ export type CodexReviewState = {
   commit_sha?: string;
   has_unresolved_findings?: boolean;
 };
-type CodexMarker = { code_review?: CodexReviewState };
+export type CodexMarker = { code_review?: CodexReviewState };
 export type Receipt = {
   by: string;
   at: string;
@@ -203,17 +205,6 @@ const reviewerFor: Record<string, string> = {
   codex: "chatgpt-codex-connector",
   coderabbitai: "coderabbitai",
 };
-
-/** Codex's machine-readable review state embedded in a comment body, if any. */
-export function codexMarker(body: string | null | undefined): CodexMarker | null {
-  const m = /codex-review-state:v1 (\{.*?\}) -->/.exec(body ?? "");
-  try {
-    const parsed: unknown = m ? JSON.parse(m[1]) : null;
-    return selected<CodexMarker>(parsed);
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Build the report from a fetched pull request. Pure; `now` is injected.

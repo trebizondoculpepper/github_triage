@@ -81,6 +81,7 @@ export const followUpRules = [
   "pr-review-findings",
   "pr-conflicts",
   "pr-inspect-merge",
+  "pr-integrate",
 ];
 /** Label marking documentation/design work; PRs linked to such tickets are design review. */
 export const designPolicy = {

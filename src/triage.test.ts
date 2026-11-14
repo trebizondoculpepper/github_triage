@@ -7439,15 +7439,27 @@ describe("role-shaped briefings (#1, doc/design/briefings.md)", () => {
       url: `https://github.com/${repo}/pull/5`,
       closingIssuesReferences: page([]),
       mergeStateStatus: "BEHIND",
+      // Approved on the current head, so BEHIND is an integration action (#182 S9).
+      reviews: page([
+        {
+          body: "",
+          url: "https://example.test/review",
+          author: { login: "reviewer" },
+          state: "APPROVED",
+          submittedAt: time,
+          commit: { oid: "abc123" },
+        },
+      ]),
     };
     const data = snapshot([issue(1)], [unverified, behind]);
     const r = await compact(data, { limit: 10, agent: "reader", role: "implementer" });
     const waiting = section(r, "pr-waiting");
-    expect(numbers(waiting.items)).toEqual([4, 5]);
+    expect(numbers(waiting.items)).toEqual([4]);
     expect(waiting.background).toBe(true);
     expect(waiting.items[0]!.reason).toMatch(/verify not proven/);
-    expect(waiting.items[1]!.reason).toMatch(/Merge state: BEHIND/);
-    expect(numbers(section(r, "pr-follow-up").items)).toEqual([]);
+    // An accepted PR that is only BEHIND is an integration action, not waiting (#182 S9).
+    expect(numbers(section(r, "pr-follow-up").items)).toEqual([5]);
+    expect(section(r, "pr-follow-up").items[0]!.reason).toMatch(/merge state is BEHIND/);
     expect(numbers(r.role!.next)).not.toContain(4);
     // No PR in the non-role compact output silently vanishes from a role view.
     const plain = await compact(data, { limit: 10, agent: "reader" });

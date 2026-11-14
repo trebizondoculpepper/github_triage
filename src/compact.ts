@@ -53,6 +53,7 @@ export const ruleMetadata = new Map<string, RuleGroup>([
     "pr-conflicts",
     "pr-pending",
     "pr-inspect-merge",
+    "pr-integrate",
     "pr-verification-needed",
     "pr-merge-state",
   ].map((key): [string, RuleGroup] => [key, "review"]),
@@ -145,7 +146,9 @@ const unfocusedIdentityNotice =
 
 export function compactBriefing(
   snapshot: Snapshot,
-  options: Pick<BriefingOptions, "limit" | "agent" | "estimate"> & { role?: string },
+  options: Pick<BriefingOptions, "limit" | "agent" | "estimate" | "responsible"> & {
+    role?: string;
+  },
   expanded: Briefing,
   assessments?: ReadonlyMap<string, SubjectAssessments>,
   impactStatus: MetricAvailability = "available",
@@ -169,8 +172,13 @@ export function compactBriefing(
     !!options.agent && !!item && labelNames(item).includes(`attention:${options.agent}`);
   // Targets and section entries always come from snapshot objects, so a lookup by URL is
   // defined at runtime; an undefined item fails exactly as the untyped code did.
+  // Trusted delivery responsibility (#182) keeps a submitted PR the viewer's own follow-up after
+  // `submit` releases the `agent:` claim; absence of a record is not evidence of anything.
+  const responsibleMine = (item: Subject): boolean =>
+    !!options.agent && !!options.responsible?.get(item.url)?.includes(options.agent);
   const linkedMine = (item: Subject | undefined): boolean =>
     isMine(defined(item)) ||
+    responsibleMine(defined(item)) ||
     (defined(item).closingIssuesReferences?.nodes ?? []).some((ref) =>
       isMine(byUrl.get(ref.url) ?? unlabelled),
     );
@@ -214,6 +222,7 @@ export function compactBriefing(
     "pr-review-findings",
     "pr-conflicts",
     "pr-inspect-merge",
+    "pr-integrate",
   ]);
   const tier = ({ target, findings }: { target: string; findings: Action[] }): number => {
     const item = byUrl.get(target);
@@ -463,7 +472,7 @@ export function compactBriefing(
     offered: complexityCounts
       ? estimationFacts.requested || complexityCounts.ranked > 0
       : estimationFacts.requested || (!higher && !!queue?.total),
-    ...(complexityCounts ?? {}),
+    ...complexityCounts,
     queue: queue
       ? { total: queue.total, omitted: queue.total - shownQueue.length, items: shownQueue }
       : null,

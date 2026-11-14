@@ -32,6 +32,13 @@ export interface DatalogOptions {
   agent?: string;
   platform?: string;
   order?: PickupOrder;
+  /**
+   * Trusted delivery responsibility per deliverable URL (#190 records, read by #182). Additive to
+   * `agent:` linkage; a deliverable absent here has no proven responsibility, never "nobody".
+   */
+  responsible?: ReadonlyMap<string, readonly string[]>;
+  /** Issues whose delivery records could not be folded; reported, never treated as absence. */
+  responsibilityUnknown?: readonly string[];
   limit: number;
   signal?: AbortSignal;
   now?: () => number;
@@ -87,6 +94,27 @@ const artifact = {
   eligibilityWitnesses,
 };
 export const rulesHash = createHash("sha256").update(JSON.stringify(artifact)).digest("hex");
+/**
+ * Codex review-state markers as raw facts. Kept local, not imported, so the lazily loaded
+ * evaluator stays one self-contained chunk; reviewevidence.ts holds the TypeScript-engine twin
+ * and the tests assert both engines agree.
+ */
+const codexAccount = "chatgpt-codex-connector";
+function codexState(
+  body: string,
+): { status?: unknown; commit_sha?: unknown; has_unresolved_findings?: unknown } | null {
+  const m = /codex-review-state:v1 (\{.*?\}) -->/.exec(body);
+  try {
+    const parsed: unknown = m ? JSON.parse(m[1]) : null;
+    const review =
+      typeof parsed === "object" && parsed !== null
+        ? (parsed as { code_review?: unknown }).code_review
+        : null;
+    return typeof review === "object" && review !== null ? review : null;
+  } catch {
+    return null;
+  }
+}
 const emptyMetric = { state: "unknown" as const, size: null, provenance: null };
 const subjectsOf = (s: Snapshot) => [...s.issues, ...s.pullRequests];
 function normalize(
@@ -167,6 +195,7 @@ function normalize(
     }
     for (const p of s.closedByPullRequestsReferences?.nodes ?? [])
       if (p.state === "OPEN") put(id, "closing", ids.get(p.url) ?? nextId++);
+    for (const agent of options.responsible?.get(s.url) ?? []) put(id, "responsible", agent);
     if (pr) {
       const rollup = pr.commits.nodes[0]?.commit.statusCheckRollup;
       for (const [k, v] of Object.entries({
@@ -191,6 +220,24 @@ function normalize(
         put(id, "check", c);
         put(c, "name", check.name ?? check.context ?? "unnamed");
         put(c, "outcome", check.conclusion ?? check.state ?? check.status ?? "UNKNOWN");
+      }
+      // Raw review evidence; the policy decides what binds to the current head (#182).
+      for (const review of pr.reviews.nodes) {
+        const r = nextId++;
+        put(id, "review", r);
+        put(r, "review-state", review.state);
+        if (review.commit?.oid) put(r, "review-commit", review.commit.oid);
+      }
+      for (const c of pr.comments.nodes) {
+        if ((c.author?.login ?? "").replace(/\[bot\]$/, "") !== codexAccount) continue;
+        const state = codexState(c.body ?? "");
+        if (!state) continue;
+        const r = nextId++;
+        put(id, "receipt", r);
+        if (typeof state.commit_sha === "string") put(r, "receipt-commit", state.commit_sha);
+        if (typeof state.status === "string") put(r, "receipt-status", state.status);
+        if (typeof state.has_unresolved_findings === "boolean")
+          put(r, "receipt-findings", state.has_unresolved_findings);
       }
       for (const thread of pr.reviewThreads.nodes) {
         const c = nextId++;
@@ -402,8 +449,14 @@ export function evaluateDatalog(
       rulesHash,
       coverage: { subjects: objects.size, datoms: facts.length },
       denials,
-      diagnostics:
-        elapsed > 2000 ? [`evaluation exceeded soft 2000ms budget (${Math.round(elapsed)}ms)`] : [],
+      diagnostics: [
+        ...(elapsed > 2000
+          ? [`evaluation exceeded soft 2000ms budget (${Math.round(elapsed)}ms)`]
+          : []),
+        ...(options.responsibilityUnknown ?? []).map(
+          (issue) => `delivery responsibility unknown for ${issue}; agent: labels only`,
+        ),
+      ],
     },
   };
 }
