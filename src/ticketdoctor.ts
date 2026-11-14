@@ -452,8 +452,13 @@ function closedDriftFindings(
   const closed = `Closed ${t.closure.replace("closed-", "")}${t.closedBy ? ` by ${t.closedBy}` : " (closing actor unreadable)"}${t.closedAt ? ` at ${t.closedAt}` : ""}`;
   const facts = [
     `${closed}; a login is reported, never a person, and closure is never evidence of delivery.`,
-    `Ticket responsible: ${t.ticketResponsible ?? "nobody"}.`,
-    ...t.members.map((m) => `${m.deliverable}: responsible ${m.responsible ?? "nobody"}.`),
+    // An unknown fold cannot name anyone: its null is unknown, never "nobody".
+    ...(t.fold === "known"
+      ? [
+          `Ticket responsible: ${t.ticketResponsible ?? "nobody"}.`,
+          ...t.members.map((m) => `${m.deliverable}: responsible ${m.responsible ?? "nobody"}.`),
+        ]
+      : ["Responsibility is unknown: the delivery records could not all be read or trusted."]),
   ];
   const inspect = cmd.deliveryDryRun(t.number, t.ticketResponsible ?? "<AGENT>");
   const unknown = (why: string[]) =>

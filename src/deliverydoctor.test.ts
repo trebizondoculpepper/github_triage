@@ -691,6 +691,9 @@ describe("closed-issue delivery drift (#192: S5, S16, S68 after closing)", () =>
     );
     const r = await closedDoctor([closedNode(46, "COMPLETED", [submit])], { 67: "open" });
     expect(kinds(r, 46)).toEqual(["closed-delivery-unknown"]);
+    const facts = finding(r, 46, "closed-delivery-unknown").plan.facts.join(" ");
+    expect(facts).toContain("Responsibility is unknown");
+    expect(facts).not.toContain("nobody");
   });
 
   it("a truncated window or comment history is incomplete, never no drift", async () => {
