@@ -33,7 +33,7 @@ import type {
   MemberObservation,
   TrustDecision,
 } from "./delivery.js";
-import type { Rest } from "./github.js";
+import type { Rest } from "./github/github.js";
 
 export const deliverablesActions = [
   "attach",

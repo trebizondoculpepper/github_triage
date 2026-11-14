@@ -13,7 +13,7 @@ import {
   ghRest,
   IssueUnavailable,
   permissionLookup,
-} from "./github.js";
+} from "./github/github.js";
 import {
   applyDependencyChange,
   dependencyChangeText,
@@ -21,7 +21,7 @@ import {
   dependencyText,
   ghRun,
   planDependencyChange,
-} from "./dependencies.js";
+} from "./github/dependencies.js";
 import { roleNames, roleRegistry } from "./roles.js";
 import { prStatusText, pullRequestStatus } from "./prstatus.js";
 import { pullRequestReviewHistory, reviewHistoryText } from "./reviewhistory.js";
@@ -39,7 +39,7 @@ import { cachedCheckForUpdate } from "./updates/updatecache.js";
 import { installedVersion, optOutEnv, legacyOptOutEnv, updateAdvisory } from "./updates/updates.js";
 import { defaultStaleHours, teamText, teamView } from "./team.js";
 import { ticketOwnership, ticketOwnershipText } from "./who.js";
-import { migrationPlanText, planMigration } from "./migration.js";
+import { migrationPlanText, planMigration } from "./github/migration.js";
 import { presentBriefing, unavailableText } from "./service.js";
 import { runBriefing } from "./catchupcli.js";
 import type { BriefingFiles } from "./catchupcli.js";
@@ -86,9 +86,9 @@ import { impactMetric } from "./metrics.js";
 import type { EstimateRuntime } from "./estimate.js";
 import { localDoctor, localDoctorExitCode, localDoctorText } from "./config/localdoctor.js";
 import type { LocalDoctorRuntime } from "./config/localdoctor.js";
-import type { GhRun } from "./dependencies.js";
-import type { Query, Rest } from "./github.js";
-import type { Snapshot } from "./types.js";
+import type { GhRun } from "./github/dependencies.js";
+import type { Query, Rest } from "./github/github.js";
+import type { Snapshot } from "./github/types.js";
 
 /** Parsed `deps` arguments: help, a migration plan, a native change, or a read. */
 export type DepsArguments =

@@ -9,7 +9,7 @@ import { readSnapshotAssessments } from "../src/assessments.js";
 import { collectLabelEstimationInput, metricStatus } from "../src/complexitylabels.js";
 import { impactMetric } from "../src/metrics.js";
 import { markerTrust } from "../src/delivery.js";
-import { ghRest, permissionLookup } from "../src/github.js";
+import { ghRest, permissionLookup } from "../src/github/github.js";
 import { briefing } from "../src/briefing.js";
 import { compactBriefing } from "../src/compact.js";
 import { evaluateDatalog } from "../src/rules/datalog/datalog.js";

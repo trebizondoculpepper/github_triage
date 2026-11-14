@@ -17,7 +17,7 @@ import {
   impactText,
   platformsOf,
 } from "./ranking.js";
-import type { Action, Issue, PullRequest, Snapshot } from "./types.js";
+import type { Action, Issue, PullRequest, Snapshot } from "./github/types.js";
 
 /** One row of a role section: the subject and why it is here, in this position. */
 export interface RoleRow {

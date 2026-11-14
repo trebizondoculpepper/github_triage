@@ -21,7 +21,7 @@ import type { TrustDecision } from "./delivery.js";
 import { scanProvenance } from "./estimate.js";
 import { complexityMetric, impactMetric } from "./metrics.js";
 import type { MetricDescriptor } from "./metrics.js";
-import type { Issue, Snapshot } from "./types.js";
+import type { Issue, Snapshot } from "./github/types.js";
 
 export type AssessmentState =
   | "current"

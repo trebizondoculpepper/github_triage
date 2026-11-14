@@ -9,10 +9,10 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { analysisRules, prChecks, workflow } from "../briefing.js";
-import { RateLimitError } from "../dependencies.js";
-import type { collect as collectFn } from "../github.js";
+import { RateLimitError } from "../github/dependencies.js";
+import type { collect as collectFn } from "../github/github.js";
 import { closingPrEvidence, pickupEligibility } from "../ranking.js";
-import type { Issue, Snapshot } from "../types.js";
+import type { Issue, Snapshot } from "../github/types.js";
 
 export const eventKinds = [
   "attention-requested",

@@ -35,7 +35,7 @@ import {
   dependencyReport,
   dependencyText,
   planDependencyChange,
-} from "./dependencies.js";
+} from "./github/dependencies.js";
 import {
   CONFIG_PATH,
   ConfigError,
@@ -89,8 +89,8 @@ import {
   type Query,
   type RepositoryPermission,
   type Rest,
-} from "./github.js";
-import { clauseFor, hedged, listWideHedge, planMigration } from "./migration.js";
+} from "./github/github.js";
+import { clauseFor, hedged, listWideHedge, planMigration } from "./github/migration.js";
 import { applyPlan, claimText, planClaim, planNeedsHuman, planRelease } from "./claims.js";
 import type { ReworkAuthority } from "./claims.js";
 import type { ClaimAccepted, ClaimPlan, ClaimRefusal } from "./claims.js";
@@ -121,8 +121,13 @@ import {
   nodeProbe,
 } from "./config/localdoctor.js";
 import { configArgumentsFor } from "./config/configcli.js";
-import { changeSubject, parseDuration, resolveWindow, snapshotChangeEvidence } from "./changes.js";
-import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
+import {
+  changeSubject,
+  parseDuration,
+  resolveWindow,
+  snapshotChangeEvidence,
+} from "./github/changes.js";
+import type { Issue, Page, PullRequest, Snapshot } from "./github/types.js";
 
 const repo = "example/project";
 const time = "2026-11-12T10:00:00.000Z";
@@ -587,7 +592,7 @@ esac
         );
         expect(JSON.parse(stdout).repository).toBe(repo);
         expect((await readFile(log, "utf8")).trim().split("\n")).toEqual(["repo", "api", "api"]);
-        for (const name of ["cli", "github", "briefing"]) {
+        for (const name of ["cli", "github/github", "briefing"]) {
           const code = await readFile(new URL(`./${name}.ts`, import.meta.url), "utf8");
           expect(code).not.toMatch(/(?:from|import)\s+["'][^"']+\.ts["']/);
         }
@@ -660,7 +665,7 @@ describe("compact briefing contract", () => {
     );
   });
   it("bounds independent requests, retains order and propagates failure", async () => {
-    const { concurrentMap } = await import("./github.js");
+    const { concurrentMap } = await import("./github/github.js");
     let active = 0;
     let peak = 0;
     const results = await concurrentMap([1, 2, 3, 4, 5, 6, 7], async (n: number) => {
@@ -4056,7 +4061,7 @@ describe("pr status: bot instructions are not review requests", () => {
 describe("transferred issue inspection (#39, doc/design/diagnostics.md)", () => {
   const rest = (status: number | null, body: any) => async () => ({ status, body });
   it("distinguishes moved, pull request, missing, forbidden and unknown", async () => {
-    const { locateIssue } = await import("./github.js");
+    const { locateIssue } = await import("./github/github.js");
     const moved = await locateIssue(
       "o/old",
       701,
@@ -4082,7 +4087,7 @@ describe("transferred issue inspection (#39, doc/design/diagnostics.md)", () => 
     expect("destination" in (await locateIssue("o/old", 5, rest(404, {})))).toBe(false);
   });
   it("reports instead of failing, and follows a transfer only with --include-transferred", async () => {
-    const { IssueUnavailable } = await import("./github.js");
+    const { IssueUnavailable } = await import("./github/github.js");
     const diagnosis = {
       repository: "o/old",
       number: 701,
@@ -4536,7 +4541,7 @@ function refused(plan: ClaimPlan): ClaimRefusal {
 }
 describe("transferred issue inspection when GraphQL fails (#39)", () => {
   it("diagnoses a failed read through REST, keeping the error when REST is not authoritative", async () => {
-    const { collect } = await import("./github.js");
+    const { collect } = await import("./github/github.js");
     const failing: Query = async () => {
       throw new Error("GitHub query failed.");
     };
@@ -6525,7 +6530,7 @@ describe("read-only MCP adapter (#25)", async () => {
   const { InMemoryTransport } = await import("@modelcontextprotocol/server");
   const { createServer, envelope, mcpArguments, redactLocalText, redactPaths } =
     await import("./mcp.js");
-  const { IssueUnavailable } = await import("./github.js");
+  const { IssueUnavailable } = await import("./github/github.js");
   type Runtime = import("./mcp.js").McpRuntime;
   type Options = import("./mcp.js").McpOptions;
 

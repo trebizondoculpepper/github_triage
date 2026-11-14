@@ -6,8 +6,8 @@
  * and each ordering mode is an ordered list of comparison keys. Unknown evidence is never
  * eligibility and never counts as definite impact.
  */
-import { nativeKnown } from "./dependencies.js";
-import type { Issue, PullRequest } from "./types.js";
+import { nativeKnown } from "./github/dependencies.js";
+import type { Issue, PullRequest } from "./github/types.js";
 
 export const pickupOrders = ["impact", "oldest", "newest"] as const;
 export type PickupOrder = (typeof pickupOrders)[number];

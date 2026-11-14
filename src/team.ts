@@ -8,7 +8,7 @@
  * releases a claim or infers abandonment.
  */
 import { owners, prChecks, workflow } from "./briefing.js";
-import type { PullRequest, Snapshot } from "./types.js";
+import type { PullRequest, Snapshot } from "./github/types.js";
 
 export interface LinkedPullRequest {
   number: number;

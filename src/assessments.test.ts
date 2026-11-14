@@ -18,12 +18,12 @@ import { TOML_CONFIG_PATH } from "./config/config.js";
 import type { ConfigFileSystem, GitRunner } from "./config/config.js";
 import { markerTrust } from "./delivery.js";
 import { provenanceComment } from "./estimate.js";
-import { collect, permissionLookup } from "./github.js";
-import type { Query, Rest } from "./github.js";
+import { collect, permissionLookup } from "./github/github.js";
+import type { Query, Rest } from "./github/github.js";
 import { complexityMetric, impactMetric } from "./metrics.js";
 import { presentBriefing, readBriefing } from "./service.js";
 import type { ComplexitySize } from "./complexity.js";
-import type { Issue, Page } from "./types.js";
+import type { Issue, Page } from "./github/types.js";
 
 const repo = "owner/name";
 const time = "2026-11-14T10:00:00.000Z";

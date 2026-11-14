@@ -1,6 +1,6 @@
 # Source layout by capability
 
-Status: accepted mapping for #335. Stage 2 progress: `updates/`, `rules/datalog/`, `mcp/` and `config/` moved. This is a documentation-only contract. It moves no files. The stage-2 move PRs and the stage-3 test split implement it.
+Status: accepted mapping for #335. Stage 2 progress: `updates/`, `rules/datalog/`, `mcp/`, `config/` and `github/` moved. This is a documentation-only contract. It moves no files. The stage-2 move PRs and the stage-3 test split implement it.
 
 ## Goal and constraints
 

@@ -2,7 +2,7 @@
 import ds from "datascript";
 import type { Datom, Value, Db } from "datascript";
 import { createHash } from "node:crypto";
-import type { Snapshot, Issue, PullRequest } from "../../types.js";
+import type { Snapshot, Issue, PullRequest } from "../../github/types.js";
 import type { SubjectAssessments } from "../../assessments.js";
 import type { RankedAction, RankedActions, BlendedRole, ActionKind, Band } from "../../blended.js";
 import type { PickupOrder } from "../../ranking.js";

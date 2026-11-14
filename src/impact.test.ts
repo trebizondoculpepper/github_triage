@@ -28,7 +28,7 @@ import type { ImpactEstimateProvenance, MetricProvenance } from "./estimate.js";
 import { impactGuidance } from "./impact.js";
 import { IMPACT_LABEL_COLOR, METRICS, complexityMetric, impactMetric } from "./metrics.js";
 import { ticketDoctor } from "./ticketdoctor.js";
-import type { Issue, Snapshot } from "./types.js";
+import type { Issue, Snapshot } from "./github/types.js";
 
 const sha = "a".repeat(40);
 const NOW = "2026-11-13T12:00:00.000Z";

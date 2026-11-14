@@ -11,21 +11,21 @@ import type { EngineSetting, DecisionEngineMetadata } from "./config/engine-sett
  * parses terminal text. Only read operations live here: mutation planning and application stay
  * in their own modules and are never reachable through this service.
  */
-import { collect, IssueUnavailable, permissionLookup } from "./github.js";
-import type { IssueDiagnosis, Rest } from "./github.js";
+import { collect, IssueUnavailable, permissionLookup } from "./github/github.js";
+import type { IssueDiagnosis, Rest } from "./github/github.js";
 import { markerTrust } from "./delivery.js";
 import { readSnapshotResponsibility } from "./responsibility.js";
 import type { TrustDecision } from "./delivery.js";
 import { impactMetric } from "./metrics.js";
-import { dependencyReport, dependencyText } from "./dependencies.js";
-import type { DependencyReport } from "./dependencies.js";
+import { dependencyReport, dependencyText } from "./github/dependencies.js";
+import type { DependencyReport } from "./github/dependencies.js";
 import { compactBriefing, compactText } from "./compact.js";
 import { briefing, textReport } from "./briefing.js";
 import type { BriefingOptions } from "./briefing.js";
 import { readSnapshotAssessments } from "./assessments.js";
 import { collectLabelEstimationInput, metricStatus } from "./complexitylabels.js";
 import type { LabelEstimationRuntime } from "./complexitylabels.js";
-import type { Snapshot } from "./types.js";
+import type { Snapshot } from "./github/types.js";
 import type { PickupOrder } from "./ranking.js";
 import { briefingProcess, resolveGuideSetting } from "./process.js";
 import type { BriefingProcess, GuideRuntime } from "./process.js";

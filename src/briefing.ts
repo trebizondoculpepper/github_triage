@@ -1,5 +1,5 @@
 /** Registered workflow rules. GitHub facts are evidence, not natural-language decisions. */
-import { dependencyDrift, dependencyFacts, nativeKnown, pickable } from "./dependencies.js";
+import { dependencyDrift, dependencyFacts, nativeKnown, pickable } from "./github/dependencies.js";
 import {
   compareImpact,
   impactLookup,
@@ -13,7 +13,7 @@ import { assessmentsText } from "./assessments.js";
 import type { SubjectAssessments } from "./assessments.js";
 import { labelEstimationReport } from "./complexitylabels.js";
 import type { LabelEstimationInput } from "./complexitylabels.js";
-import type { Action, Dependency, Issue, PullRequest, Snapshot } from "./types.js";
+import type { Action, Dependency, Issue, PullRequest, Snapshot } from "./github/types.js";
 import { headReviewed } from "./reviewevidence.js";
 
 export { urgencyBand };
