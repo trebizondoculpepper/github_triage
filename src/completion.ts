@@ -623,11 +623,17 @@ export function completionEffects(
           ? `membership was reopened after its evaluation (comment ${reopened.comment.databaseId})`
           : r.record.evaluationRevision !== revision
             ? "the required set, targets, membership or responsibility changed after its evaluation"
-            : "the issue is closed and the evaluated delivery is unchanged";
+            : fold.recordsUnknown
+              ? "the delivery record history is not fully known"
+              : "the issue is closed and the evaluated delivery is unchanged";
       return {
         comment,
         agent: r.record.agent,
-        effective: issueClosed && !reopened && r.record.evaluationRevision === revision,
+        effective:
+          issueClosed &&
+          !fold.recordsUnknown &&
+          !reopened &&
+          r.record.evaluationRevision === revision,
         why,
       };
     });
@@ -906,6 +912,16 @@ export async function planComplete(
       notes,
       retry,
     };
+
+  // This run closed the issue and someone has since reopened it: their reopen stands. Never
+  // close a second time in one run; report the divergence for a human to resolve.
+  if (resume?.closedByRun && !closed)
+    return refuse(
+      "DELIVERY_DIVERGED",
+      facts,
+      `Completion record written (comment ${ownComment ?? `opId ${resume.opId}`}) and this run closed #${number}, but it has since been reopened by another actor; it is not closed again. Find out why it was reopened: if the work is still delivered, re-run complete; otherwise leave it open and continue the work (the completion record is inert once membership reopens).`,
+      [inspect, cmd(`who ${number}`), retry],
+    );
 
   if (fold.refusal)
     return refuse(
@@ -1291,6 +1307,16 @@ export async function applyComplete(
         steps,
         unverified:
           "A fresh plan proposed another completion record after this run's record was posted; nothing more was written. Re-run to see the current state.",
+        exitCode: 2,
+      };
+    }
+    if (next.step === "close" && closedByRun) {
+      // At most one close per run, whatever a re-plan proposes.
+      return {
+        ...plan,
+        steps,
+        unverified:
+          "A fresh plan proposed a second close after this run closed the issue; nothing more was written. Re-run to see the current state.",
         exitCode: 2,
       };
     }

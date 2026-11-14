@@ -924,6 +924,42 @@ describe("complete: write order, races and retries", () => {
     expect(completionEffects(changed.records, changed.fold, true)[0]!.effective).toBe(false);
     expect(evaluationRevision(changed.fold)).not.toBe(evaluationRevision(fold));
   });
+  it("an unknown record history makes a completion not effective and keeps responsibility", async () => {
+    const { rt, state } = github(ready());
+    await complete(rt);
+    const { records, fold } = await readDeliveryFold(
+      [...state.comments, comment("<!-- github-triage:delivery v1 {oops} -->")],
+      true,
+      { repository: repo, issue: N },
+      rt.trust,
+    );
+    expect(fold.recordsUnknown).toBe(true);
+    const effects = completionEffects(records, fold, true);
+    expect(effects.map((e) => e.effective)).toEqual([false]);
+    expect(effects[0]!.why).toBe("the delivery record history is not fully known");
+    expect(effectiveResponsibility(fold, effects).ticketResponsible).toBe(fold.ticketResponsible);
+    expect(effectiveResponsibility(fold, effects).members.map((m) => m.responsible)).toEqual(
+      fold.members.map((m) => m.responsible),
+    );
+  });
+  it("a reopen after this run's close is DELIVERY_DIVERGED: never closed a second time", async () => {
+    const { rt, state } = github({
+      ...ready(),
+      onRun: (args, s) => {
+        if (args[1] === "close") {
+          s.issueState = "OPEN";
+          s.stateReason = "REOPENED";
+        }
+      },
+    });
+    const result = refused(await complete(rt), "DELIVERY_DIVERGED");
+    expect((result as CompleteResult).exitCode).toBe(2);
+    expect(result.prerequisite).toContain("Completion record written");
+    expect(result.prerequisite).toContain("reopened");
+    expect(kinds(state).filter((k) => k === "issue close")).toHaveLength(1);
+    expect(kinds(state)).toEqual(["issue comment", "issue close"]);
+    expect(state.issueState).toBe("OPEN");
+  });
   it("dry run plans record, close and label without writing", async () => {
     const { rt, state } = github(ready());
     const plan = await planComplete(repo, request(), rt);
