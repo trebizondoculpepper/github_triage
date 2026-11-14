@@ -26,7 +26,9 @@ Issue #190 asks for the `submit` transition of the delivery lifecycle: record th
 A retry completes the recorded plan only while the caller's claim label remains; once it is gone the plan is complete and labels changed by others are never restored, mirroring `release`. Intervening records refuse `DELIVERY_DIVERGED`.
 
 ## Follow-up in the same PR
+
 `claim --rework` now takes its authority from the delivery records when any trusted record exists (ticket responsibility only, `MARKER_UNVERIFIED` on unknown records, no v1 fallback) and posts a `membership open` record after the claim. `src/claims.ts` receives that decision through an injected callback, which avoids an import cycle with `src/deliverables.ts`. `release --as done --pr` prints the deprecation note that the contract's source-compatibility table requires.
 
 ## Next Steps
+
 None for #190; Ticket Doctor and read surfaces stay with #192.

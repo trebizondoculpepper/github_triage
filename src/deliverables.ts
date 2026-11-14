@@ -1001,8 +1001,11 @@ export async function planDeliverables(
     }
   }
 
+  // A rework membership request has its own idempotence check (its reason must be the rework
+  // reason), so an ordinary `membership open` record never counts as its retry.
   if (
     op !== "submit" &&
+    !(r.rework && !resume) &&
     own &&
     ownRecord &&
     (after.length === 0 ||

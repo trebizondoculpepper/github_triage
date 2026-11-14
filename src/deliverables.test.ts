@@ -1590,6 +1590,18 @@ describe("claim --rework authority and membership record (#190)", () => {
     });
     expect(state.labels).toEqual(["status:awaiting-review"]);
   });
+  it("an ordinary membership-open record is not mistaken for the rework record", async () => {
+    const { rt, state } = github({
+      labels: ["agent:alice"],
+      comments: [submitted(), post(rec("membership", { membership: "open", reason: "more PRs" }))],
+    });
+    expect((await applyDeliverables(repo, reworkMembershipRequest(N, "alice"), rt)).exitCode).toBe(
+      0,
+    );
+    expect(posted(state)[0]).toMatchObject({ op: "membership", reason: "rework claim" });
+    const submit = await planDeliverables(repo, request("submit", { reason: null }), rt);
+    expect(submit.ok).toBe(true);
+  });
   it("a legacy rework writes no delivery record; a non-responsible claimant is refused", async () => {
     const legacy = github({ labels: ["agent:alice"], comments: [v1Done()] });
     const l = await applyDeliverables(repo, reworkMembershipRequest(N, "alice"), legacy.rt);
