@@ -8,10 +8,10 @@ import { main } from "./cli.js";
 import { deliveryMarker, markerTrust, readDeliveryFold } from "./delivery.js";
 import type { Deliverable, DeliveryComment, DeliveryRecord, TrustDecision } from "./delivery.js";
 import { deliveryDoctorTicketCap, diagnoseDelivery } from "./deliverydoctor.js";
-import type { RepositoryPermission, RestAnswer } from "./github.js";
+import type { RepositoryPermission, RestAnswer } from "./github/github.js";
 import { ticketDoctor } from "./ticketdoctor.js";
 import type { TicketDoctorReport } from "./ticketdoctor.js";
-import type { Issue, Snapshot } from "./types.js";
+import type { Issue, Snapshot } from "./github/types.js";
 
 const repo = "owner/name";
 const time = "2026-11-14T10:00:00.000Z";

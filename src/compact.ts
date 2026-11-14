@@ -13,7 +13,7 @@ import { designFollowUpSections, rankActions, roleCandidates } from "./blended.j
 import type { BlendedRole, RankedActions } from "./blended.js";
 import { impactGuidance } from "./impact.js";
 import type { RoleView } from "./roles.js";
-import type { Action, Issue, PullRequest, Snapshot } from "./types.js";
+import type { Action, Issue, PullRequest, Snapshot } from "./github/types.js";
 
 export type RuleGroup =
   | "hygiene"

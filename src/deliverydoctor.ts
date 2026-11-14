@@ -16,7 +16,7 @@ import { legacyRelease, prUrl } from "./deliverables.js";
 import type { DeliverablesRuntime } from "./deliverables.js";
 import { deliverableLabel, parseDeliveryComment, readDeliveryFold } from "./delivery.js";
 import type { DeliveryComment, TrustDecision } from "./delivery.js";
-import type { Issue, Snapshot } from "./types.js";
+import type { Issue, Snapshot } from "./github/types.js";
 
 /** Open tickets whose delivery is evaluated live per Doctor run; more are reported, not read. */
 export const deliveryDoctorTicketCap = 20;

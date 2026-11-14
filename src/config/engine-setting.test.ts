@@ -7,8 +7,8 @@ import { resolveEngineSetting } from "./engine-setting.js";
 import { emptyFileSystem, fakeGit, SYNTHETIC_ROOT } from "../../scripts/benchmark-isolation.js";
 import { presentBriefing, readBriefing } from "../service.js";
 import { main } from "../cli.js";
-import { dependencyReport } from "../dependencies.js";
-import type { Issue, Snapshot } from "../types.js";
+import { dependencyReport } from "../github/dependencies.js";
+import type { Issue, Snapshot } from "../github/types.js";
 const item: Issue = {
   number: 1,
   title: "An available job",

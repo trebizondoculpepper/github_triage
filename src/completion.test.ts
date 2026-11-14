@@ -19,7 +19,7 @@ import type { CompletePlan, CompleteResult, DeliveryFacts, MemberEvidence } from
 import type { DeliverablesRuntime } from "./deliverables.js";
 import { deliveryMarker, markerTrust, parseDeliveryComment, readDeliveryFold } from "./delivery.js";
 import type { Deliverable, DeliveryComment, DeliveryRecord } from "./delivery.js";
-import type { RepositoryPermission } from "./github.js";
+import type { RepositoryPermission } from "./github/github.js";
 
 const repo = "example/project";
 const other = "example/library";

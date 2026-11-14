@@ -9,8 +9,8 @@
  * never judges value, and never changes scope, threads or reviews; the consuming agent
  * interprets the signals.
  */
-import { ghQuery, prop, selected } from "./github.js";
-import type { Query } from "./github.js";
+import { ghQuery, prop, selected } from "./github/github.js";
+import type { Query } from "./github/github.js";
 import { codexMarker, excerpt, pullRequestStatus } from "./prstatus.js";
 import type { PrStatusReport } from "./prstatus.js";
 

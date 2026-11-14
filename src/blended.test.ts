@@ -20,10 +20,10 @@ import type { ComplexitySize } from "./complexity.js";
 import { collectLabelEstimationInput } from "./complexitylabels.js";
 import { TOML_CONFIG_PATH } from "./config/config.js";
 import type { ConfigFileSystem, GitRunner } from "./config/config.js";
-import { collect } from "./github.js";
-import type { Query } from "./github.js";
+import { collect } from "./github/github.js";
+import type { Query } from "./github/github.js";
 import { presentBriefing } from "./service.js";
-import type { Issue, Page } from "./types.js";
+import type { Issue, Page } from "./github/types.js";
 
 const repo = "owner/name";
 const time = "2026-11-14T10:00:00.000Z";

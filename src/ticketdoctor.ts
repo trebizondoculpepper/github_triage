@@ -7,12 +7,12 @@
  * correction plan to every finding (src/doctorplans.ts): suggestions, never execution.
  */
 import { owners, workflow } from "./briefing.js";
-import { dependencyDrift, nativeKnown } from "./dependencies.js";
+import { dependencyDrift, nativeKnown } from "./github/dependencies.js";
 import { teamView } from "./team.js";
 import { complexityLabelFindings, metricLabelFindings } from "./complexitylabels.js";
 import { impactMetric } from "./metrics.js";
 import { closingPrEvidence } from "./ranking.js";
-import type { Issue, PullRequest, Snapshot } from "./types.js";
+import type { Issue, PullRequest, Snapshot } from "./github/types.js";
 import type { DeliveryDiagnosis, IssueDeliveryDiagnosis } from "./deliverydoctor.js";
 
 /**

@@ -5,7 +5,7 @@
  * planMigration only reads. Automatic apply is deferred (#48); changes are made with the
  * validated `deps add` / `deps remove` commands or deliberate manual edits.
  */
-import { workflow } from "./briefing.js";
+import { workflow } from "../briefing.js";
 import { collect, declaredDependencyContexts, ghQuery, prop, selected } from "./github.js";
 import type { Query } from "./github.js";
 import { nativeKnown } from "./dependencies.js";

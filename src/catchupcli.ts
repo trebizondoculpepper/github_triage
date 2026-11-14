@@ -10,10 +10,10 @@ import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { abbreviate, catchUp, catchUpJson, catchUpLimits, catchUpText } from "./catchup.js";
 import type { CatchUpReport } from "./catchup.js";
-import { parseDuration, parseSince, resolveWindow } from "./changes.js";
-import type { ComparisonWindow, WindowRequest } from "./changes.js";
-import type { collect } from "./github.js";
-import type { Snapshot } from "./types.js";
+import { parseDuration, parseSince, resolveWindow } from "./github/changes.js";
+import type { ComparisonWindow, WindowRequest } from "./github/changes.js";
+import type { collect } from "./github/github.js";
+import type { Snapshot } from "./github/types.js";
 
 /** A checkpoint path for text output: long paths keep their start and end; --json has it whole. */
 export const checkpointLabel = (path: string): string =>

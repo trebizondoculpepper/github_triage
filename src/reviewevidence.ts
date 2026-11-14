@@ -1,7 +1,7 @@
 /** Attributable review evidence shared by prstatus and both briefing engines (#182). */
-import { selected } from "./github.js";
+import { selected } from "./github/github.js";
 import type { CodexMarker } from "./prstatus.js";
-import type { PullRequest } from "./types.js";
+import type { PullRequest } from "./github/types.js";
 
 /** Codex's machine-readable review state embedded in a comment body, if any. */
 export function codexMarker(body: string | null | undefined): CodexMarker | null {

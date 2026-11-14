@@ -11,15 +11,15 @@
  */
 import { analysisRules, excerpt, owners, prChecks, workflow } from "./briefing.js";
 import type { Bounded } from "./briefing.js";
-import { inWindow, parseOperationMarker, snapshotChangeEvidence } from "./changes.js";
+import { inWindow, parseOperationMarker, snapshotChangeEvidence } from "./github/changes.js";
 import type {
   ChangeEvidence,
   ChangeSubject,
   ComparisonWindow,
   SourceCoverage,
   SubjectOperation,
-} from "./changes.js";
-import type { Action, Comment, Issue, PullRequest, Snapshot } from "./types.js";
+} from "./github/changes.js";
+import type { Action, Comment, Issue, PullRequest, Snapshot } from "./github/types.js";
 
 export const CATCHUP_SCHEMA_VERSION = 1;
 /** Presentation bounds from the contract: rows per section and the text budget. */

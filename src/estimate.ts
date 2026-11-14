@@ -40,8 +40,8 @@ import {
   settingFor,
 } from "./config/config.js";
 import type { ConfigFileSystem, GitRunner } from "./config/config.js";
-import { ghGraphqlApi, isRecord, prop } from "./github.js";
-import type { GraphqlAnswer, GraphqlApi } from "./github.js";
+import { ghGraphqlApi, isRecord, prop } from "./github/github.js";
+import type { GraphqlAnswer, GraphqlApi } from "./github/github.js";
 
 export const estimateUsage = `Usage: pdb estimate N [--metric complexity|impact] --size SIZE --rationale TEXT
          [--assumption TEXT]... [--reference REF]... [--agent NAME] [--replace SIZE]

@@ -12,11 +12,11 @@ import {
 } from "./polling.js";
 import type { Clock, Collect, DomainEvent } from "./polling.js";
 import { bindPolling, createServer, envelope, mcpArguments } from "../mcp.js";
-import { RateLimitError } from "../dependencies.js";
+import { RateLimitError } from "../github/dependencies.js";
 import { closingPrEvidence } from "../ranking.js";
-import { rateLimitFailure } from "../github.js";
+import { rateLimitFailure } from "../github/github.js";
 import type { McpRuntime } from "../mcp.js";
-import type { Issue, Page, PullRequest, Snapshot } from "../types.js";
+import type { Issue, Page, PullRequest, Snapshot } from "../github/types.js";
 
 const repo = "example/project";
 const start = Date.parse("2026-11-12T10:00:00.000Z");

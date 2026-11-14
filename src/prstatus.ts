@@ -12,8 +12,8 @@
 import { workflow } from "./briefing.js";
 import { codexMarker } from "./reviewevidence.js";
 export { codexMarker };
-import { ghQuery, prop, selected } from "./github.js";
-import type { Query } from "./github.js";
+import { ghQuery, prop, selected } from "./github/github.js";
+import type { Query } from "./github/github.js";
 
 type Login = { login: string } | null;
 type PageInfo = { hasNextPage?: boolean; hasPreviousPage?: boolean };

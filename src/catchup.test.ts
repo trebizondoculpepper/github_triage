@@ -7,11 +7,11 @@ import type { CatchUpReport } from "./catchup.js";
 import { briefingArgumentsFor, fileIdentity, sameDestination } from "./catchupcli.js";
 import { help as cliHelp, main } from "./cli.js";
 import type { Runtime } from "./cli.js";
-import { changeSubject, resolveWindow } from "./changes.js";
-import type { ChangeEvidence, EvidenceIssue, EvidencePullRequest } from "./changes.js";
-import { collect } from "./github.js";
-import type { Query } from "./github.js";
-import type { Comment, Issue, NativeNode, Page, PullRequest, Snapshot } from "./types.js";
+import { changeSubject, resolveWindow } from "./github/changes.js";
+import type { ChangeEvidence, EvidenceIssue, EvidencePullRequest } from "./github/changes.js";
+import { collect } from "./github/github.js";
+import type { Query } from "./github/github.js";
+import type { Comment, Issue, NativeNode, Page, PullRequest, Snapshot } from "./github/types.js";
 
 const repo = "example/project";
 const t0 = "2026-11-13T09:00:00.000Z";

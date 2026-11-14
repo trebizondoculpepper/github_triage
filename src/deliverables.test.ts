@@ -13,7 +13,7 @@ import {
 import type { DeliverablesPlan, DeliverablesRequest, DeliverablesRuntime } from "./deliverables.js";
 import { deliveryMarker, markerTrust, parseDeliveryComment } from "./delivery.js";
 import type { DeliveryComment, DeliveryRecord } from "./delivery.js";
-import type { RepositoryPermission } from "./github.js";
+import type { RepositoryPermission } from "./github/github.js";
 
 const repo = "example/project";
 const other = "example/library";

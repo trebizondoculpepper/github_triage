@@ -11,7 +11,7 @@
 import { owners, workflow } from "./briefing.js";
 import { defaultStaleHours, latest, pullRequestState } from "./team.js";
 import type { LinkedPullRequest } from "./team.js";
-import type { Comment, PullRequest, Snapshot } from "./types.js";
+import type { Comment, PullRequest, Snapshot } from "./github/types.js";
 
 /** Kinds of historical comment evidence. */
 export type CommentEvidenceKind = "reported-work" | "handoff" | "release" | "done";

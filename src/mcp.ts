@@ -12,13 +12,13 @@ import { parseArgs } from "node:util";
 import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod";
-import { collect, currentRepository, ghRest } from "./github.js";
-import { dependencyReport } from "./dependencies.js";
+import { collect, currentRepository, ghRest } from "./github/github.js";
+import { dependencyReport } from "./github/dependencies.js";
 import { impactGuidanceSummary } from "./impact.js";
 import { readBriefing, readDependencies } from "./service.js";
 import { catchUp, catchUpLimits, catchUpText } from "./catchup.js";
 import { collectBriefing, WindowRefusal } from "./catchupcli.js";
-import { parseDuration } from "./changes.js";
+import { parseDuration } from "./github/changes.js";
 import {
   eventsReport,
   eventsText,

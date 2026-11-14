@@ -8,9 +8,9 @@
  */
 import { createHash } from "node:crypto";
 import { workflow } from "./briefing.js";
-import { ghQuery, permissionLookup, writePermissions } from "./github.js";
-import type { PermissionLookup } from "./github.js";
-import { ghRun } from "./dependencies.js";
+import { ghQuery, permissionLookup, writePermissions } from "./github/github.js";
+import type { PermissionLookup } from "./github/github.js";
+import { ghRun } from "./github/dependencies.js";
 
 const labelColours: Record<string, string> = {
   agent: "1d76db",

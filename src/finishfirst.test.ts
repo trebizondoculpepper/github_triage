@@ -16,11 +16,11 @@ import { TOML_CONFIG_PATH } from "./config/config.js";
 import type { ConfigFileSystem, GitRunner } from "./config/config.js";
 import { deliveryMarker } from "./delivery.js";
 import type { DeliveryRecord } from "./delivery.js";
-import { collect } from "./github.js";
-import type { Query, Rest } from "./github.js";
+import { collect } from "./github/github.js";
+import type { Query, Rest } from "./github/github.js";
 import { createServer, envelope } from "./mcp.js";
 import type { McpRuntime } from "./mcp.js";
-import type { Issue, Page, PullRequest } from "./types.js";
+import type { Issue, Page, PullRequest } from "./github/types.js";
 
 const repo = "owner/finish";
 const time = "2026-11-14T10:00:00.000Z";

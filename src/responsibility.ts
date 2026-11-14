@@ -7,7 +7,7 @@
  * (truncated history, unverified, malformed, unsupported or unordered records) contributes no
  * responsibility and is reported, so unknown evidence is never read as "nobody is responsible".
  */
-import type { Snapshot } from "./types.js";
+import type { Snapshot } from "./github/types.js";
 import {
   parseDeliveryComment,
   readDeliveryFold,
