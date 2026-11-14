@@ -26,6 +26,7 @@ import { roleNames, roleRegistry } from "./roles.js";
 import { prStatusText, pullRequestStatus } from "./prstatus.js";
 import { pullRequestReviewHistory, reviewHistoryText } from "./reviewhistory.js";
 import { doctorStaleHours, ticketDoctor, ticketDoctorText } from "./ticketdoctor.js";
+import { diagnoseDelivery } from "./deliverydoctor.js";
 import {
   applyPlan,
   claimPolicy,
@@ -682,7 +683,15 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
     const impact = await metricStatus(impactMetric, snapshot.repository, runtime.estimation).catch(
       () => "unknown" as const,
     );
+    // #192: delivery records are folded with the per-run permission cache and evaluated live;
+    // offline (or without a permission boundary) they are reported unknown, never absent.
+    const rest = values.offline ? undefined : runtime.rest;
+    const delivery = await diagnoseDelivery(snapshot, {
+      trust: rest ? markerTrust(permissionLookup(snapshot.repository, rest)) : undefined,
+      live: rest ? { query: runtime.query ?? ghQuery, rest } : undefined,
+    });
     const report = ticketDoctor(snapshot, {
+      delivery,
       staleHours,
       limit,
       now: runtime.now?.() ?? new Date(),
