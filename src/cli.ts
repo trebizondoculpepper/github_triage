@@ -208,11 +208,11 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
                         disabled complexity hides it
   --stale-hours N       Flag claims with no ticket/linked-PR activity for N hours (default 48)
   --max-chars N         Compact text budget (default 10000)
-  --limit N             Next steps (default 5 compact, 10 expanded)
+  --limit N             Next steps (default 10)
   --no-update-check     Skip the npm version check (also ${optOutEnv}=1)
   version               Show the installed version and the update check result
   --guide | --no-guide  Show or hide the compact workflow guide in this briefing
-                        (default on; repository opt-out: config set ${GUIDE_CONFIG_KEY} false)
+                        (default off; repository setting: config set ${GUIDE_CONFIG_KEY} false)
   process [--json]      Full workflow guide from the registered policy; local, no GitHub
   --help                Show usage
 Workflow (generated from the registered policy):
@@ -487,7 +487,7 @@ export function argumentsFor(args: string[]) {
   return {
     ...values,
     issue: values.issue ? positive(values.issue, "--issue") : undefined,
-    limit: positive(values.limit ?? (values.full ? "10" : "5"), "--limit"),
+    limit: positive(values.limit ?? "10", "--limit"),
     maxChars: positive(values["max-chars"] ?? "10000", "--max-chars"),
     since: values.since ? new Date(values.since).toISOString() : undefined,
     order,

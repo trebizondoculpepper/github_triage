@@ -339,7 +339,7 @@ describe("designer impact queue through collect() (#246)", () => {
     expect(bySubject?.assessments?.impact.state).toBe("disabled");
     const { out } = await run(["--role", "designer"], disabled);
     expect(out).not.toContain("Impact assessment:");
-    expect(out).toContain("NEXT STEPS (2; 0 omitted)");
+    expect(out).toContain("NEXT STEPS (2)");
   });
 
   it("leaves non-designer views unchanged: no impactEstimation, legacy NEXT STEPS", async () => {

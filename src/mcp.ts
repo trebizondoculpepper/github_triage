@@ -174,12 +174,7 @@ export const briefingInput = z
     mode: z.enum(["actions", "briefing"]).default("actions"),
     since,
     last,
-    limit: z
-      .number()
-      .int()
-      .min(catchUpLimits.limit.min)
-      .max(catchUpLimits.limit.max)
-      .default(catchUpLimits.limit.default),
+    limit: z.number().int().min(catchUpLimits.limit.min).max(catchUpLimits.limit.max).optional(),
     maxChars,
     /** Registered role view (#260, doc/design/mcp.md "Role views"): same as CLI --role. */
     role: z
@@ -517,7 +512,7 @@ export function createServer(
     {
       title: "Triage briefing",
       description:
-        'Evidence-linked action briefing for a GitHub repository: what needs attention and what to pick up next. Call at the start of work or with since to catch up. mode "briefing" returns the repository-wide what-changed report for a window (since, or last such as 24h; default last 24h); it never reads or advances a checkpoint. In actions mode, role (implementer or designer) returns the blended queue for that role (rankedActions, role.next, estimation, impactEstimation) exactly as the CLI --role, and order (impact, oldest, newest) matches CLI --order.',
+        'Evidence-linked action briefing for a GitHub repository: what needs attention and what to pick up next. Call at the start of work or with since to catch up. mode "briefing" returns the repository-wide what-changed report for a window (since, or last such as 24h; default last 24h); it never reads or advances a checkpoint. Actions default to ten next steps; catch-up defaults to five rows per section. In actions mode, role (implementer or designer) returns the blended queue for that role (rankedActions, role.next, estimation, impactEstimation) exactly as the CLI --role, and order (impact, oldest, newest) matches CLI --order.',
       inputSchema: briefingInput,
       outputSchema: envelope,
       annotations,
@@ -541,7 +536,7 @@ export function createServer(
             }
             const built = catchUp(snapshot, {
               agent: selection.agent ?? undefined,
-              limit: args.limit,
+              limit: args.limit ?? (args.mode === "briefing" ? catchUpLimits.limit.default : 10),
               now,
             });
             // Completeness as the CLI judges it, before the checkpoint candidate is withheld.
@@ -558,7 +553,7 @@ export function createServer(
               repository: selection.repository,
               agent: selection.agent ?? undefined,
               since: args.since ? new Date(args.since).toISOString() : undefined,
-              limit: args.limit,
+              limit: args.limit ?? (args.mode === "briefing" ? catchUpLimits.limit.default : 10),
               maxChars: args.maxChars,
               role: args.role,
               order: args.order ?? "impact",
@@ -589,7 +584,7 @@ export function createServer(
           repository: selection.repository,
           agent: selection.agent ?? undefined,
           issue: args.number,
-          limit: 5,
+          limit: 10,
           maxChars: args.maxChars,
           signal: ctx.mcpReq.signal,
         });

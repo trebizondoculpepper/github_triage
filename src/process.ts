@@ -6,7 +6,7 @@
  * the registry of implemented commands, so wording cannot drift from behaviour. It explains;
  * it never grants authority, claims, releases or executes anything.
  *
- * The recurring briefing guide is on by default. Precedence: `--guide`/`--no-guide`, then the
+ * The recurring briefing guide is off by default. Precedence: `--guide`/`--no-guide`, then the
  * registered `processGuide` repository setting (.github/triage.toml, or the earlier .github/triage.json), then the default. An
  * unreadable or mismatched configuration never breaks a briefing: it falls back to the default
  * and reports a diagnostic. `--help` and `github-triage process` are always available, local
@@ -265,13 +265,13 @@ export async function resolveGuideSetting(
     const setting = settingFor(config, GUIDE_CONFIG_KEY);
     return setting.source === "explicit"
       ? { enabled: setting.value !== false, source: "config", diagnostics: [] }
-      : { enabled: true, source: "default", diagnostics: [] };
+      : { enabled: false, source: "default", diagnostics: [] };
   } catch (caught) {
     const error = filesystemRefusal(caught) ?? caught;
     if (!(error instanceof ConfigError)) throw error;
     const local = error.code === "not-a-repository" || error.code === "repository-mismatch";
     return {
-      enabled: true,
+      enabled: false,
       source: "default",
       diagnostics: [
         local

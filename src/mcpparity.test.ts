@@ -118,7 +118,10 @@ async function cliResult(c: Case): Promise<Record<string, unknown>> {
   return JSON.parse(out) as Record<string, unknown>;
 }
 
-async function mcpResult(c: Case): Promise<{ result: Record<string, unknown>; text: string }> {
+async function mcpResult(
+  c: Case,
+  omitLimit = false,
+): Promise<{ result: Record<string, unknown>; text: string }> {
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   await createServer({ repo }, runtimeFor(c.config)).connect(serverSide);
   const client = new Client({ name: "parity", version: "1.0.0" });
@@ -126,7 +129,12 @@ async function mcpResult(c: Case): Promise<{ result: Record<string, unknown>; te
   try {
     const raw = await client.callTool({
       name: "triage_briefing",
-      arguments: { agent: "me", role: c.role, order: c.order, limit: c.limit },
+      arguments: {
+        agent: "me",
+        role: c.role,
+        order: c.order,
+        ...(omitLimit ? {} : { limit: c.limit }),
+      },
     });
     const parsed = envelope.parse(raw.structuredContent);
     expect(parsed.status).toBe("complete");
@@ -235,4 +243,13 @@ describe("CLI and MCP report identical blended queues (#260)", () => {
     expect(plain.result?.rankedActions).toBeNull();
     expect(mcp.result.rankedActions).not.toBeNull();
   });
+});
+
+it("uses ten MCP next actions when limit is omitted, matching the CLI default", async () => {
+  const c: Case = { role: "implementer", order: "impact", limit: 10, config: null };
+  const mcp = await mcpResult(c, true),
+    cli = await cliResult(c);
+  const ranked = mcp.result.rankedActions as { items: unknown[] };
+  expect(ranked.items.length).toBe(10);
+  expect(mcp.result.rankedActions).toEqual(cli.rankedActions);
 });
