@@ -539,11 +539,13 @@ export function prDelivery(
       }),
       ...outside,
     ],
-    complete: read.complete,
+    // An issue in another repository is not read: an omission, so the result is incomplete.
+    complete: read.complete && !foreign.length,
     omissions: [
       ...read.omissions,
       ...foreign.map(
-        (f) => `${f.repository}#${f.number}: another repository; its delivery is unknown here`,
+        (f) =>
+          `${f.repository}#${f.number}: another repository; its delivery is unknown here (run pdb who ${f.number} --repo ${f.repository})`,
       ),
     ],
   };

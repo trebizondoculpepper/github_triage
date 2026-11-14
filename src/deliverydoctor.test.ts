@@ -1133,8 +1133,27 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
         .followUp,
     ).toBe("actionable");
     expect(prDeliveryLines(waiting).join("\n")).toContain(
-      "#70 open: delivery unknown; required unknown",
+      `${repo}#70 open: delivery unknown; required unknown`,
     );
+    expect(waiting.complete).toBe(true);
+    // An issue in another repository keeps its identity, is unknown (never this repository's
+    // same-numbered #68), and makes the result incomplete so pr N exits 2.
+    const crossed = prDelivery(prLink(90), facts, true, issuesRead, repo, [
+      { repository: "other/lib", number: 68 },
+    ]);
+    expect(crossed.issues.at(-1)).toMatchObject({
+      repository: "other/lib",
+      number: 68,
+      required: null,
+      delivery: "unknown",
+      closure: null,
+    });
+    expect(crossed.omissions.join(" ")).toContain("pdb who 68 --repo other/lib");
+    expect(crossed.complete).toBe(false);
+    expect(
+      withDeliveryCompleteness({ completeness: { complete: true, warnings: [] } }, crossed)
+        .completeness.complete,
+    ).toBe(false);
   });
 
   it("the briefing JSON carries the same delivery block through the CLI and the shared MCP read service", async () => {
