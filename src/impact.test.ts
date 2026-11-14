@@ -315,6 +315,34 @@ describe("impact provenance v1 (#245)", () => {
       parseMetricProvenance(impactMetric, body.replace('"size":"L"', '"size":"Q"')),
     ).toBeNull();
   });
+  it("rejects impact provenance with a missing or invalid recordedAt or required field", () => {
+    const { recordedAt: _omit, ...withoutTime } = impactRecord();
+    const malformed = [
+      withoutTime,
+      { ...impactRecord(), recordedAt: "not a date" },
+      { ...impactRecord(), recordedAt: "2026-13-45T99:99:99Z" },
+      { ...impactRecord(), recordedAt: 1_700_000_000_000 },
+      { ...impactRecord(), guidanceVersion: "1" },
+      { ...impactRecord(), estimator: 7 },
+      { ...impactRecord(), revision: undefined },
+      { ...impactRecord(), replacedInvalid: [1] },
+    ];
+    for (const value of malformed)
+      expect(
+        parseImpactProvenance(provenanceComment(value as unknown as MetricProvenance)),
+      ).toBeNull();
+    // Complexity keeps its byte-compatible behaviour: no new timestamp validation (#245).
+    expect(
+      parseLabelProvenance(
+        provenanceComment({
+          ...impactRecord(),
+          schemaVersion: 2,
+          kind: "complexity-estimate",
+          recordedAt: "not a date",
+        } as MetricProvenance),
+      ),
+    ).not.toBeNull();
+  });
 });
 
 describe("estimate --metric impact records and revises (#245)", () => {
@@ -367,6 +395,20 @@ describe("estimate --metric impact records and revises (#245)", () => {
     expect(t.json().provenance.recordedAt).toBe(NOW);
     expect(t.mutations).toEqual([]);
     expect(t.remote.comments).toHaveLength(1);
+  });
+  it("re-records instead of reporting unchanged when the stored recordedAt is invalid", async () => {
+    const t = harness({ labels: ["impact:S"], edited: "2026-11-14T00:00:00.000Z" });
+    expect(await t.call(...impactArgs, "--agent", "dana", "--json")).toBe(0);
+    expect(t.remote.comments).toHaveLength(1);
+    const c = t.remote.comments[0]!;
+    c.body = c.body.replace(
+      `"recordedAt":"${NOW.replace(/-/g, "\\u002d")}"`,
+      '"recordedAt":"garbage"',
+    );
+    expect(c.body).toContain('"recordedAt":"garbage"');
+    expect(await t.call(...impactArgs, "--agent", "dana", "--json")).toBe(0);
+    expect(t.json().status).not.toBe("unchanged");
+    expect(t.remote.comments).toHaveLength(2);
   });
   it("text output names the metric and the unassessed state", async () => {
     const t = harness();
@@ -555,7 +597,11 @@ describe("trusted-provenance reader (#245)", () => {
   const subject = (
     labels: string[],
     comments: RemoteComment[] = [],
-    over: Partial<AssessmentSubject> & { truncated?: boolean; moreComments?: boolean } = {},
+    over: Partial<AssessmentSubject> & {
+      truncated?: boolean;
+      moreComments?: boolean;
+      olderComments?: boolean;
+    } = {},
   ): AssessmentSubject => ({
     labels: {
       nodes: labels.map((name) => ({ name })),
@@ -564,7 +610,7 @@ describe("trusted-provenance reader (#245)", () => {
     lastEditedAt: over.lastEditedAt ?? null,
     comments: {
       nodes: comments.map((c, i) => ({ ...c, url: `https://c/${i + 1}` })),
-      pageInfo: { hasNextPage: !!over.moreComments },
+      pageInfo: { hasNextPage: !!over.moreComments, hasPreviousPage: !!over.olderComments },
     },
   });
   const read = (s: AssessmentSubject, enabled = true) =>
@@ -625,6 +671,26 @@ describe("trusted-provenance reader (#245)", () => {
     expect(untrusted.reasons).toContain("no recorded rationale");
     const older = await read(subject(["impact:L"], [record(), record({ size: "S" }, bot)]));
     expect(older).toMatchObject({ state: "current", provenance: "https://c/1" });
+  });
+  it("unknown when newer comments are missing, even with a visible trusted record", async () => {
+    const newerMissing = await read(subject(["impact:L"], [record()], { moreComments: true }));
+    expect(newerMissing).toMatchObject({ state: "unknown", size: null, provenance: null });
+    expect(newerMissing.reasons).toContain("newer comment history incomplete; provenance unknown");
+    // Missing older comments cannot hide a newer record: the visible trusted one stands.
+    expect(await read(subject(["impact:L"], [record()], { olderComments: true }))).toMatchObject({
+      state: "current",
+      provenance: "https://c/1",
+    });
+    expect((await read(subject(["impact:L"], [], { olderComments: true }))).state).toBe("unknown");
+  });
+  it("never reads a record with an invalid recordedAt as current", async () => {
+    const reading = await read(
+      subject(["impact:L"], [record({ recordedAt: "garbage" })], {
+        lastEditedAt: "2026-11-13T11:30:00.000Z",
+      }),
+    );
+    expect(reading).toMatchObject({ state: "current", provenance: null });
+    expect(reading.reasons).toContain("no recorded rationale");
   });
   it("disabled yields disabled and reads nothing", async () => {
     expect(await read(subject(["impact:L"]), false)).toMatchObject({

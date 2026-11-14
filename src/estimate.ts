@@ -155,6 +155,28 @@ export function provenanceComment(p: MetricProvenance): string {
 const strings = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every((item) => typeof item === "string");
 
+const nullableString = (value: unknown): boolean => value === null || typeof value === "string";
+/** An ISO-8601 instant that `Date.parse` accepts; missing or unparsable is malformed. */
+const validInstant = (value: unknown): value is string =>
+  typeof value === "string" &&
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
+  Number.isFinite(Date.parse(value));
+
+/**
+ * Impact-only required provenance fields (doc/design/impact-estimation.md "Provenance"): a
+ * malformed timestamp, guidance version or provenance field makes the whole record malformed,
+ * so freshness is never judged from unavailable evidence. Complexity keeps its existing
+ * compatibility behaviour.
+ */
+const validImpactFields = (value: Record<string, unknown>): boolean =>
+  validInstant(value.recordedAt) &&
+  typeof value.guidanceVersion === "number" &&
+  Number.isInteger(value.guidanceVersion) &&
+  value.guidanceVersion >= 0 &&
+  nullableString(value.estimator) &&
+  nullableString(value.revision) &&
+  (value.replacedInvalid === undefined || strings(value.replacedInvalid));
+
 /** Parse a v2 (label-backed) marker comment; anything malformed is ignored, never trusted. */
 export function parseLabelProvenance(body: string): LabelEstimateProvenance | null {
   return parseMetricProvenance(complexityMetric, body) as LabelEstimateProvenance | null;
@@ -183,7 +205,8 @@ export function parseMetricProvenance(d: MetricDescriptor, body: string): Metric
       typeof value.rationale === "string" &&
       strings(value.previous) &&
       strings(value.assumptions) &&
-      strings(value.references)
+      strings(value.references) &&
+      (d === complexityMetric || validImpactFields(value))
     )
       return value as unknown as MetricProvenance;
   } catch {

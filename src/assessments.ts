@@ -90,10 +90,12 @@ export async function readAssessment(
       return none("unknown", [`provenance authority unknown (${authority.why})`]);
     reasons.push(`untrusted provenance ignored (${authority.why})`);
   }
-  const incomplete = !!(
-    issue.comments.pageInfo.hasNextPage || issue.comments.pageInfo.hasPreviousPage
-  );
-  if (!record && incomplete)
+  // Newer comments are missing: a replacement or unverifiable record may be among them, so
+  // neither the selected provenance nor its state is established, even when one was found.
+  if (issue.comments.pageInfo.hasNextPage)
+    return none("unknown", [...reasons, "newer comment history incomplete; provenance unknown"]);
+  // Only older comments are missing: a found record is still the newest; none found is unknown.
+  if (!record && issue.comments.pageInfo.hasPreviousPage)
     return none("unknown", [...reasons, "comment history incomplete; provenance unknown"]);
   if (!record)
     return {
