@@ -6423,7 +6423,10 @@ describe("estimation queue and briefing visibility from size labels (#122, #152)
     let plain = "";
     await main([], async (t) => void (plain = t), runtime);
     expect(plain.indexOf("ESTIMATION (optional")).toBeGreaterThan(plain.indexOf("NEXT STEPS"));
-    expect(plain).toContain("#1 Ticket 1  (unestimated)");
+    // #247: the side-by-side line replaces the old size parenthetical in text.
+    expect(plain).toContain(
+      "#1 Ticket 1 \n  impact unassessed · complexity unassessed · unlocks at least 0",
+    );
   });
   it("reads sizes from cached labels offline, and keeps --full in sync", async () => {
     const dir = await mkdtemp(join(tmpdir(), "triage-estimation-"));

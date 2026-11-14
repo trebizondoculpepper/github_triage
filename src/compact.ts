@@ -3,6 +3,8 @@ import { isParked, owners, excerpt } from "./briefing.js";
 import type { BriefingProcess } from "./process.js";
 import type { Briefing, BriefingOptions, Bounded, CheckOutcome } from "./briefing.js";
 import { estimateLine } from "./estimation.js";
+import { assessmentsText, provenanceText } from "./assessments.js";
+import type { SubjectAssessments } from "./assessments.js";
 import type { EstimateEntry } from "./estimation.js";
 import { compareImpact, impactLookup } from "./ranking.js";
 import { roleView } from "./roles.js";
@@ -99,11 +101,17 @@ export interface CompactSubject {
   pullRequest?: CompactPullRequest;
   /** Complexity size/estimate state (#122); null when disabled or not an open issue. */
   complexity?: EstimateEntry | null;
+  /**
+   * Impact, complexity and unlock utility side by side (#247), in the paired vocabulary; null
+   * for pull requests and closed issues. The legacy `complexity` field above is unchanged.
+   */
+  assessments?: SubjectAssessments | null;
 }
 export function compactBriefing(
   snapshot: Snapshot,
   options: Pick<BriefingOptions, "limit" | "agent" | "estimate"> & { role?: string },
   expanded: Briefing,
+  assessments?: ReadonlyMap<string, SubjectAssessments>,
 ) {
   const bound = <T>(items: T[], size = 3): Bounded<T> => ({
     total: items.length,
@@ -300,6 +308,7 @@ export function compactBriefing(
       dependencies: facts.dependencies.find((dep) => dep.url === url) ?? null,
       findings: grouped.get(url) ?? [],
       complexity: estimates.get(url) ?? null,
+      assessments: assessments?.get(url) ?? null,
       detailCommand: item.headRefOid
         ? `gh pr view ${item.number} --repo ${snapshot.repository} --json headRefOid,statusCheckRollup,reviews`
         : `npm run --silent triage -- --repo ${snapshot.repository} --issue ${item.number} --json`,
@@ -373,7 +382,7 @@ export function compactText(
       }
       shown.add(url);
       rows.push(
-        `- #${s.number} ${s.title} ${s.owners.join(", ")}${s.complexity && report.estimation.status === "available" ? ` (${s.complexity.state === "unknown" ? "size unknown" : (s.complexity.size ?? "unestimated")})` : ""}${why ? `\n  Why: ${why}` : ""}\n  ${s.findings.map((f) => `[${f.uncertainty}] ${f.reason}${markerSource(f)} Next: ${f.next}`).join(" ")}\n  ${url}${s.pullRequest ? `\n  Head ${s.pullRequest.head}; ${s.pullRequest.checks.map((c) => `${c.name}:${c.outcome}`).join(", ")}; ${s.pullRequest.unresolvedThreads} unresolved threads` : ""}\n  ${s.source.chronology}\n  ${s.detailCommand}`,
+        `- #${s.number} ${s.title} ${s.owners.join(", ")}${s.assessments ? "" : s.complexity && report.estimation.status === "available" ? ` (${s.complexity.state === "unknown" ? "size unknown" : (s.complexity.size ?? "unestimated")})` : ""}${s.assessments ? `\n  ${assessmentsText(s.assessments)}` : ""}${s.assessments && report.detail?.url === url && provenanceText(s.assessments) ? `\n  ${provenanceText(s.assessments)}` : ""}${why ? `\n  Why: ${why}` : ""}\n  ${s.findings.map((f) => `[${f.uncertainty}] ${f.reason}${markerSource(f)} Next: ${f.next}`).join(" ")}\n  ${url}${s.pullRequest ? `\n  Head ${s.pullRequest.head}; ${s.pullRequest.checks.map((c) => `${c.name}:${c.outcome}`).join(", ")}; ${s.pullRequest.unresolvedThreads} unresolved threads` : ""}\n  ${s.source.chronology}\n  ${s.detailCommand}`,
       );
     }
   };

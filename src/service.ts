@@ -5,21 +5,25 @@
  * parses terminal text. Only read operations live here: mutation planning and application stay
  * in their own modules and are never reachable through this service.
  */
-import { collect, IssueUnavailable } from "./github.js";
-import type { IssueDiagnosis } from "./github.js";
+import { collect, IssueUnavailable, permissionLookup } from "./github.js";
+import type { IssueDiagnosis, Rest } from "./github.js";
+import { markerTrust } from "./delivery.js";
+import type { TrustDecision } from "./delivery.js";
+import { impactMetric } from "./metrics.js";
 import { dependencyReport, dependencyText } from "./dependencies.js";
 import type { DependencyReport } from "./dependencies.js";
 import { compactBriefing, compactText } from "./compact.js";
 import { briefing, textReport } from "./briefing.js";
 import type { BriefingOptions } from "./briefing.js";
-import { collectLabelEstimationInput } from "./complexitylabels.js";
+import { readSnapshotAssessments } from "./assessments.js";
+import { collectLabelEstimationInput, metricStatus } from "./complexitylabels.js";
 import type { LabelEstimationRuntime } from "./complexitylabels.js";
 import type { Snapshot } from "./types.js";
 import { briefingProcess, resolveGuideSetting } from "./process.js";
 import type { BriefingProcess, GuideRuntime } from "./process.js";
 
 /** Presentation options for a collected snapshot, as the CLI's briefing flags express them. */
-export interface PresentOptions extends Omit<BriefingOptions, "estimation"> {
+export interface PresentOptions extends Omit<BriefingOptions, "estimation" | "assessments"> {
   /** Expanded version-1 report instead of the compact briefing. */
   full?: boolean;
   /** Compact text budget. */
@@ -44,6 +48,8 @@ export async function presentBriefing(
   estimationRuntime?: LabelEstimationRuntime,
   now: Date = new Date(),
   redactDiagnostic?: (text: string) => string,
+  trust?: TrustDecision,
+  signal?: AbortSignal,
 ): Promise<PresentedBriefing> {
   // Sizes come from the snapshot's labels (#152); only configuration is read here.
   const collected = await collectLabelEstimationInput(snapshot.repository, estimationRuntime);
@@ -60,18 +66,27 @@ export async function presentBriefing(
         })),
       }
     : collected;
+  // One shared paired-facts read per snapshot (#247); without `trust` provenance is unknown.
+  const assessments = await readSnapshotAssessments(snapshot, {
+    complexity: collected.status,
+    impact: await metricStatus(impactMetric, snapshot.repository, estimationRuntime),
+    trust,
+    platform: options.platform,
+    signal,
+  });
   const expanded = briefing(
     snapshot,
     options.full
-      ? { ...options, estimation }
+      ? { ...options, estimation, assessments }
       : {
           ...options,
           estimation,
+          assessments,
           limit: Math.max(snapshot.issues.length + snapshot.pullRequests.length, 1) * 20,
         },
     now,
   );
-  const built = options.full ? null : compactBriefing(snapshot, options, expanded);
+  const built = options.full ? null : compactBriefing(snapshot, options, expanded, assessments);
   // Additive: the process object is only present when the front end resolved a guide setting.
   const compact = built && options.process ? { ...built, process: options.process } : built;
   const report = compact ?? expanded;
@@ -87,6 +102,11 @@ export interface ReadRuntime {
   collect: typeof collect;
   dependencyReport: typeof dependencyReport;
   estimation?: LabelEstimationRuntime;
+  /**
+   * Read-only REST boundary for provenance authors' permissions (#212, #247), cached per run.
+   * Absent means no permission requests: trusted provenance is then reported as unknown.
+   */
+  rest?: Rest;
   /** Clock for freshness ages; defaults to the system clock. */
   now?: () => Date;
   /** Rewrites locally generated diagnostics (not GitHub evidence) for remote consumers. */
@@ -154,6 +174,10 @@ export async function readBriefing(
     runtime.estimation,
     runtime.now?.(),
     runtime.redactDiagnostic,
+    runtime.rest
+      ? markerTrust(permissionLookup(request.repository, runtime.rest, request.signal))
+      : undefined,
+    request.signal,
   );
   return { kind: "report", ...presented };
 }

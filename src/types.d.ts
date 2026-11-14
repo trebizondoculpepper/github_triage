@@ -7,9 +7,13 @@ export type Page<T> = {
 export type Comment = {
   body: string;
   url: string;
-  author: { login: string } | null;
+  /** `__typename` and the edit fields (#247) are absent from older caches: authority unknown. */
+  author: { __typename?: string; login: string } | null;
   createdAt?: string;
   updatedAt?: string;
+  lastEditedAt?: string | null;
+  includesCreatedEdit?: boolean;
+  editor?: { __typename?: string; login?: string } | null;
 };
 export type Check = {
   name?: string;

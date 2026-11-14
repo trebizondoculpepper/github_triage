@@ -11,7 +11,7 @@ import { parseArgs } from "node:util";
 import { McpServer } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod";
-import { collect, currentRepository } from "./github.js";
+import { collect, currentRepository, ghRest } from "./github.js";
 import { dependencyReport } from "./dependencies.js";
 import { readBriefing, readDependencies } from "./service.js";
 import { catchUp, catchUpLimits, catchUpText } from "./catchup.js";
@@ -668,6 +668,8 @@ export const defaultRuntime = (options: McpOptions): McpRuntime => ({
   collect,
   dependencyReport,
   currentRepository,
+  // Provenance authors' permissions for the paired assessments (#247), cached per read.
+  rest: ghRest,
   env: process.env,
   // Every runtime piece that reads local state resolves against the configured project, not
   // the server's working directory: estimation settings and the workflow-guide opt-out (#71).
