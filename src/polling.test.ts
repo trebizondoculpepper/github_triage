@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 import { Client } from "@modelcontextprotocol/client";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
@@ -887,7 +888,7 @@ describe("polling startup binds only an explicit startup target (#271, #291)", (
   });
 
   it("binds the repository resolved from a configured --project", async () => {
-    const project = "/work/configured-project";
+    const project = resolve("/work/configured-project");
     const b = boundaries(async (cwd) => (cwd === project ? repo : daemonRepo));
     const w = await bindPolling(
       mcpArguments(["--project", project, "--poll"]),
@@ -910,7 +911,7 @@ describe("polling startup binds only an explicit startup target (#271, #291)", (
         failing.time.clock,
       ),
     ).rejects.toThrow("not a GitHub checkout");
-    expect(failing.resolved).toEqual(["/nowhere"]);
+    expect(failing.resolved).toEqual([resolve("/nowhere")]);
     refusedWithNothingStarted(failing);
 
     const unusable = boundaries(async () => "not a repository");
