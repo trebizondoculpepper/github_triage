@@ -148,24 +148,47 @@ export interface ManifestPage {
   ok: boolean;
   entries: ManifestEntry[];
   hasNextPage: boolean;
+  /** Connection the page came from, e.g. "issues"; pages of one source are checked together. */
+  source?: string;
+  /** The connection's totalCount as reported on this page. */
+  totalCount?: number;
+  /** Why the page failed, when it did. */
+  diagnostic?: string;
 }
 
 /**
- * Assemble pages into a manifest. A failed, cancelled or truncated read never replaces the
- * previous manifest and never advances the successful watermark.
+ * Assemble pages into a manifest. A failed, cancelled, truncated or inconsistent read never
+ * replaces the previous manifest and never advances the successful watermark. For each source,
+ * every page must report the same totalCount and the deduplicated entries must match it;
+ * otherwise pages overlapped or skipped items during the scan.
  */
 export function advanceManifest(
   previous: Manifest | undefined,
   pages: ManifestPage[],
   observedAt: number,
 ): { manifest: Manifest | undefined; advanced: boolean; diagnostic?: string } {
+  const stale = (diagnostic: string) => ({ manifest: previous, advanced: false, diagnostic });
   const failed = pages.findIndex((p) => !p.ok);
-  if (failed >= 0)
-    return { manifest: previous, advanced: false, diagnostic: `page ${failed + 1} failed` };
+  if (failed >= 0) return stale(pages[failed]!.diagnostic ?? `page ${failed + 1} failed`);
   if (pages.length === 0 || pages[pages.length - 1]!.hasNextPage)
-    return { manifest: previous, advanced: false, diagnostic: "pagination incomplete" };
+    return stale("pagination incomplete");
   const seen = new Map<string, ManifestEntry>();
-  for (const p of pages) for (const e of p.entries) seen.set(e.key, e); // dedupe overlap
+  const bySource = new Map<string, { totals: Set<number>; keys: Set<string> }>();
+  for (const p of pages) {
+    for (const e of p.entries) seen.set(e.key, e); // dedupe overlap
+    if (p.source === undefined) continue;
+    const s = bySource.get(p.source) ?? { totals: new Set(), keys: new Set() };
+    if (p.totalCount !== undefined) s.totals.add(p.totalCount);
+    for (const e of p.entries) s.keys.add(e.key);
+    bySource.set(p.source, s);
+  }
+  for (const [source, s] of bySource) {
+    if (s.totals.size > 1)
+      return stale(`${source}: totalCount changed during the scan (${[...s.totals].join(", ")})`);
+    const [total] = [...s.totals];
+    if (total !== undefined && total !== s.keys.size)
+      return stale(`${source}: collected ${s.keys.size} of totalCount ${total}`);
+  }
   const entries = [...seen.values()].sort((a, b) => a.key.localeCompare(b.key));
   return { manifest: { coverage: "complete", observedAt, entries }, advanced: true };
 }

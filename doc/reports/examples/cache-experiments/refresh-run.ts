@@ -8,7 +8,9 @@
  *     --state /path/outside/the/repo/state.json [--pr N --issue N] [--probe]
  * --state holds the previous manifest and ETags between runs; keep it out of Git. --probe adds
  * the one-off checks (GraphQL conditional headers, gh --cache, invalidation sample).
- * Every live run stops at the first rate-limit response.
+ * Live runs follow doc/design/cache-experiments.md: at most ten requests and one page per source
+ * per run, serial, stopping at the first rate-limit response. A manifest larger than one page is
+ * therefore reported as partial (stale), never complete.
  */
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -37,11 +39,6 @@ const realGh: Gh = (args) =>
       resolve({ exitCode: code, stdout, stderr });
     });
   });
-
-const arg = (name: string): string | undefined => {
-  const i = process.argv.indexOf(name);
-  return i >= 0 ? process.argv[i + 1] : undefined;
-};
 
 function fixtureReport(): void {
   const outcomes = runScenarios();
@@ -94,6 +91,7 @@ interface LiveState {
 }
 interface Measure {
   label: string;
+  source: string;
   status: number | string;
   exitCode: number;
   bytes: number;
@@ -102,28 +100,51 @@ interface Measure {
   note?: string;
 }
 
+/** Limits from the experiment contract; one shared budget for every live request. */
+export interface Limits {
+  perSource: number; // requests per source per run
+  pagesPerSource: number; // paginated pages per source per run
+  total: number; // requests per run, across all sources
+}
+export const CONTRACT_LIMITS: Limits = { perSource: 10, pagesPerSource: 1, total: 60 };
+
+/** Thrown instead of sending a request: budget exhausted or a rate limit already seen. */
+export class LiveStop extends Error {}
+
 export class Live {
   readonly log: Measure[] = [];
-  requests = { core: 0, graphql: 0 };
+  readonly requests = { core: 0, graphql: 0 };
+  readonly bySource: Record<string, number> = {};
+  stopped?: string; // set on the first rate-limit response; no further requests are sent
   constructor(
     readonly gh: Gh,
-    readonly limit: number,
+    readonly limits: Limits = CONTRACT_LIMITS,
   ) {}
+  /** Throws LiveStop when this source or the run has no budget left; checked before sending. */
+  reserve(source: string): void {
+    if (this.stopped) throw new LiveStop(this.stopped);
+    if (this.requests.core + this.requests.graphql >= this.limits.total)
+      throw new LiveStop(`run budget of ${this.limits.total} requests reached`);
+    if ((this.bySource[source] ?? 0) >= this.limits.perSource)
+      throw new LiveStop(`${source}: budget of ${this.limits.perSource} requests reached`);
+  }
   async call(
     label: string,
     args: string[],
     resource: "core" | "graphql",
+    source: string,
   ): Promise<{ out: HttpOutcome; raw: GhResult }> {
-    if (this.requests.core + this.requests.graphql >= this.limit)
-      throw new Error(`request budget of ${this.limit} reached`);
+    this.reserve(source);
     this.requests[resource]++;
+    this.bySource[source] = (this.bySource[source] ?? 0) + 1;
     const t0 = performance.now();
     const raw = await this.gh(["api", "-i", ...args]);
     const ms = Math.round(performance.now() - t0);
     const out = classifyGh(raw);
-    const header = (h: string) => new RegExp(`^${h}: (.*)$`, "im").exec(raw.stdout)?.[1]?.trim();
+    const header = (h: string) => headerOf(raw.stdout, h);
     this.log.push({
       label,
+      source,
       status: out.kind === "transport-error" ? "transport" : out.status,
       exitCode: raw.exitCode,
       bytes: Buffer.byteLength(raw.stdout),
@@ -134,10 +155,19 @@ export class Live {
           .filter(Boolean)
           .join("+") || undefined,
     });
-    if (out.kind === "http-error" && out.rateLimited) throw new Error(`rate limited at ${label}`);
+    if (out.kind === "http-error" && out.rateLimited) {
+      this.stopped = `rate limited at ${label}`;
+      throw new LiveStop(this.stopped);
+    }
     return { out, raw };
   }
 }
+
+const headerOf = (stdout: string, h: string): string | undefined =>
+  new RegExp(`^${h}: (.*)$`, "im").exec(stdout.split(/\r?\n\r?\n/, 1)[0] ?? "")?.[1]?.trim();
+
+/** True when a REST list response says more pages exist; one page then covers only part. */
+const hasNextLink = (stdout: string): boolean => /rel="next"/.test(headerOf(stdout, "link") ?? "");
 
 const MANIFEST_QUERY = (
   conn: "issues" | "pullRequests",
@@ -147,10 +177,45 @@ const MANIFEST_QUERY = (
     totalCount pageInfo{hasNextPage endCursor}
     nodes{ number state updatedAt ${conn === "pullRequests" ? "headRefOid" : ""} } } } }`;
 
+interface ConnectionPage {
+  totalCount: number;
+  pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  nodes: {
+    number: number;
+    state: ManifestEntry["state"];
+    updatedAt: string;
+    headRefOid?: string;
+  }[];
+}
+
+/** Validate a GraphQL envelope; anything unexpected is a failed page, never a crash. */
+function connectionOf(
+  body: string,
+  conn: string,
+): { page: ConnectionPage; cost?: number } | { error: string } {
+  let json: {
+    data?: { rateLimit?: { cost?: number }; repository?: Record<string, ConnectionPage> | null };
+    errors?: { message?: string }[];
+  };
+  try {
+    json = JSON.parse(body);
+  } catch {
+    return { error: "unparseable GraphQL response" };
+  }
+  if (json.errors?.length)
+    return { error: `GraphQL errors: ${json.errors.map((e) => e.message ?? "?").join("; ")}` };
+  const page = json.data?.repository?.[conn];
+  if (!page || !Array.isArray(page.nodes) || typeof page.totalCount !== "number" || !page.pageInfo)
+    return { error: `GraphQL response has no ${conn} connection` };
+  return { page, cost: json.data?.rateLimit?.cost };
+}
+
 export interface ManifestRead {
   manifest: Manifest | undefined; // the previous manifest when this read did not advance
   advanced: boolean;
   diagnostic?: string;
+  /** Entries actually observed this run, complete or not; for sampling only, never a manifest. */
+  observed: ManifestEntry[];
 }
 
 export async function readManifest(
@@ -158,53 +223,65 @@ export async function readManifest(
   owner: string,
   name: string,
   previous?: Manifest,
-  maxPages = 10,
 ): Promise<ManifestRead> {
   const pages: ManifestPage[] = [];
+  const fail = (source: string, diagnostic: string) =>
+    pages.push({ ok: false, entries: [], hasNextPage: false, source, diagnostic });
   for (const conn of ["issues", "pullRequests"] as const) {
+    const source = `manifest:${conn}`;
     let cursor: string | undefined;
-    for (let page = 0; page < maxPages; page++) {
-      const args = [
-        "graphql",
-        "-f",
-        `query=${MANIFEST_QUERY(conn)}`,
-        "-F",
-        `owner=${owner}`,
-        "-F",
-        `name=${name}`,
-      ];
-      if (cursor) args.push("-F", `cursor=${cursor}`);
-      const { out } = await live.call(`manifest ${conn} p${page + 1}`, args, "graphql");
-      if (out.kind !== "ok") {
-        pages.push({ ok: false, entries: [], hasNextPage: false });
+    for (let page = 1; ; page++) {
+      if (page > live.limits.pagesPerSource) {
+        fail(source, `${conn}: page limit of ${live.limits.pagesPerSource} reached; partial`);
         break;
       }
-      const json = JSON.parse(out.body);
-      const c = json.data.repository[conn];
-      live.log[live.log.length - 1]!.note =
-        `cost ${json.data.rateLimit.cost}, total ${c.totalCount}`;
-      const entries: ManifestEntry[] = c.nodes.map(
-        (n: {
-          number: number;
-          state: ManifestEntry["state"];
-          updatedAt: string;
-          headRefOid?: string;
-        }) => ({
+      const args = ["graphql", "-f", `query=${MANIFEST_QUERY(conn)}`];
+      args.push("-F", `owner=${owner}`, "-F", `name=${name}`);
+      if (cursor) args.push("-F", `cursor=${cursor}`);
+      let out: HttpOutcome;
+      try {
+        out = (await live.call(`manifest ${conn} p${page}`, args, "graphql", source)).out;
+      } catch (e) {
+        if (!(e instanceof LiveStop)) throw e;
+        fail(source, `${conn}: ${e.message}`);
+        break;
+      }
+      if (out.kind !== "ok") {
+        fail(
+          source,
+          `${conn}: page ${page} ${out.kind === "transport-error" ? out.message : `HTTP ${out.status}`}`,
+        );
+        break;
+      }
+      const parsed = connectionOf(out.body, conn);
+      if ("error" in parsed) {
+        fail(source, `${conn}: page ${page} ${parsed.error}`);
+        break;
+      }
+      const c = parsed.page;
+      live.log[live.log.length - 1]!.note = `cost ${parsed.cost ?? "?"}, total ${c.totalCount}`;
+      pages.push({
+        ok: true,
+        source,
+        totalCount: c.totalCount,
+        hasNextPage: c.pageInfo.hasNextPage,
+        entries: c.nodes.map((n) => ({
           key: `${conn === "issues" ? "issue" : "pr"}#${n.number}`,
           state: n.state,
           updatedAt: Date.parse(n.updatedAt),
           headOid: n.headRefOid,
-        }),
-      );
-      pages.push({ ok: true, entries, hasNextPage: c.pageInfo.hasNextPage });
+        })),
+      });
       if (!c.pageInfo.hasNextPage) break;
+      if (!c.pageInfo.endCursor) {
+        fail(source, `${conn}: hasNextPage without a cursor`);
+        break;
+      }
       cursor = c.pageInfo.endCursor;
     }
-    // A connection that did not finish within the page cap is an incomplete read.
-    if (pages[pages.length - 1]?.hasNextPage)
-      pages.push({ ok: false, entries: [], hasNextPage: false });
   }
-  return advanceManifest(previous, pages, Date.now());
+  const observed = pages.flatMap((p) => p.entries);
+  return { ...advanceManifest(previous, pages, Date.now()), observed };
 }
 
 /**
@@ -217,38 +294,88 @@ export function manifestStatus(read: ManifestRead): Record<string, unknown> {
     coverage: read.advanced ? "complete" : "stale",
     diagnostic: read.diagnostic,
     observedAt: read.manifest ? new Date(read.manifest.observedAt).toISOString() : null,
+    observedThisRun: read.observed.length,
   };
 }
 
-async function liveRun(): Promise<void> {
-  const repo = arg("--repo");
-  const statePath = arg("--state");
+/** Run one optional section; a budget or rate-limit stop is recorded, never a crash. */
+async function section(
+  skipped: Record<string, string>,
+  name: string,
+  body: () => Promise<void>,
+): Promise<void> {
+  try {
+    await body();
+  } catch (e) {
+    if (!(e instanceof LiveStop)) throw e;
+    skipped[name] = e.message;
+  }
+}
+
+export async function liveRun(
+  gh: Gh = realGh,
+  argv: string[] = process.argv,
+  limits: Limits = CONTRACT_LIMITS,
+): Promise<Record<string, unknown>> {
+  const opt = (n: string) => {
+    const i = argv.indexOf(n);
+    return i >= 0 ? argv[i + 1] : undefined;
+  };
+  const repo = opt("--repo");
+  const statePath = opt("--state");
   if (!repo || !statePath) throw new Error("--live requires --repo OWNER/NAME and --state PATH");
   const [owner, name] = repo.split("/") as [string, string];
-  const login = (await realGh(["api", "user", "--jq", ".login"])).stdout.trim();
-  const contextKey = `github.com|${repo}|${login}|refresh-v1`;
-  const prior: LiveState = existsSync(statePath)
-    ? JSON.parse(readFileSync(statePath, "utf8"))
-    : { contextKey, resources: {} };
-  const state: LiveState = prior.contextKey === contextKey ? prior : { contextKey, resources: {} };
-  const live = new Live(realGh, 60);
+  const probe = argv.includes("--probe");
+  const live = new Live(gh, limits);
   const report: Record<string, unknown> = {
     repo,
     observedAt: new Date().toISOString(),
     ghLogin: "(omitted)",
   };
-  const run = state.manifest ? "warm" : "cold";
-  report.run = run;
+  const skipped: Record<string, string> = {};
+  report.skipped = skipped;
+  const finish = () => {
+    report.requests = { ...live.requests, bySource: live.bySource, limits: live.limits };
+    if (live.stopped) report.stopped = live.stopped;
+    report.log = live.log;
+    return report;
+  };
+
+  // The login is part of the context key; it goes through the same budget.
+  let login = "";
+  await section(skipped, "auth", async () => {
+    const { out } = await live.call("auth user", ["user"], "core", "auth");
+    if (out.kind === "ok") login = (JSON.parse(out.body) as { login?: string }).login ?? "";
+  });
+  if (!login) {
+    report.error = "authenticated login unknown; no reuse without a known context";
+    return finish();
+  }
+  const contextKey = `github.com|${repo}|${login}|refresh-v1`;
+  // A corrupt or foreign state file is a cache miss with a diagnostic, never a crash or reuse.
+  let prior: Partial<LiveState> | undefined;
+  try {
+    prior = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : undefined;
+  } catch {
+    report.stateDiagnostic = "unreadable state file ignored";
+  }
+  const state: LiveState =
+    prior?.contextKey === contextKey && prior.resources && typeof prior.resources === "object"
+      ? (prior as LiveState)
+      : { contextKey, resources: {} };
+  report.run = state.manifest ? "warm" : "cold";
 
   const read = await readManifest(live, owner, name, state.manifest);
   const manifest = read.manifest;
   report.manifest = manifestStatus(read);
   if (read.advanced && manifest && state.manifest)
     report.diff = diffManifest(state.manifest, manifest);
-  report.manifestEntries = manifest?.entries.length;
+  if (read.advanced && manifest) state.manifest = manifest;
+  // Candidate subjects come from what was actually observed, complete or not.
+  const observed = read.observed.length ? read.observed : (manifest?.entries ?? []);
 
-  const pr = arg("--pr");
-  const issue = arg("--issue");
+  const pr = opt("--pr");
+  const issue = opt("--issue");
   const base = `repos/${repo}`;
   const resources: Record<string, string> = {};
   if (issue) {
@@ -263,113 +390,149 @@ async function liveRun(): Promise<void> {
     resources["review-comments"] = `${base}/pulls/${pr}/comments?per_page=100`;
   }
   resources["issue-list"] = `${base}/issues?state=all&sort=updated&per_page=100`;
-  const head = manifest?.entries.find((e) => e.key === `pr#${pr}`)?.headOid;
+  const head = observed.find((e) => e.key === `pr#${pr}`)?.headOid;
   if (head) resources["check-runs"] = `${base}/commits/${head}/check-runs?per_page=100`;
 
   const outcomes: Record<string, string> = {};
-  for (const [label, path] of Object.entries(resources)) {
-    const stored = state.resources[path];
-    const args = stored ? ["-H", `If-None-Match: ${stored.etag}`, path] : [path];
-    const { out } = await live.call(`${stored ? "conditional" : "full"} ${label}`, args, "core");
-    const r = applyConditional(stored, contextKey, stored?.etag, out);
-    outcomes[label] = r.kind === "miss" ? `miss: ${r.reason}` : r.kind;
-    if (r.kind === "fresh" && r.etag)
-      state.resources[path] = { contextKey, etag: r.etag, body: r.body };
-    if (out.kind === "ok" && out.lastModified && process.argv.includes("--probe")) {
-      const lm = await live.call(
-        `if-modified-since ${label}`,
-        ["-H", `If-Modified-Since: ${out.lastModified}`, path],
-        "core",
-      );
-      outcomes[`${label} (If-Modified-Since)`] = lm.out.kind;
-    }
-  }
   report.conditional = outcomes;
-
-  if (process.argv.includes("--probe")) {
-    // GraphQL: does it return validators, and does it honour them?
-    const q = ["graphql", "-f", "query={viewer{login}}"];
-    const g1 = await live.call("graphql validators", q, "graphql");
-    const etag = /^etag: (.*)$/im.exec(g1.raw.stdout)?.[1]?.trim();
-    const lastMod = /^last-modified: (.*)$/im.exec(g1.raw.stdout)?.[1]?.trim();
-    const g2 = await live.call(
-      "graphql If-None-Match",
-      [
-        "-H",
-        `If-None-Match: ${etag ?? 'W/"probe"'}`,
-        "-H",
-        `If-Modified-Since: ${lastMod ?? new Date().toUTCString()}`,
-        ...q,
-      ],
-      "graphql",
-    );
-    report.graphql = {
-      etag: etag ?? null,
-      lastModified: lastMod ?? null,
-      conditionalStatus: g2.out.kind === "transport-error" ? "transport" : g2.out.status,
-    };
-
-    // gh --cache: TTL reuse, no revalidation. Compare Date headers.
-    const cached: string[] = [];
-    for (let i = 0; i < 2; i++) {
-      const r = await live.call(
-        `gh --cache 1h #${i + 1}`,
-        ["--cache", "1h", `${base}/issues/${issue ?? 1}`],
+  const lastModified: Record<string, string> = {};
+  await section(skipped, "conditional", async () => {
+    for (const [label, path] of Object.entries(resources)) {
+      const stored = state.resources[path];
+      const args = stored ? ["-H", `If-None-Match: ${stored.etag}`, path] : [path];
+      const call = await live.call(
+        `${stored ? "conditional" : "full"} ${label}`,
+        args,
         "core",
+        "rest",
       );
-      cached.push(/^date: (.*)$/im.exec(r.raw.stdout)?.[1]?.trim() ?? "");
+      const r = applyConditional(stored, contextKey, stored?.etag, call.out);
+      // One page only: a resource with more pages is partial evidence, whatever the validator says.
+      const partial =
+        call.out.kind === "ok" && hasNextLink(call.raw.stdout) ? " (first page only)" : "";
+      outcomes[label] = (r.kind === "miss" ? `miss: ${r.reason}` : r.kind) + partial;
+      if (r.kind === "fresh" && r.etag)
+        state.resources[path] = { contextKey, etag: r.etag, body: r.body };
+      if (call.out.kind === "ok" && call.out.lastModified)
+        lastModified[label] = call.out.lastModified;
     }
-    report.ghCache = { dates: cached, servedFromDisk: cached[0] === cached[1] };
+  });
+
+  if (probe) {
+    await section(skipped, "if-modified-since", async () => {
+      for (const [label, lm] of Object.entries(lastModified)) {
+        const { out } = await live.call(
+          `if-modified-since ${label}`,
+          ["-H", `If-Modified-Since: ${lm}`, resources[label]!],
+          "core",
+          "probe:if-modified-since",
+        );
+        outcomes[`${label} (If-Modified-Since)`] = out.kind;
+      }
+    });
+
+    await section(skipped, "graphql", async () => {
+      // Does GraphQL return validators, and does it honour them?
+      const q = ["graphql", "-f", "query={viewer{login}}"];
+      const g1 = await live.call("graphql validators", q, "graphql", "probe:graphql");
+      const etag = headerOf(g1.raw.stdout, "etag");
+      const lastMod = headerOf(g1.raw.stdout, "last-modified");
+      const g2 = await live.call(
+        "graphql If-None-Match",
+        [
+          "-H",
+          `If-None-Match: ${etag ?? 'W/"probe"'}`,
+          "-H",
+          `If-Modified-Since: ${lastMod ?? new Date().toUTCString()}`,
+          ...q,
+        ],
+        "graphql",
+        "probe:graphql",
+      );
+      report.graphql = {
+        etag: etag ?? null,
+        lastModified: lastMod ?? null,
+        conditionalStatus: g2.out.kind === "transport-error" ? "transport" : g2.out.status,
+      };
+    });
+
+    await section(skipped, "gh-cache", async () => {
+      // gh --cache: TTL reuse, no revalidation. Compare Date headers. Both calls are budgeted,
+      // although the second is expected to be served from disk.
+      const dates: string[] = [];
+      for (let i = 0; i < 2; i++) {
+        const r = await live.call(
+          `gh --cache 1h #${i + 1}`,
+          ["--cache", "1h", `${base}/issues/${issue ?? 1}`],
+          "core",
+          "probe:gh-cache",
+        );
+        dates.push(headerOf(r.raw.stdout, "date") ?? "");
+      }
+      report.ghCache = { dates, servedFromDisk: dates[0] === dates[1] };
+    });
 
     // Invalidation sample: events timestamped after their subject's updatedAt.
-    const recent = (manifest?.entries ?? [])
+    const recent = observed
       .slice()
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .slice(0, 8);
     const late: Record<string, number> = {};
     const seen: Record<string, number> = {};
-    for (const e of recent) {
-      const n = e.key.split("#")[1];
-      const { out } = await live.call(
-        `timeline ${e.key}`,
-        [`${base}/issues/${n}/timeline?per_page=100`],
-        "core",
-      );
-      if (out.kind !== "ok") continue;
-      for (const ev of JSON.parse(out.body) as {
-        event: string;
-        created_at?: string;
-        submitted_at?: string;
-        updated_at?: string;
-      }[]) {
-        const t = Date.parse(ev.updated_at ?? ev.submitted_at ?? ev.created_at ?? "");
-        if (Number.isNaN(t)) continue;
-        seen[ev.event] = (seen[ev.event] ?? 0) + 1;
-        if (t > e.updatedAt + 1000) late[ev.event] = (late[ev.event] ?? 0) + 1;
+    const truncated: string[] = [];
+    const sampled: string[] = [];
+    report.invalidation = {
+      subjects: sampled,
+      seen,
+      afterUpdatedAt: late,
+      firstPageOnly: truncated,
+    };
+    await section(skipped, "invalidation", async () => {
+      for (const e of recent) {
+        const n = e.key.split("#")[1];
+        const { out, raw } = await live.call(
+          `timeline ${e.key}`,
+          [`${base}/issues/${n}/timeline?per_page=100`],
+          "core",
+          "probe:invalidation",
+        );
+        if (out.kind !== "ok") continue;
+        sampled.push(e.key);
+        if (hasNextLink(raw.stdout)) truncated.push(e.key);
+        for (const ev of JSON.parse(out.body) as {
+          event: string;
+          created_at?: string;
+          submitted_at?: string;
+          updated_at?: string;
+        }[]) {
+          const t = Date.parse(ev.updated_at ?? ev.submitted_at ?? ev.created_at ?? "");
+          if (Number.isNaN(t)) continue;
+          seen[ev.event] = (seen[ev.event] ?? 0) + 1;
+          if (t > e.updatedAt + 1000) late[ev.event] = (late[ev.event] ?? 0) + 1;
+        }
+      }
+    });
+    const checkRuns = resources["check-runs"] && state.resources[resources["check-runs"]];
+    const prUpdated = observed.find((e) => e.key === `pr#${pr}`)?.updatedAt;
+    if (checkRuns && prUpdated !== undefined) {
+      const body = JSON.parse(checkRuns.body) as {
+        total_count: number;
+        check_runs: { completed_at: string | null }[];
+      };
+      if (body.total_count > body.check_runs.length) truncated.push(`pr#${pr} check runs`);
+      for (const run of body.check_runs) {
+        seen["check_run_completed"] = (seen["check_run_completed"] ?? 0) + 1;
+        if (run.completed_at && Date.parse(run.completed_at) > prUpdated + 1000)
+          late["check_run_completed"] = (late["check_run_completed"] ?? 0) + 1;
       }
     }
-    if (head && pr) {
-      const prUpdated = manifest?.entries.find((e) => e.key === `pr#${pr}`)?.updatedAt ?? 0;
-      const body = state.resources[resources["check-runs"]!]?.body;
-      if (body)
-        for (const run of (JSON.parse(body) as { check_runs: { completed_at: string | null }[] })
-          .check_runs) {
-          seen["check_run_completed"] = (seen["check_run_completed"] ?? 0) + 1;
-          if (run.completed_at && Date.parse(run.completed_at) > prUpdated + 1000)
-            late["check_run_completed"] = (late["check_run_completed"] ?? 0) + 1;
-        }
-    }
-    report.invalidation = { subjects: recent.map((e) => e.key), seen, afterUpdatedAt: late };
   }
 
-  if (manifest) state.manifest = manifest;
   writeFileSync(statePath, JSON.stringify(state));
-  report.requests = live.requests;
-  report.log = live.log;
-  console.log(JSON.stringify(report, null, 2));
+  return finish();
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
-  if (process.argv.includes("--live")) await liveRun();
+  if (process.argv.includes("--live")) console.log(JSON.stringify(await liveRun(), null, 2));
   else fixtureReport();
 }

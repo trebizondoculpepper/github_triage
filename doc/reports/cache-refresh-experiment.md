@@ -34,8 +34,8 @@ All under `doc/reports/examples/cache-experiments/`, following the convention of
 
 - `refresh.ts` — the experiment model: per-fact validator table (`VALIDATOR`, from #198), manifest construction, `diffManifest` (absence from a partial manifest is `absentUnknown`, never deletion), `advanceManifest` (a failed, cancelled or truncated page never advances the manifest; overlapping pages deduplicate by stable identity), `classifyGh` (classifies by the HTTP status line, so a 304 with `gh` exit 1 is "not modified" and a missing status line is a transport error), `applyConditional` (a 304 reuses only the exact stored payload for the same context key and validator; anything else is a miss, never empty evidence), and a synthetic fixture simulator comparing five strategies across 18 scenarios with expected misses written into the scenario table. The manifest strategies reconcile with a full re-read (counted in `reconciliations` and in the request and byte totals) when the last full read is 30 or more fixture minutes old or the manifest has a coverage gap; facts are only counted as validated inside that window.
 - `refresh.test.ts` — 27 tests: one per scenario (expected versus observed misses for every strategy) plus manifest, watermark, reconciliation, rate-limit and 304 handling.
-- `refresh-run.test.ts` — 3 tests with an injected `gh`: a failed manifest page or a page-cap hit is reported as a stale, unadvanced read with its diagnostic and original observation time, never as an unchanged refresh.
-- `refresh-run.ts` — the runner. Fixture mode (default) prints a `schemaVersion: 1, kind: cache-experiment` JSON report with no network. `--live` is explicit, requires `--repo` and `--state` (a file outside the repository holding the previous manifest and ETags), is serial, has a hard budget of 60 requests per run, and stops at the first rate-limit response, primary or secondary (HTTP 429, or 403 with zero primary remaining, a `Retry-After` header or a secondary-rate-limit message). A warm run whose manifest read fails or hits the page cap reports `manifest.coverage: "stale"` with the diagnostic and the previous observation time, and emits no diff. It never issues a write.
+- `refresh-run.test.ts` — 12 tests with an injected `gh`: a failed page, a GraphQL 200 with `errors` and a null repository or connection, the one-page limit, overlapping pages that fall short of `totalCount`, and a `totalCount` that changes mid-scan all produce a stale, unadvanced read with its diagnostic and original observation time, never an unchanged refresh; a whole probe run stays within the per-source, page and total limits; an exhausted total stops every later section; nothing is sent after a secondary rate limit; a corrupt state file is a miss; an unknown login means no reuse.
+- `refresh-run.ts` — the runner. Fixture mode (default) prints a `schemaVersion: 1, kind: cache-experiment` JSON report with no network. `--live` is explicit, requires `--repo` and `--state` (a file outside the repository holding the previous manifest and ETags) and is serial. Every live request, including the login lookup, goes through one shared budget that enforces the contract's limits together: at most ten requests and one page per source per run, and 60 requests per run in total, checked before sending. Sources are `auth`, `manifest:issues`, `manifest:pullRequests`, `rest`, `probe:if-modified-since`, `probe:graphql`, `probe:gh-cache` and `probe:invalidation`; a source that runs out is listed under `skipped`. It stops at the first rate-limit response, primary or secondary (HTTP 429, or 403 with zero primary remaining, a `Retry-After` header or a secondary-rate-limit message), and sends nothing after it. A manifest is complete only when every page succeeded, the last page has no successor, each connection's pages agree on `totalCount` and the deduplicated entries match it. Otherwise the run reports `manifest.coverage: "stale"` with the diagnostic and the previous observation time, keeps the previous manifest and emits no diff. REST lists and timelines with a `rel="next"` link are marked first-page-only, and the invalidation sample lists the subjects it only saw in part. It never issues a write.
 
 ## Method
 
@@ -45,7 +45,7 @@ Live runs were read-only against `trebizondoculpepper/presidential-daily-briefin
 - **Warm runs**: the same manifest, diffed against the stored one, and `If-None-Match` revalidation of the same 9 resources with the stored ETags.
 - **Changed run**: no write is allowed, so a change can only be observed if the repository changes on its own between runs. See [Live measurements](#live-measurements) for what happened. The changed cases are otherwise covered by the fixtures.
 
-Request volume actually used, including the ad-hoc checks while building the runner: about 54 core requests (29 of them 304s, which did not count against the limit) and about 20 GraphQL points. Both are far below the 200/200 ceiling set for this ticket.
+Request volume actually used, including the ad-hoc checks while building the runner: about 54 core requests (29 of them 304s, which did not count against the limit) and about 20 GraphQL points. Both are far below the 200/200 ceiling set for this ticket. **Contract deviation:** these runs predate the runner's enforcement of the contract's live bound of one page per source per run. Each run read two manifest pages per connection, and the cold run sent 11 REST requests (9 resources plus 2 `If-Modified-Since`) without separating them into sources. The figures are reported as measured; the runner now enforces the bound. Because this repository has more than 100 issues and more than 100 PRs, a contract-bounded live run can only produce a partial manifest here and reports it as stale. Measuring a complete live manifest again would need a contract change.
 
 ## Live measurements
 
@@ -147,6 +147,7 @@ These are different mechanisms and the experiment keeps them apart. **TTL reuse*
 
 ## Limitations
 
+- The complete-manifest live figures (4 GraphQL requests) came from runs that exceeded the contract's one-page-per-source bound; see [Method](#method). The current runner cannot repeat them on this repository without a contract change.
 - One small repository (375 subjects, one open PR), one run per figure, one network. Latency varies; treat times as indicative.
 - No live changed case was captured, because no writes are allowed and the repository did not change between runs. Changed-subject costs come from the fixtures.
 - The fixture simulator's costs are model units. Its missed-change counts depend on the validator table, which encodes #198's evidence and worst-case assumptions for unobserved events.
@@ -168,10 +169,10 @@ npx tsc -p doc/reports/examples
 # Live, read-only, bounded. Keep the state file outside the repository.
 STATE="$(mktemp -d)/refresh-state.json"
 REPO=trebizondoculpepper/presidential-daily-briefing
-# cold run with probes (about 21 core requests, 6 GraphQL points)
+# cold run with probes (at most 10 requests and 1 page per source, 60 in total; the manifest is partial here)
 npx tsx doc/reports/examples/cache-experiments/refresh-run.ts --live --repo "$REPO" --state "$STATE" --pr 365 --issue 202 --probe
-# warm run (9 core requests, mostly 304, plus 4 GraphQL points); repeat later for a changed case
+# warm run (up to 10 core requests, mostly 304, plus 2 GraphQL points); repeat later for a changed case
 npx tsx doc/reports/examples/cache-experiments/refresh-run.ts --live --repo "$REPO" --state "$STATE" --pr 365 --issue 202
 ```
 
-Replace `--pr` with a currently open PR. Each live run also calls `gh api user` once to build the context key; the login is not printed.
+Replace `--pr` with a currently open PR. Each live run also reads `user` once, inside the budget, to build the context key; the login is not printed.
