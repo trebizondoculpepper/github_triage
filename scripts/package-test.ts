@@ -13,7 +13,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { resolveEngineSetting } from "../src/engine-setting.js";
+import { resolveEngineSetting, defaultEngine } from "../src/engine-setting.js";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
@@ -117,7 +117,7 @@ async function blendedParity(
   order: string,
   env: NodeJS.ProcessEnv,
   cwd: string,
-  expectedEngine = "typescript",
+  expectedEngine = defaultEngine(),
 ): Promise<string[]> {
   const cliRun = await run(
     windows ? `"${cliBin}"` : cliBin,
@@ -406,7 +406,7 @@ try {
           );
         console.log(`ok   installed CLI = MCP ${role} (${order}): ${kinds.join(", ")}`);
       }
-    await run(bin, ["config", "set", "briefing.engine", "datalog"], { cwd: checkout, env });
+    await run(bin, ["config", "set", "briefing.engine", "typescript"], { cwd: checkout, env });
     for (const role of ["implementer", "designer"])
       for (const order of ["impact", "oldest"]) {
         const kinds = await blendedParity(
@@ -417,9 +417,11 @@ try {
           order,
           env,
           checkout,
-          "datalog",
+          "typescript",
         );
-        console.log(`ok   installed Datalog CLI = MCP ${role} (${order}): ${kinds.join(", ")}`);
+        console.log(
+          `ok   installed TypeScript rollback CLI = MCP ${role} (${order}): ${kinds.join(", ")}`,
+        );
       }
   }
   // Optional read-only live smoke (#260): GITHUB_TRIAGE_PACKAGE_LIVE_REPO=owner/name uses the

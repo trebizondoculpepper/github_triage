@@ -229,7 +229,7 @@ describe("CLI and MCP report identical blended queues (#260)", () => {
     }
   });
 
-  it("leaves the MCP briefing unchanged without a role", async () => {
+  it("uses the same implementer queue by default when no role is supplied", async () => {
     const mcp = await mcpResult({ role: "implementer", order: "impact", limit: 5, config: null });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
     await createServer({ repo }, runtimeFor(null)).connect(serverSide);
@@ -240,7 +240,11 @@ describe("CLI and MCP report identical blended queues (#260)", () => {
         .structuredContent,
     );
     await client.close();
-    expect(plain.result?.rankedActions).toBeNull();
+    expect(plain.result?.rankedActions).toEqual(mcp.result.rankedActions);
+    expect(plain.result?.decisionEngine).toMatchObject({
+      used: "datalog",
+      role: { used: "implementer", source: "default" },
+    });
     expect(mcp.result.rankedActions).not.toBeNull();
   });
 });
