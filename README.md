@@ -125,6 +125,8 @@ Generic stdio configuration (install globally first; nothing registers a host au
 
 `--repo owner/name` and `--agent NAME` set defaults; a tool's own `repo`/`agent` arguments win for that call. Without an agent, the server reads (never writes) the persisted `name` of an `[agents.KEY]` entry in the project's root `agent-inbox.toml`, chosen by `--entry KEY`, else `--harness NAME`, else the MCP client (Ori's `ori-SERVER` client selects `ori.SERVER`), else the harness detected from the environment. `selection.identitySource` reports which of `tool`, `startup`, `entry`, `harness`, `client`, `environment` decided; when none does, the read is unfocused (`unresolved`) and `selection.identityDiagnostic` says why and how to fix it. Client roots remain follow-up work (#25); no external identity service is required.
 
+Claude Code (temporary workaround for #266): until bounded MCP results ship, the default `triage_briefing`, `triage_issue` and `triage_dependencies` results can exceed Claude Code's default MCP output limit of 25,000 tokens ([Claude Code documentation](https://code.claude.com/docs/en/mcp#mcp-output-limits-and-warnings), accessed 14 November 2026). Start Claude Code with a larger limit, for example `MAX_MCP_OUTPUT_TOKENS=60000 claude`. This is interim only; the fix is the bounded response contract in [doc/design/mcp-bounded-results.md](doc/design/mcp-bounded-results.md).
+
 ## Repository settings and sizing
 
 Use the configuration commands from the target checkout instead of editing configuration files directly:
