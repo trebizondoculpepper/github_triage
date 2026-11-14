@@ -87,13 +87,22 @@ export async function releaseTogether(
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const ready = await Promise.allSettled(workers.map((w) => w.waitFor("ready")));
   const failed = ready.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+  const stopAll = async () => {
+    for (const w of workers)
+      if (w.child.exitCode === null && w.child.signalCode === null) w.child.kill();
+    await Promise.all(workers.map((w) => w.done));
+  };
   if (failed.length === 0) {
-    writeFileSync(go, "");
+    try {
+      writeFileSync(go, "");
+    } catch (e) {
+      // The go signal could not be given (ENOSPC, EACCES...): leave no worker running.
+      await stopAll();
+      throw e;
+    }
     return { ok: true };
   }
-  for (const w of workers)
-    if (w.child.exitCode === null && w.child.signalCode === null) w.child.kill();
-  await Promise.all(workers.map((w) => w.done));
+  await stopAll();
   return {
     ok: false,
     error: failed

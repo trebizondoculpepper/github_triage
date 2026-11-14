@@ -422,6 +422,17 @@ export function sourceOf(subject: string): string | undefined {
   return undefined;
 }
 
+/** The full selection of a source (every subject in every state); it includes every scope. */
+export const FULL_SCOPE = "all states";
+
+/**
+ * Whether an observation made with scope `observed` covers everything stored under `stored`.
+ * Scopes are opaque strings: only an identical scope or the full scope counts as including.
+ */
+export function scopeIncludes(observed: string, stored: string): boolean {
+  return observed === stored || observed === FULL_SCOPE;
+}
+
 export function applyObservation(
   previous: Snapshot | undefined,
   key: ContextKey & { ok: true },
@@ -431,10 +442,16 @@ export function applyObservation(
   expiredBefore: string[] = [],
 ): { snapshot: Snapshot; omissions: Omissions } {
   const omissions: Omissions = { prunedUnseen: [], evicted: [], expired: [...expiredBefore] };
-  // Per-source completeness: a complete issue list says nothing about pull requests.
+  // Per-source completeness: a complete issue list says nothing about pull requests, and a
+  // complete list of a narrower selection says nothing about subjects outside it. Removal is
+  // allowed only when the observed scope matches or includes the stored scope for the source.
   const sourceComplete = (subject: string) => {
     const src = sourceOf(subject);
-    return src !== undefined && obs.sourceCoverage[src]?.status === "complete";
+    if (src === undefined) return false;
+    const seen = obs.sourceCoverage[src];
+    if (seen?.status !== "complete") return false;
+    const stored = previous?.sourceCoverage[src];
+    return stored === undefined || scopeIncludes(seen.scope, stored.scope);
   };
   const listed = new Set(obs.manifest.map((m) => m.subject));
   const merged = new Map<string, EvidenceRecord>();

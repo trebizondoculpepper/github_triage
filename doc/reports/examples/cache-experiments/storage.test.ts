@@ -18,6 +18,7 @@ import {
   loadSnapshot,
   realFs,
   removeExperimentRoot,
+  scopeIncludes,
   sourceOf,
   storeSnapshot,
   syntheticObservation,
@@ -1018,4 +1019,53 @@ describe("per-source completeness", () => {
     const next = applyObservation(prev, k, syntheticObservation(1, at()), T0);
     expect(next.snapshot.records.map((r) => r.subject)).toContain("discussion:7");
   });
+});
+
+describe("selection scope and barrier failures", () => {
+  const scoped = (n: number, scope: string) => {
+    const o = syntheticObservation(n, at());
+    for (const c of Object.values(o.sourceCoverage)) c.scope = scope;
+    return o;
+  };
+
+  it("a complete but narrower scope does not prune records outside it", () => {
+    const k = key();
+    const prev = applyObservation(undefined, k, syntheticObservation(9, at()), T0).snapshot;
+    const narrow = applyObservation(prev, k, scoped(1, "open only"), T0);
+    expect(narrow.snapshot.records).toHaveLength(9);
+    expect(narrow.omissions.prunedUnseen).toEqual([]);
+    // The same complete scope, or the full scope, does prune.
+    const same = applyObservation(prev, k, syntheticObservation(1, at()), T0);
+    expect(same.omissions.prunedUnseen).toHaveLength(8);
+    const prevNarrow = applyObservation(undefined, k, scoped(9, "open only"), T0).snapshot;
+    expect(
+      applyObservation(prevNarrow, k, scoped(1, "open only"), T0).omissions.prunedUnseen,
+    ).toHaveLength(8);
+    expect(
+      applyObservation(prevNarrow, k, syntheticObservation(1, at()), T0).omissions.prunedUnseen,
+    ).toHaveLength(8);
+  });
+
+  it("a narrower scope does not clear evictions either", () => {
+    const k = key();
+    const capped = applyObservation(undefined, k, syntheticObservation(300, at()), T0).snapshot;
+    const next = applyObservation(capped, k, scoped(1, "open only"), T0).snapshot;
+    expect(next.omissions.evicted).toEqual(capped.omissions.evicted);
+    expect(scopeIncludes("all states", "open only")).toBe(true);
+    expect(scopeIncludes("open only", "all states")).toBe(false);
+  });
+
+  it("stops and joins every worker if the go file cannot be created", async () => {
+    const root = newRoot();
+    const go = join(root, "missing-dir", "go"); // parent does not exist: writeFileSync throws
+    const a = spawnWorker(["write", root, JSON.stringify(ctx), "a", "5", "0", go]);
+    const b = spawnWorker(["write", root, JSON.stringify(ctx), "b", "5", "100", go]);
+    await expect(releaseTogether([a, b], go)).rejects.toMatchObject({ code: "ENOENT" });
+    for (const w of [a, b])
+      expect(w.child.exitCode !== null || w.child.signalCode !== null).toBe(true);
+    const [da, db] = await Promise.all([a.done, b.done]);
+    expect(da.result).toBeUndefined();
+    expect(db.result).toBeUndefined();
+    expect(existsSync(file(root))).toBe(false);
+  }, 30_000);
 });
