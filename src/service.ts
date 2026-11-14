@@ -69,8 +69,9 @@ export async function presentBriefing(
   redactDiagnostic?: (text: string) => string,
   trust?: TrustDecision,
   signal?: AbortSignal,
-  loadEngine: () => Promise<Pick<typeof import("./rules/datalog/datalog.js"), "evaluateDatalog">> = () =>
-    import("./rules/datalog/datalog.js"),
+  loadEngine: () => Promise<
+    Pick<typeof import("./rules/datalog/datalog.js"), "evaluateDatalog">
+  > = () => import("./rules/datalog/datalog.js"),
   /** #192: live PR and compare reads for delivery; absent (offline) means not evaluated. */
   live?: { query: Query; rest: Rest },
 ): Promise<PresentedBriefing> {
