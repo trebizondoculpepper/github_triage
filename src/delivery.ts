@@ -70,6 +70,8 @@ export interface DeliveryRecord {
   legacyRelease?: string;
   evidence?: string;
   plan?: { remove: string[]; add: string[] };
+  /** reset: the reset-relevant labels observed when it was planned; absent on older records. */
+  observedLabels?: string[];
   evaluationRevision?: string;
   evaluatedAt?: string;
   issuedAt: string;
@@ -231,6 +233,11 @@ export function deliveryRecordProblem(v: unknown): string | null {
       break;
   }
   if (v.evidence !== undefined && !isString(v.evidence)) return "evidence is not a string";
+  if (
+    v.observedLabels !== undefined &&
+    (!Array.isArray(v.observedLabels) || !v.observedLabels.every(isString))
+  )
+    return "observedLabels is not a list of labels";
   return null;
 }
 
