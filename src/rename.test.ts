@@ -1,7 +1,7 @@
 /** Naming migration behavior that must remain compatible for existing installations. */
 import { it, expect } from "vite-plus/test";
 import { main } from "./cli.js";
-import { optOutEnv, legacyOptOutEnv } from "./updates.js";
+import { optOutEnv, legacyOptOutEnv } from "./updates/updates.js";
 it("accepts both canonical and legacy update opt-out environment variables", async () => {
   const prior = new Map([optOutEnv, legacyOptOutEnv].map((k) => [k, process.env[k]]));
   try {

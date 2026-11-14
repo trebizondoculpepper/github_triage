@@ -12,7 +12,7 @@ import { markerTrust } from "../src/delivery.js";
 import { ghRest, permissionLookup } from "../src/github.js";
 import { briefing } from "../src/briefing.js";
 import { compactBriefing } from "../src/compact.js";
-import { evaluateDatalog } from "../src/datalog.js";
+import { evaluateDatalog } from "../src/rules/datalog/datalog.js";
 const { values } = parseArgs({
   options: {
     snapshot: { type: "string" },

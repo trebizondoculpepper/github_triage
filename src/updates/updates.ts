@@ -75,18 +75,32 @@ export async function installedVersion(
 ): Promise<InstalledInfo> {
   const here = dirname(fileURLToPath(moduleUrl));
   const installed = here.split(sep).includes("node_modules");
-  try {
-    // dist/cli.mjs and src/*.js both sit one level below the package root.
-    const manifest: unknown = JSON.parse(await readFile(join(here, "..", "package.json"), "utf8"));
-    if (!isRecord(manifest) || manifest.name !== packageName)
-      return { version: null, installed, reason: "package manifest not found" };
+  // The bundle (dist/cli.mjs) sits one level below the package root; source modules such as
+  // src/updates/updates.ts sit deeper. Search upward for this package's own manifest.
+  let readable = false;
+  for (let dir = here, depth = 0; depth < manifestSearchDepth; depth++) {
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+    let manifest: unknown;
+    try {
+      manifest = JSON.parse(await readFile(join(dir, "package.json"), "utf8"));
+      readable = true;
+    } catch {
+      continue;
+    }
+    if (!isRecord(manifest) || manifest.name !== packageName) continue;
     const version = manifest.version ?? null;
     // The original JavaScript passed any manifest version through; keep that but require a string.
     return { version: typeof version === "string" ? version : null, installed };
-  } catch {
-    return { version: null, installed, reason: "package manifest not readable" };
   }
+  return readable
+    ? { version: null, installed, reason: "package manifest not found" }
+    : { version: null, installed, reason: "package manifest not readable" };
 }
+
+/** How many parent directories installedVersion() inspects for the package manifest. */
+const manifestSearchDepth = 3;
 
 export type Eligibility =
   | { skip: UpdateCheckResult }

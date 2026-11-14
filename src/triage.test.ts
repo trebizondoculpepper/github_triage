@@ -2619,7 +2619,7 @@ describe("version check (#51, doc/design/updates.md)", () => {
       return { ok: true, status: 200, json: async () => tags } as Response;
     }) as unknown as typeof fetch;
   it("advises only when npm's matching channel is newer, never a downgrade", async () => {
-    const { checkForUpdate, updateAdvisory } = await import("./updates.js");
+    const { checkForUpdate, updateAdvisory } = await import("./updates/updates.js");
     const tags = { latest: "0.2.0", next: "0.2.3-next.1" };
     const stable = await checkForUpdate({
       installed: installed("0.1.0"),
@@ -2646,7 +2646,7 @@ describe("version check (#51, doc/design/updates.md)", () => {
       ).toBeNull();
   });
   it("skips without any network call for checkouts, unknown versions, offline and opt-out", async () => {
-    const { checkForUpdate } = await import("./updates.js");
+    const { checkForUpdate } = await import("./updates/updates.js");
     const seen: string[] = [];
     const cases = [
       { installed: installed("0.1.0", false) },
@@ -2662,7 +2662,7 @@ describe("version check (#51, doc/design/updates.md)", () => {
     expect(seen).toEqual([]);
   });
   it("treats registry failure as unknown, never as up to date, and sends only the package name", async () => {
-    const { checkForUpdate } = await import("./updates.js");
+    const { checkForUpdate } = await import("./updates/updates.js");
     const timeout = Object.assign(new Error("t"), { name: "TimeoutError" });
     expect(
       await checkForUpdate({ installed: installed("0.1.0"), fetchImpl: registry(timeout) }),
@@ -2753,8 +2753,8 @@ describe("daily cached version check (#65, doc/design/updates.md)", () => {
   };
 
   it("checks on first use, reuses the result for 24 hours, then refreshes", async () => {
-    const { cachedCheckForUpdate, cacheFileName } = await import("./updatecache.js");
-    const { updateAdvisory } = await import("./updates.js");
+    const { cachedCheckForUpdate, cacheFileName } = await import("./updates/updatecache.js");
+    const { updateAdvisory } = await import("./updates/updates.js");
     await withDir(async (cacheDir) => {
       let now = t0;
       const reg = counting({ latest: "0.2.0", next: "0.3.0-next.1" });
@@ -2804,8 +2804,8 @@ describe("daily cached version check (#65, doc/design/updates.md)", () => {
   });
 
   it("stays silent when up to date and honours an upgrade against cached evidence", async () => {
-    const { cachedCheckForUpdate } = await import("./updatecache.js");
-    const { updateAdvisory } = await import("./updates.js");
+    const { cachedCheckForUpdate } = await import("./updates/updatecache.js");
+    const { updateAdvisory } = await import("./updates/updates.js");
     await withDir(async (cacheDir) => {
       const reg = counting({ latest: "0.2.0" });
       const opts = { cacheDir, fetchImpl: reg.fetchImpl, now: () => t0 };
@@ -2825,7 +2825,8 @@ describe("daily cached version check (#65, doc/design/updates.md)", () => {
   });
 
   it("throttles failed lookups without caching them as up to date", async () => {
-    const { cachedCheckForUpdate, readCache, cacheFileName } = await import("./updatecache.js");
+    const { cachedCheckForUpdate, readCache, cacheFileName } =
+      await import("./updates/updatecache.js");
     const nodeFs = await import("node:fs/promises");
     await withDir(async (cacheDir) => {
       let now = t0;
@@ -2852,7 +2853,7 @@ describe("daily cached version check (#65, doc/design/updates.md)", () => {
   });
 
   it("treats a corrupt or foreign cache as absent, never as up to date", async () => {
-    const { cachedCheckForUpdate, cacheFileName } = await import("./updatecache.js");
+    const { cachedCheckForUpdate, cacheFileName } = await import("./updates/updatecache.js");
     await withDir(async (cacheDir) => {
       for (const content of [
         "{not json",
@@ -2875,7 +2876,7 @@ describe("daily cached version check (#65, doc/design/updates.md)", () => {
   });
 
   it("skips quietly, without hammering npm, when the cache cannot be written", async () => {
-    const { cachedCheckForUpdate } = await import("./updatecache.js");
+    const { cachedCheckForUpdate } = await import("./updates/updatecache.js");
     const nodeFs = await import("node:fs/promises");
     await withDir(async (cacheDir) => {
       const denied = Object.assign(new Error("denied"), { code: "EACCES" });
@@ -2926,8 +2927,8 @@ describe("daily cached version check (#65, doc/design/updates.md)", () => {
   });
 
   it("lets concurrent invocations share one lookup and one notice", async () => {
-    const { cachedCheckForUpdate } = await import("./updatecache.js");
-    const { updateAdvisory } = await import("./updates.js");
+    const { cachedCheckForUpdate } = await import("./updates/updatecache.js");
+    const { updateAdvisory } = await import("./updates/updates.js");
     await withDir(async (cacheDir) => {
       const reg = counting({ latest: "0.2.0" }, 50);
       const results = await Promise.all(
@@ -2947,7 +2948,8 @@ describe("daily cached version check (#65, doc/design/updates.md)", () => {
   });
 
   it("breaks a stale lock but does not wait long behind a live one", async () => {
-    const { cachedCheckForUpdate, cacheFileName, lockWaitMs } = await import("./updatecache.js");
+    const { cachedCheckForUpdate, cacheFileName, lockWaitMs } =
+      await import("./updates/updatecache.js");
     const { utimes } = await import("node:fs/promises");
     await withDir(async (cacheDir) => {
       const lock = join(cacheDir, `${cacheFileName}.lock`);
@@ -2969,7 +2971,8 @@ describe("daily cached version check (#65, doc/design/updates.md)", () => {
   });
 
   it("gives up quickly on a directory at the lock path, and the CLI command still completes", async () => {
-    const { cachedCheckForUpdate, cacheFileName, lockWaitMs } = await import("./updatecache.js");
+    const { cachedCheckForUpdate, cacheFileName, lockWaitMs } =
+      await import("./updates/updatecache.js");
     const { utimes } = await import("node:fs/promises");
     await withDir(async (cacheDir) => {
       const lock = join(cacheDir, `${cacheFileName}.lock`);
@@ -3005,7 +3008,7 @@ describe("daily cached version check (#65, doc/design/updates.md)", () => {
   });
 
   it("lets at most one of two contenders breaking the same stale lock proceed", async () => {
-    const { acquireLock, lockStaleMs } = await import("./updatecache.js");
+    const { acquireLock, lockStaleMs } = await import("./updates/updatecache.js");
     let clock = 100_000;
     const files = new Map<string, { data: string; mtimeMs: number }>();
     const enoent = () => Object.assign(new Error("ENOENT"), { code: "ENOENT" });
@@ -3064,7 +3067,7 @@ describe("daily cached version check (#65, doc/design/updates.md)", () => {
   });
 
   it("makes no cache or network access when skipped, and uses a per-user cache directory", async () => {
-    const { cachedCheckForUpdate, defaultCacheDir } = await import("./updatecache.js");
+    const { cachedCheckForUpdate, defaultCacheDir } = await import("./updates/updatecache.js");
     await withDir(async (cacheDir) => {
       const reg = counting({ latest: "9.0.0" });
       for (const c of [

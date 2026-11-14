@@ -1,6 +1,6 @@
 # Source layout by capability
 
-Status: proposed mapping for #335 stage 1. This is a documentation-only contract. It moves no files. The stage-2 move PRs and the stage-3 test split implement it.
+Status: accepted mapping for #335. Stage 2 progress: `updates/`, `rules/datalog/` and `mcp/` moved. This is a documentation-only contract. It moves no files. The stage-2 move PRs and the stage-3 test split implement it.
 
 ## Goal and constraints
 
@@ -65,6 +65,7 @@ The owner called the rules area "the Prolog area". The implementation is Datalog
 | `who.ts`              | `workflow/who.ts`                |                                                                                      |
 | `ticketdoctor.ts`     | `workflow/ticketdoctor.ts`       |                                                                                      |
 | `doctorplans.ts`      | `workflow/doctorplans.ts`        | Ticket Doctor repair plans                                                           |
+| `deliverydoctor.ts`   | `workflow/deliverydoctor.ts`     | Delivery-aware Ticket Doctor facts (#192)                                            |
 | `estimate.ts`         | `estimation/estimate.ts`         |                                                                                      |
 | `estimation.ts`       | `estimation/estimation.ts`       |                                                                                      |
 | `complexity.ts`       | `estimation/complexity.ts`       |                                                                                      |
