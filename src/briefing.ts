@@ -9,6 +9,8 @@ import {
 } from "./ranking.js";
 import type { PickupOrder } from "./ranking.js";
 import { estimationText } from "./estimation.js";
+import { assessmentsText } from "./assessments.js";
+import type { SubjectAssessments } from "./assessments.js";
 import { labelEstimationReport } from "./complexitylabels.js";
 import type { LabelEstimationInput } from "./complexitylabels.js";
 import type { Action, Dependency, Issue, PullRequest, Snapshot } from "./types.js";
@@ -535,6 +537,8 @@ export interface BriefingOptions {
   estimation?: LabelEstimationInput;
   /** Explicit request to estimate: present the estimation queue first. */
   estimate?: boolean;
+  /** Shared paired facts per open issue (#247); absent means not read (subjects show null). */
+  assessments?: ReadonlyMap<string, SubjectAssessments>;
 }
 /** A bounded list: the first `limit` items plus how many were left out. */
 export interface Bounded<T> {
@@ -590,6 +594,8 @@ export function briefing(snapshot: Snapshot, options: BriefingOptions, now: Date
       ),
     ],
     detailCommand: `npm run --silent triage -- --repo ${snapshot.repository} --issue ${issue.number} --json`,
+    /** Impact, complexity and unlock utility side by side (#247); null for PRs and closed issues. */
+    assessments: options.assessments?.get(issue.url) ?? null,
   });
   const limit = <T>(items: T[]): Bounded<T> => ({
     total: items.length,
@@ -689,6 +695,7 @@ export function briefing(snapshot: Snapshot, options: BriefingOptions, now: Date
     detail: detail
       ? {
           ...detail,
+          assessments: options.assessments?.get(detail.url) ?? null,
           relatedPullRequests: prs
             .filter((pr) =>
               pr.closingIssuesReferences.nodes.some((ref) => ref.number === detail.number),
@@ -725,7 +732,10 @@ export function textReport(report: Briefing): string {
   );
   section(
     "READY / UNCLAIMED",
-    report.ready.items.map((item) => `#${item.number} ${item.title}\n  ${item.url}`),
+    report.ready.items.map(
+      (item) =>
+        `#${item.number} ${item.title}${item.assessments ? `\n  ${assessmentsText(item.assessments)}` : ""}\n  ${item.url}`,
+    ),
     report.ready.omitted,
   );
   section(

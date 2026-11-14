@@ -10,15 +10,18 @@
  * provenance whose authority is unknown makes the state unknown, never current. This vocabulary
  * is new and separate: it never replaces the existing `EstimateState` of `complexity.state`.
  *
- * #245 ships the primitive only; wiring it into reports (`assessments`) is #247.
+ * #245 ships the primitive; #247 adds `readSnapshotAssessments`, the one shared paired-facts
+ * reader per snapshot that report subjects (`assessments`) and later the queue (#248) consume.
  */
 import type { ComplexitySize } from "./complexity.js";
+import { impactLookup } from "./ranking.js";
 import type { Comment } from "./claims.js";
 import { classifyMetricLabels } from "./complexitylabels.js";
 import type { TrustDecision } from "./delivery.js";
 import { scanProvenance } from "./estimate.js";
+import { complexityMetric, impactMetric } from "./metrics.js";
 import type { MetricDescriptor } from "./metrics.js";
-import type { Issue } from "./types.js";
+import type { Issue, Snapshot } from "./types.js";
 
 export type AssessmentState =
   | "current"
@@ -112,4 +115,112 @@ export async function readAssessment(
     reasons.push(`description edited ${issue.lastEditedAt} after the estimate`);
   }
   return { state, size, provenance: record.url, reasons };
+}
+
+/** One metric as shown side by side (doc/design/impact-estimation.md "Side-by-side display"). */
+export interface MetricView {
+  state: AssessmentState;
+  /** Non-null only for `current` and `stale`. */
+  size: ComplexitySize | null;
+  /** URL of the newest trusted provenance comment, or null. */
+  provenance: string | null;
+}
+
+/**
+ * The `assessments` property of a report subject: the designer's impact estimate, the
+ * implementer's complexity estimate and the computed immediate-unlock utility, kept separate.
+ */
+export interface SubjectAssessments {
+  impact: MetricView;
+  complexity: MetricView;
+  /** Definite immediate unlocks (the same count as pickup ranking, #208). */
+  unlocks: number;
+  /** Why more unlocks cannot be ruled out; empty when `unlocks` is complete. */
+  unlocksUnknown: string[];
+}
+
+/** Whether a metric is enabled; a configuration that cannot be read is `unknown`. */
+export type MetricAvailability = "available" | "disabled" | "unknown";
+
+/** Without a permission boundary (offline, or none injected) provenance authority is unknown. */
+export const unknownTrust: TrustDecision = async () => ({
+  status: "unknown",
+  why: "comment author permissions not read",
+});
+
+const view = (reading: AssessmentReading): MetricView => ({
+  state: reading.state,
+  size: reading.size,
+  provenance: reading.provenance,
+});
+
+/**
+ * The shared paired-facts reader (#247): read both metrics and the unlock count once per
+ * snapshot, for every open issue, keyed by URL. Presentation and the blended queue consume the
+ * same map; nothing here scores or ranks. No collection happens here: labels and comments come
+ * from the snapshot, and `trust` is the per-run permission cache (#212), so permission requests
+ * are bounded by one per distinct provenance-marker author or editor login per run. The reader
+ * consults trust only for a ticket with exactly one recognized size label and a provenance
+ * marker, stopping at the newest trusted or unknown marker.
+ */
+export async function readSnapshotAssessments(
+  snapshot: Pick<Snapshot, "issues" | "pullRequests">,
+  {
+    impact,
+    complexity,
+    trust = unknownTrust,
+    platform,
+  }: {
+    impact: MetricAvailability;
+    complexity: MetricAvailability;
+    trust?: TrustDecision;
+    platform?: string;
+  },
+): Promise<Map<string, SubjectAssessments>> {
+  const open = snapshot.issues.filter((issue) => issue.state === "OPEN");
+  const unlocksOf = impactLookup(open, {
+    prs: snapshot.pullRequests.filter((pr) => pr.state === "OPEN"),
+    platform,
+  });
+  const read = async (
+    d: MetricDescriptor,
+    status: MetricAvailability,
+    issue: Issue,
+  ): Promise<MetricView> =>
+    status === "unknown"
+      ? { state: "unknown", size: null, provenance: null }
+      : view(await readAssessment(d, issue, { enabled: status === "available", trust }));
+  const result = new Map<string, SubjectAssessments>();
+  // Sequential, so the permission cache answers repeated authors without a second request.
+  for (const issue of open) {
+    const unlocks = unlocksOf(issue.url);
+    result.set(issue.url, {
+      impact: await read(impactMetric, impact, issue),
+      complexity: await read(complexityMetric, complexity, issue),
+      unlocks: unlocks.unlocks.length,
+      unlocksUnknown: unlocks.unknown,
+    });
+  }
+  return result;
+}
+
+const metricText = (name: string, v: MetricView): string =>
+  v.state === "current"
+    ? `${name} ${v.size}`
+    : v.state === "stale"
+      ? `${name} stale (was ${v.size})`
+      : `${name} ${v.state}`;
+
+/** Fixed order, impact first: `impact L · complexity S · unlocks at least 2`. */
+export function assessmentsText(a: SubjectAssessments): string {
+  return `${metricText("impact", a.impact)} · ${metricText("complexity", a.complexity)} · unlocks at least ${a.unlocks}${a.unlocksUnknown.length ? " (dependants incomplete)" : ""}`;
+}
+
+/** Provenance links for detail views, newest trusted comment per metric. */
+export function provenanceText(a: SubjectAssessments): string | null {
+  const links = [
+    a.impact.provenance && `impact ${a.impact.provenance}`,
+    a.complexity.provenance && `complexity ${a.complexity.provenance}`,
+  ].filter(Boolean);
+  return links.length ? `Provenance: ${links.join("; ")}` : null;
 }

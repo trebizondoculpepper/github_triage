@@ -539,7 +539,7 @@ export async function main(
     new Promise<void>((resolve, reject) =>
       process.stdout.write(text, (error) => (error ? reject(error) : resolve())),
     ),
-  runtime: Runtime = { collect, currentRepository, dependencyReport },
+  runtime: Runtime = { collect, currentRepository, dependencyReport, rest: ghRest },
 ): Promise<number> {
   // Version check (#51, cached daily per user by #65): runs alongside the command, bounded by a short timeout, and reports
   // only on stderr so JSON on stdout stays valid. --offline and opt-outs mean no network.
@@ -935,6 +935,12 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
     { ...options, process: guideProcess },
     runtime.estimation,
     runtime.now?.(),
+    undefined,
+    // Provenance authority (#247) uses the per-run permission cache; offline reads make no
+    // request, so trusted provenance is then unknown. Without an injected boundary, likewise.
+    !options.offline && runtime.rest
+      ? markerTrust(permissionLookup(snapshot.repository, runtime.rest))
+      : undefined,
   );
   const checkpoint = options.checkpoint
     ? {

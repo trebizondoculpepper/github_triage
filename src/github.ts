@@ -273,7 +273,10 @@ export async function currentRepository(cwd?: string, signal?: AbortSignal): Pro
   }
 }
 const info = "pageInfo{hasNextPage endCursor}";
-const comment = "body url author{login} createdAt updatedAt";
+// Author type and edit history (#247) let the provenance reader apply the #212 trust rule; all
+// are existing IssueComment/PullRequestReviewComment fields, so no request is added.
+const comment =
+  "body url author{__typename login} createdAt updatedAt lastEditedAt includesCreatedEdit editor{__typename login}";
 const common = `number title body url state createdAt updatedAt lastEditedAt labels(first:100){nodes{name} ${info}} comments(first:100){nodes{${comment}} ${info}}`;
 // The issue side of the closing link (#162): proves an issue has no open closing PR when an
 // open PR's closing references are truncated.
