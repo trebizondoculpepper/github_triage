@@ -33,7 +33,7 @@ describe("benchmark isolation (scripts/mcp-benchmark.ts)", () => {
     try {
       const local = { cwd: SYNTHETIC_ROOT, fs: emptyFileSystem, git: fakeGit("example/project") };
       const guide = await resolveGuideSetting("example/project", undefined, local);
-      expect(guide).toEqual({ enabled: true, source: "default", diagnostics: [] });
+      expect(guide).toEqual({ enabled: false, source: "default", diagnostics: [] });
       const estimation = await collectLabelEstimationInput("example/project", local);
       expect(estimation.status).toBe("available");
       assertNoLocalPaths("estimation", JSON.stringify(estimation));

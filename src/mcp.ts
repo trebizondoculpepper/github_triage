@@ -589,7 +589,7 @@ export function createServer(
           repository: selection.repository,
           agent: selection.agent ?? undefined,
           issue: args.number,
-          limit: 5,
+          limit: 10,
           maxChars: args.maxChars,
           signal: ctx.mcpReq.signal,
         });

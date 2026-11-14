@@ -588,6 +588,20 @@ esac
 });
 
 describe("compact briefing contract", () => {
+  it("omits empty sections and zero counters from text while preserving structured metadata", async () => {
+    const { compactBriefing, compactText } = await import("./compact.js");
+    const data = snapshot([], []),
+      expanded = briefing(data, { limit: 10 }, new Date(time));
+    const report = compactBriefing(data, { limit: 10 }, expanded);
+    const text = compactText(report);
+    expect(report.actions).toMatchObject({ total: 0, omitted: 0, items: [] });
+    expect(text).not.toContain("NEXT STEPS");
+    expect(text).not.toContain("0 omitted");
+    expect(text).not.toContain("Read-only suggestions, not authority");
+    expect(argumentsFor([]).limit).toBe(10);
+    expect(argumentsFor(["--limit", "2"]).limit).toBe(2);
+  });
+
   it("deduplicates targets, separates parked questions and preserves full detail", async () => {
     const { compactBriefing, compactText, sourceContext } = await import("./compact.js");
     const parked = issue(7, ["status:parked", "question"]);
@@ -609,7 +623,7 @@ describe("compact briefing contract", () => {
     expect(sourceContext(parked).chronology).toContain("Unknown");
     const noDetail = { ...compact, detail: null };
     expect(compactText(noDetail, 1500).length).toBeLessThanOrEqual(1500);
-    expect(compactText(noDetail, 1500)).toContain("omitted");
+    expect(compactText(noDetail, 600)).toContain("omitted");
   });
   it("bounds independent requests, retains order and propagates failure", async () => {
     const { concurrentMap } = await import("./github.js");
@@ -3710,8 +3724,8 @@ describe("designer groups: decision needed vs agreed-needs-documentation (#40)",
     expect(compact.sections["decision-needed"].items).toEqual([decide.url, both.url]);
     expect(compact.sections["documentation-needed"].items).toEqual([record.url, both.url]);
     const text = compactText(compact, 50000);
-    expect(text).toContain("DECISION NEEDED (2;");
-    expect(text).toContain("AGREED, NEEDS DOCUMENTATION (2;");
+    expect(text).toContain("DECISION NEEDED (2)");
+    expect(text).toContain("AGREED, NEEDS DOCUMENTATION (2)");
     expect(text).toContain(`which flag name?" Source: ${decide.url}#c1 Next:`);
     expect(text.match(/Source: /g)).toHaveLength(1);
   });
@@ -4647,7 +4661,7 @@ describe("repository configuration service (#116, doc/design/repository-configur
     expect(config.settings).toEqual([
       { key: "complexity.enabled", value: true, source: "default" },
       { key: "impact.enabled", value: true, source: "default" },
-      { key: "processGuide", value: true, source: "default" },
+      { key: "processGuide", value: false, source: "default" },
     ]);
     expect(config.retired).toEqual([]);
     expect(memory.writes).toEqual([]);
@@ -5495,7 +5509,7 @@ describe("config get/set/list/help commands (#117)", () => {
       kind: "config-get",
       repository: "owner/name",
       key: "processGuide",
-      value: true,
+      value: false,
       source: "default",
     });
     expect(t.files.size).toBe(0);
@@ -5610,7 +5624,7 @@ describe("config get/set/list/help commands (#117)", () => {
     expect(await t.call("help", "processGuide", "--json")).toBe(0);
     expect(t.json()).toMatchObject({
       kind: "config-help",
-      keys: [{ key: "processGuide", defaultValue: true }],
+      keys: [{ key: "processGuide", defaultValue: false }],
     });
     expect(t.out.join("")).not.toContain("fieldId");
     expect(await t.call("--help")).toBe(0);
@@ -7664,7 +7678,7 @@ describe("role-shaped briefings (#1, doc/design/briefings.md)", () => {
     const r = await compact(snapshot([issue(60)], []), { limit: 5, role: "implementer" });
     const text = compactText(r);
     expect(text).toMatch(/Role implementer: What action advances implementation most\?/);
-    expect(text).toMatch(/\nPICKUP \(1; 0 omitted\)/);
+    expect(text).toMatch(/\nPICKUP \(1\)/);
     expect(text).not.toMatch(/\nAVAILABLE/);
     const { argumentsFor } = await import("./cli.js");
     expect(() => argumentsFor(["--role", "owner"])).toThrow(/implementer, designer/);
@@ -9209,17 +9223,20 @@ describe("workflow guide in help and briefings (#71, doc/design/workflow-guide.m
     return { code, out };
   };
 
-  it("includes a bounded guide by default, generated from registered policy", async () => {
-    const { code, out } = await run(["--json"], null);
+  it("keeps the guide off by default and explicitly enables generated policy guidance", async () => {
+    const disabled = JSON.parse((await run(["--json"], null)).out);
+    expect(disabled.process).toMatchObject({ enabled: false, source: "default", guide: null });
+    expect((await run([], null)).out).not.toContain("WORKFLOW\n");
+    const { code, out } = await run(["--json", "--guide"], null);
     expect(code).toBe(0);
     const process_ = JSON.parse(out).process;
-    expect(process_).toMatchObject({ schemaVersion: 1, enabled: true, source: "default" });
+    expect(process_).toMatchObject({ schemaVersion: 1, enabled: true, source: "cli" });
     expect(process_.policyVersion).toBe(policyVersion());
     expect(Array.from(process_.guide as string).length).toBeLessThanOrEqual(MAX_GUIDE_CODE_POINTS);
     expect(process_.guideCodePoints).toBe(Array.from(process_.guide as string).length);
     for (const label of pickupPolicy.available) expect(process_.guide).toContain(label);
     for (const name of mutatingCommands()) expect(process_.guide).toContain(name);
-    const text = (await run([], null)).out;
+    const text = (await run(["--guide"], null)).out;
     expect(text).toContain("WORKFLOW\n- Order:");
     expect(text).toContain("github-triage process");
   });
@@ -9241,7 +9258,7 @@ describe("workflow guide in help and briefings (#71, doc/design/workflow-guide.m
     expect(restOff).toEqual(restOn);
     const text = (await run([], '{"schemaVersion":1,"processGuide":false}')).out;
     expect(text).not.toContain("WORKFLOW\n");
-    expect(text).toContain("Workflow guide off");
+    expect(text).not.toContain("Workflow guide off");
   });
 
   it("lets CLI flags override configuration, even when it is invalid, and refuses both", async () => {
@@ -9264,7 +9281,7 @@ describe("workflow guide in help and briefings (#71, doc/design/workflow-guide.m
       const { code, out } = await run(["--json"], raw);
       expect(code).toBe(0);
       const parsed = JSON.parse(out);
-      expect(parsed.process).toMatchObject({ enabled: true, source: "default" });
+      expect(parsed.process).toMatchObject({ enabled: false, source: "default" });
       expect(parsed.process.diagnostics[0]).toMatch(/not applied/);
       expect(parsed.completeness.complete).toBe(true);
     }
@@ -9272,13 +9289,13 @@ describe("workflow guide in help and briefings (#71, doc/design/workflow-guide.m
       (await run(["--json"], '{"schemaVersion":1,"processGuide":false}', "git@github.com:a/b.git"))
         .out,
     );
-    expect(other.process).toMatchObject({ enabled: true, source: "default" });
+    expect(other.process).toMatchObject({ enabled: false, source: "default" });
     expect(other.process.diagnostics[0]).toMatch(/No matching local project setting/);
     expect((await run([], "{oops")).out).toContain("CONFIG: Repository configuration not applied");
   });
 
   it("counts against the text budget and reports omission instead of truncating", async () => {
-    const { out } = await run(["--max-chars", "600"], null);
+    const { out } = await run(["--guide", "--max-chars", "600"], null);
     expect(out).not.toContain("WORKFLOW\n");
     expect(out).toContain(
       "Workflow guide omitted by text budget. Full guide: github-triage process",
@@ -9287,7 +9304,7 @@ describe("workflow guide in help and briefings (#71, doc/design/workflow-guide.m
 
   it("never exceeds --max-chars with the guide on or off (reserved footer)", async () => {
     const off = '{"schemaVersion":1,"processGuide":false}';
-    for (const raw of [null, off]) {
+    for (const raw of ['{"schemaVersion":1,"processGuide":true}', off]) {
       // The header and required footer are irreducible; every budget above them must hold.
       const floor = (await run(["--max-chars", "1"], raw)).out.length;
       for (let max = floor; max <= floor + 3000; max += 97) {
@@ -9295,7 +9312,8 @@ describe("workflow guide in help and briefings (#71, doc/design/workflow-guide.m
         expect(out.length, `max-chars ${max}, guide ${raw ? "off" : "on"}`).toBeLessThanOrEqual(
           max,
         );
-        expect(out).toContain(raw ? "Workflow guide off" : "github-triage process");
+        if (raw === off) expect(out).not.toContain("Workflow guide off");
+        else expect(out).toContain("github-triage process");
       }
     }
   });

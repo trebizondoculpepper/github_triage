@@ -538,7 +538,6 @@ export function compactText(
     `GitHub action briefing: ${report.repository}`,
     `Fetched ${report.freshness.fetchedAt} — ${report.freshness.offline ? "OFFLINE CACHE; live verification unavailable" : "LIVE fetch window"}`,
     `${report.summary.issues} issues; ${report.summary.pullRequests} PRs; ${report.summary.findings} findings on ${report.summary.distinctSubjects} subjects.`,
-    report.guidance,
   ];
   const rows: string[] = [];
   const shown = new Set<string>();
@@ -547,7 +546,10 @@ export function compactText(
     section: Bounded<string>,
     reasons?: ReadonlyMap<string, string>,
   ): void => {
-    rows.push(`\n${title} (${section.total}; ${section.omitted} omitted)`);
+    if (!section.total && !section.items.length) return;
+    rows.push(
+      `\n${title} (${section.total}${section.omitted ? `; ${section.omitted} omitted` : ""})`,
+    );
     for (const url of section.items) {
       const s = defined(subjects.get(url));
       const why = reasons?.get(url);
@@ -564,8 +566,9 @@ export function compactText(
   const estimation = report.estimation;
   const estimationRows = (): void => {
     if (estimation.status === "disabled") return;
+    if (!estimation.requested && !estimation.queue?.total && !estimation.findings.length) return;
     rows.push(
-      `\nESTIMATION${estimation.requested ? " (requested)" : ranked && report.role?.name === "implementer" ? " (detail; estimates are ranked in NEXT STEPS)" : " (optional; after the work above)"} (${estimation.queue?.total ?? "unavailable"}; ${estimation.queue?.omitted ?? 0} omitted)`,
+      `\nESTIMATION${estimation.requested ? " (requested)" : ranked && report.role?.name === "implementer" ? " (detail; estimates are ranked in NEXT STEPS)" : " (optional; after the work above)"} (${estimation.queue?.total ?? "unavailable"}${estimation.queue?.omitted ? `; ${estimation.queue.omitted} omitted` : ""})`,
       `- ${estimation.detail}`,
       ...estimation.findings.map((f) => `- ${f.rule}: ${f.detail} Next: ${f.next.join(" | ")}`),
       ...(estimation.queue?.items ?? []).map(
@@ -580,7 +583,10 @@ export function compactText(
   // assessments and the exact next command. Role sections below still give each subject's
   // detail, so these rows do not mark subjects as shown.
   const rankedRows = (ranked: RankedActions, impact: ImpactEstimation | undefined): void => {
-    rows.push(`\nNEXT STEPS (${ranked.total}; ${ranked.omitted} omitted)`);
+    if (ranked.total)
+      rows.push(
+        `\nNEXT STEPS (${ranked.total}${ranked.omitted ? `; ${ranked.omitted} omitted` : ""})`,
+      );
     for (const item of ranked.items) {
       const s = defined(subjects.get(item.target));
       const why = roleReasons.get(item.target);
@@ -589,12 +595,20 @@ export function compactText(
       );
     }
     // Hidden, never deleted, when impact.enabled is false.
-    if (impact && impact.status !== "disabled")
+    if (
+      impact &&
+      impact.status !== "disabled" &&
+      (impact.eligible || impact.ranked || impact.conflicts || impact.invalid || impact.unknown)
+    )
       rows.push(
         `- Impact assessment: ${impact.eligible} eligible, ${impact.ranked} ranked, ${impact.shown} shown; ${impact.conflicts} conflicting, ${impact.invalid} invalid, ${impact.unknown} unknown${impact.status === "unknown" ? " (impact.enabled unreadable)" : ""}. Guidance: ${impact.guidance}`,
       );
     // Implementer counts (#259); hidden, never deleted, when complexity.enabled is false.
-    if ("ranked" in estimation && estimation.status !== "disabled")
+    if (
+      "ranked" in estimation &&
+      estimation.status !== "disabled" &&
+      (estimation.eligible || estimation.ranked || estimation.conflicts.total)
+    )
       rows.push(
         `- Complexity assessment: ${estimation.eligible} eligible, ${estimation.ranked} ranked, ${estimation.shown} shown; ${estimation.conflicts.total} conflicting. Guidance: github-triage estimate --help`,
       );
@@ -645,10 +659,8 @@ export function compactText(
   const guide = report.process;
   const footer = guide
     ? [
-        ...guide.diagnostics.map((diagnostic) => `CONFIG: ${diagnostic}`),
-        guide.guide
-          ? `\nWorkflow guide omitted by text budget. ${guide.pointer}`
-          : `\n${guide.pointer}`,
+        ...guide.diagnostics.map((d) => `CONFIG: ${d}`),
+        ...(guide.guide ? [`\nWorkflow guide omitted by text budget. ${guide.pointer}`] : []),
       ].reduce((total, line) => total + line.length + 1, 0)
     : 0;
   for (const row of rows) {
@@ -665,7 +677,6 @@ export function compactText(
     const fits = (text: string) => lines.join("\n").length + text.length + 2 <= maxChars;
     if (guide.guide && fits(`\n${guide.guide}`)) lines.push(`\n${guide.guide}`);
     else if (guide.guide) lines.push(`\nWorkflow guide omitted by text budget. ${guide.pointer}`);
-    else lines.push(`\n${guide.pointer}`);
   }
   if (report.detail) lines.push(`\nFULL ISSUE DETAIL\n${JSON.stringify(report.detail, null, 2)}`);
   return lines.join("\n") + "\n";

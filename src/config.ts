@@ -91,9 +91,9 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
     key: "processGuide",
     type: "boolean",
     nullable: false,
-    defaultValue: true,
+    defaultValue: false,
     description:
-      "Whether briefings include the compact workflow guide (#71). false keeps a one-line pointer; --guide/--no-guide override per run and `github-triage process` always shows the full guide.",
+      "Whether briefings include the compact workflow guide (#71). false omits the footer; --guide/--no-guide override per run and `github-triage process` always shows the full guide.",
   },
 ];
 
