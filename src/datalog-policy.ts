@@ -400,7 +400,7 @@ export const keyQueries: [string, string][] = [
 ];
 
 export const queries = {
-  q0: '[:find ?t ?r :where [?t "matched" ?r] [?t "matched" ?o] [?r "kind" ?k] [?o "kind" ?k] [?r "rule" ?rid] [?o "rule" ?oid] (or-join [?rid ?oid ?r ?o] (and [?r "band" ?b] [?o "band" ?b] [?r "preference" ?p] [?o "preference" ?op] [(< ?op ?p)]) (and [(= ?rid "D-ORDINARY")] [(= ?oid "D-EASY")]) (and [(= ?rid "D-ORDINARY")] [(= ?oid "D-UNFAVORABLE")]) (and [(= ?rid "D-OWN")] [(= ?oid "D-OWN-EASY")]) (and [(= ?rid "D-OWN")] [(= ?oid "D-OWN-UNFAVORABLE")]))]',
+  q0: '[:find ?t ?r :where [?t "matched" ?r] [?t "matched" ?o] [?r "kind" ?k] [?o "kind" ?k] [?r "rule" ?rid] [?o "rule" ?oid] (or-join [?rid ?oid ?r ?o] (and [?r "band" ?b] [?o "band" ?b] [?r "preference" ?p] [?o "preference" ?p] [(< ?o ?r)]) (and [?r "band" ?b] [?o "band" ?b] [?r "preference" ?p] [?o "preference" ?op] [(< ?op ?p)]) (and [(= ?rid "D-ORDINARY")] [(= ?oid "D-EASY")]) (and [(= ?rid "D-ORDINARY")] [(= ?oid "D-UNFAVORABLE")]) (and [(= ?rid "D-OWN")] [(= ?oid "D-OWN-EASY")]) (and [(= ?rid "D-OWN")] [(= ?oid "D-OWN-UNFAVORABLE")]))]',
   q1: '[:find ?t ?d :in $ % :where [?t "dependent" ?d] (otherwise ?d) [?d "native-complete" true] [?d "open-blockers" 1] [?d "blocker" ?t] (open ?t)]',
   q2: '[:find ?t (count-distinct ?d) :where [?t "unlocks-dependent" ?d]]',
   q3: '[:find ?t :where [?t "kind" _] (not [?t "unlock-count" _])]',

@@ -281,3 +281,12 @@ describe("Datalog evidence and action scenarios", () => {
     expect(() => run([], new Map(), { signal: c.signal })).toThrow();
   });
 });
+
+it("coalesces equally ranked PR findings before limiting, preserving overridden rule identity", () => {
+  const p = pr(1, ["FAILURE"]);
+  p.reviewDecision = "CHANGES_REQUESTED";
+  const result = run([], new Map(), {}, [p]);
+  expect(result.items).toHaveLength(1);
+  expect(result.total).toBe(1);
+  expect(result.items[0].why.overriddenRuleIds).toContain("D-PR-REVIEW");
+});
