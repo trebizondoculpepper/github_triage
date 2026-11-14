@@ -336,6 +336,14 @@ export function budgetExceeded(view: BoundedView, reason: string): ToolResult {
   });
 }
 
+/** Longest header line; longer ones (echoed agent, next arguments) are shortened visibly. */
+export const headerLineLimit = 200;
+const headerEntries = 4;
+const capLine = (line: string): string =>
+  line.length > headerLineLimit
+    ? `${line.slice(0, headerLineLimit - truncationMarker.length)}${truncationMarker}`
+    : line;
+
 const presentationTruncated = (truncated: Path[], data: unknown): number =>
   truncated.filter((path) => at(data, path) !== undefined).length;
 
@@ -398,31 +406,37 @@ export function boundedResult(view: BoundedView): ToolResult {
       truncatedFields: truncated.filter((path) => at(data, path) !== undefined).map(pathText),
       next: view.next?.(returned) ?? null,
     };
+    // Header lines are capped too, so maxChars bounds the whole text (#266).
+    const omittedEntries = Object.entries(omitted);
+    const nextText = presentation.next
+      ? capLine(
+          `Next page: ${presentation.next.tool} ${JSON.stringify(presentation.next.arguments)}`,
+        )
+      : null;
     const header = [
       ...(view.status === "incomplete" ? [incompleteNotice] : []),
-      ...view.notices,
+      ...view.notices.map(capLine),
       `Bounded MCP result (${budgetBytes}-byte budget for the whole result). Omitted rows, shortened fields and the next page are listed in structuredContent.presentation.`,
-      ...(Object.keys(omitted).length
+      ...(omittedEntries.length
         ? [
-            `Omitted for size: ${Object.entries(omitted)
-              .map(([path, count]) => `${count} from ${path}`)
-              .join(", ")}.`,
+            capLine(
+              `Omitted for size: ${omittedEntries
+                .slice(0, headerEntries)
+                .map(([path, count]) => `${count} from ${path}`)
+                .join(
+                  ", ",
+                )}${omittedEntries.length > headerEntries ? `, and ${omittedEntries.length - headerEntries} more list(s)` : ""}.`,
+            ),
           ]
         : []),
       ...(presentationTruncated(truncated, data)
         ? [`${presentationTruncated(truncated, data)} field(s) shortened (${truncationMarker}).`]
         : []),
-      ...(presentation.next
-        ? [`Next page: ${presentation.next.tool} ${JSON.stringify(presentation.next.arguments)}`]
-        : []),
+      ...(nextText ? [nextText] : []),
     ];
     const body = view.text(shaped, presentation);
-    const reserved = header.join("\n").length + 1;
-    // Notices are essential; when they alone reach maxChars, the body is omitted with a notice.
-    const text =
-      reserved >= view.maxChars
-        ? `${header.join("\n")}\nAll ${body.length} text line(s) omitted at maxChars ${view.maxChars}; the returned rows are in structuredContent.data.\n`
-        : `${header.join("\n")}\n${boundText(body, view.maxChars - reserved)}`;
+    // Header first, then body; whole lines are dropped from the end with a counted notice.
+    const text = boundText([...header, ...body], view.maxChars);
     return measured({
       content: [{ type: "text", text }],
       structuredContent: {

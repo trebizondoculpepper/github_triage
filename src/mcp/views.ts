@@ -118,12 +118,15 @@ export function briefingView(base: ViewBase, report: Json): BoundedView {
         { path: ["estimation", "queue", "items"] },
         { path: ["actions", "items"] },
         { path: ["role", "next"] },
+        { path: ["rankedActions", "decisionEngine", "denials"] },
         { path: ["decisionEngine", "denials"] },
         // Beyond the first few, warnings yield before the ranked shortlist; their count remains.
         { path: [warningsList] },
         { path: ["rankedActions", "items"] },
         { path: ["estimation", "findings"] },
+        { path: ["rankedActions", "decisionEngine", "diagnostics"] },
         { path: ["decisionEngine", "diagnostics"] },
+        { path: ["process", "diagnostics"] },
       );
       return lists;
     },
@@ -158,7 +161,8 @@ export function briefingView(base: ViewBase, report: Json): BoundedView {
 const catchUpSectionOrder = ["activity", "progress", "completed", "blockers", "attention"];
 
 export function repositoryBriefingView(base: ViewBase, report: Json): BoundedView {
-  const { sections: _sections, ...rest } = report;
+  // Completeness is carried once, in the envelope's bounded sourceCompleteness.
+  const { sections: _sections, completeness: _completeness, ...rest } = report;
   const data: Json = { ...rest, sections: report.sections };
   return {
     ...base,
@@ -168,11 +172,15 @@ export function repositoryBriefingView(base: ViewBase, report: Json): BoundedVie
     freshness: obj(report.observation),
     sourceCompleteness: completenessOf(report),
     data,
-    protectedPaths: ["completeness", "coverage", "checkpoint"],
-    lists: (d) =>
-      catchUpSectionOrder
+    protectedPaths: ["coverage", "checkpoint"],
+    lists: (d) => [
+      // One group per contributing agent: metadata, pruned before any requested row.
+      { path: ["activityGroups"] },
+      ...catchUpSectionOrder
         .filter((name) => name in obj(d.sections))
         .map((name) => ({ path: ["sections", name, "items"] })),
+      { path: [warningsList] },
+    ],
     fixup: (d) => {
       const sections = obj(d.sections);
       const omissions = obj(d.omissions);
@@ -189,7 +197,7 @@ export function repositoryBriefingView(base: ViewBase, report: Json): BoundedVie
     // The catch-up renderer over the returned rows only, within a share of the byte budget.
     text: (d) =>
       catchUpText(
-        d as unknown as CatchUpReport,
+        { ...d, completeness: report.completeness } as unknown as CatchUpReport,
         Math.max(catchUpLimits.maxChars.min, Math.min(base.maxChars, repositoryTextChars)),
       )
         .trimEnd()
@@ -331,8 +339,10 @@ export function issueView(
     };
     lists = [
       { path: ["estimationFindings"] },
+      { path: ["dependencies", "drift"] },
       { path: ["dependencies", "downstream"] },
       { path: ["dependencies", "upstream"] },
+      { path: ["issue", "labels"] },
       { path: ["findings"] },
     ];
     rowsText = (d) => [
@@ -359,7 +369,10 @@ export function issueView(
       total: pageRows.total,
       rows: pageRows.rows,
     };
-    lists = [{ path: ["rows"], available: pageRows.available, requireRow: true }];
+    lists = [
+      { path: ["issue", "labels"] },
+      { path: ["rows"], available: pageRows.available, requireRow: true },
+    ];
     next = (returned) => pageRows.next(returned["rows"] ?? 0);
     rowsText = (d) =>
       list(d.rows).map((row) => {
@@ -379,12 +392,12 @@ export function issueView(
     freshness: obj(report.freshness),
     sourceCompleteness,
     data,
-    protectedPaths: ["issue.url", "issue.labels"],
+    protectedPaths: [],
     lists: () => lists,
     next,
     text: (d) => [
       `Issue #${number} ${str(issue.title)} (${str(issue.state)}) ${str(issue.url)}`,
-      `Labels: ${issue.labels.join(", ") || "none"}`,
+      `Labels: ${list(obj(d.issue).labels).map(String).join(", ") || "none"}`,
       `Section ${section}${section === "summary" ? "" : `: rows ${page.offset + 1}–${page.offset + list(d.rows).length} of ${String(d.total)}`}`,
       ...rowsText(d),
     ],
@@ -513,9 +526,10 @@ export function dependenciesView(
       relationships: rows.rows,
       guidance: report.guidance,
     },
-    protectedPaths: ["ticket.verdict"],
+    protectedPaths: [],
     // Cycle metadata goes before the requested relationship rows.
     lists: () => [
+      { path: ["ticket", "drift"] },
       { path: ["cycles"] },
       { path: ["relationships"], available: rows.available, requireRow: true },
     ],

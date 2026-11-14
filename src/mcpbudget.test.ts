@@ -646,6 +646,94 @@ describe("bounded MCP results (#266)", () => {
     }
   });
 
+  it("bounds repository-briefing warnings once, in sourceCompleteness", async () => {
+    const rt = runtime();
+    const collect = rt.collect;
+    rt.collect = (async (...args: Parameters<McpRuntime["collect"]>) => ({
+      ...(await collect(...args)),
+      warnings: Array.from({ length: 400 }, (_, i) => `Warning ${i}: ${unicode.repeat(3)}`),
+    })) as McpRuntime["collect"];
+    const client = await connect(rt);
+    try {
+      const { raw, bytes, structured } = await call(client, "triage_briefing", {
+        mode: "briefing",
+        limit: 100,
+      });
+      expect(raw.isError).toBeFalsy();
+      expect(bytes).toBeLessThanOrEqual(budgetBytes);
+      expect((structured.data as Record<string, unknown>).completeness).toBeUndefined();
+      const omitted = structured.presentation.omitted["sourceCompleteness.warnings"] ?? 0;
+      expect(omitted).toBeGreaterThan(0);
+      expect(
+        (structured.sourceCompleteness?.warnings.length ?? 0) + omitted,
+      ).toBeGreaterThanOrEqual(400);
+      expect(structured.sourceCompleteness?.complete).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("applies maxChars to the header lines too", async () => {
+    const client = await connect();
+    const agent = `a${"g".repeat(180)}`;
+    try {
+      for (const [name, args] of [
+        ["triage_briefing", { maxChars: 1000, agent }],
+        ["triage_briefing", { maxChars: 1000, role: "designer", agent }],
+        ["triage_issue", { number: 3, section: "body", maxChars: 1000, agent }],
+        ["triage_dependencies", { number: 25, tree: true }],
+      ] as const) {
+        const { text, structured } = await call(client, name, args);
+        const limit = "maxChars" in args ? args.maxChars : 10_000;
+        expect(text.length, name).toBeLessThanOrEqual(limit);
+        for (const line of text.split("\n")) expect(line.length).toBeLessThanOrEqual(400);
+        expect(structured.status).not.toBe("error");
+      }
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("never lets an unprotected verdict or drift list grow without bound", async () => {
+    const rt = runtime();
+    rt.dependencyReport = (async () => {
+      const report = dependencyTree();
+      const blockers = Array.from({ length: 400 }, (_, i) => ({
+        ...report.nodes[0]!.upstream[0]!,
+        number: 5000 + i,
+        url: url(5000 + i),
+      }));
+      return {
+        ...report,
+        tree: false,
+        nodes: [
+          {
+            ...report.nodes[0]!,
+            upstream: blockers,
+            drift: blockers.map((b) => ({ repository: repo, number: b.number, url: b.url })),
+            verdict: `Waiting on ${blockers.map((b) => b.url).join(", ")}`,
+          },
+        ],
+      };
+    }) as McpRuntime["dependencyReport"];
+    const client = await connect(rt);
+    try {
+      const { raw, bytes, structured } = await call(client, "triage_dependencies", {
+        number: 25,
+        limit: 100,
+      });
+      expect(raw.isError).toBeFalsy();
+      expect(bytes).toBeLessThanOrEqual(budgetBytes);
+      expect(structured.presentation.truncatedFields).toContain("ticket.verdict");
+      expect(structured.presentation.omitted["ticket.drift"]).toBeGreaterThan(0);
+      expect(
+        (structured.data as { relationships: unknown[] }).relationships.length,
+      ).toBeGreaterThan(0);
+    } finally {
+      await client.close();
+    }
+  });
+
   it("keeps full intake available through the CLI", async () => {
     let out = "";
     const code = await main(

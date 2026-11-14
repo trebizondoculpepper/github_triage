@@ -1098,7 +1098,10 @@ describe("repository catch-up aggregation (#169)", () => {
       ).toBe(0);
       const cliReport = JSON.parse(out) as CatchUpReport;
       expect(cliReport.checkpoint.candidate).toBe(t0);
-      expect({ ...report, checkpoint: null }).toEqual({ ...cliReport, checkpoint: null });
+      // Completeness is carried once, in the envelope's sourceCompleteness (#266).
+      const { completeness, ...cliRest } = cliReport;
+      expect(body.sourceCompleteness).toEqual(completeness);
+      expect({ ...report, checkpoint: null }).toEqual({ ...cliRest, checkpoint: null });
       // The budget keeps window, scope and completeness lines and states the read-only policy.
       const text = textOf(result);
       expect(text).toMatch(/^Window /m);
