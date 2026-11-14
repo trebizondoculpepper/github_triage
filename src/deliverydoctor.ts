@@ -10,9 +10,19 @@
  * evaluator. Nothing is posted, closed, reopened, claimed or reassigned. Unknown evidence is
  * reported as unknown: it is never read as "no record", "nobody responsible" or "not delivered".
  */
-import { collectDeliveryFacts, evaluateDelivery } from "./completion.js";
+import {
+  collectDeliveryFacts,
+  completionEffects,
+  effectiveResponsibility,
+  evaluateDelivery,
+} from "./completion.js";
 import type { DeliveryEvaluation } from "./completion.js";
-import { legacyRelease, prUrl } from "./deliverables.js";
+import {
+  deliveryCommentFields,
+  legacyRelease,
+  prUrl,
+  readDeliveryComments,
+} from "./deliverables.js";
 import type { DeliverablesRuntime } from "./deliverables.js";
 import { deliverableLabel, parseDeliveryComment, readDeliveryFold } from "./delivery.js";
 import type { DeliveryComment, TrustDecision } from "./delivery.js";
@@ -253,4 +263,192 @@ export async function diagnoseDelivery(
       `delivery evaluated for ${deliveryDoctorTicketCap} tickets; ${skipped} more with delivery records were not evaluated`,
     );
   return result;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Closed-issue drift (S5, S16, S68 after closing): an explicitly bounded --since window.
+
+/** Closed issues read per Doctor run (one page); more in the window make the scan incomplete. */
+export const closedDriftIssueCap = 50;
+
+/** Closure as reported, never inferred (doc "Closure (reported, never inferred)"). */
+export type Closure =
+  | "open"
+  | "closed-completed"
+  | "closed-not-planned"
+  | "closed-duplicate"
+  | "closed-other";
+export const closureOf = (state: string, stateReason: string | null | undefined): Closure =>
+  state === "OPEN"
+    ? "open"
+    : stateReason === "COMPLETED"
+      ? "closed-completed"
+      : stateReason === "NOT_PLANNED"
+        ? "closed-not-planned"
+        : stateReason === "DUPLICATE"
+          ? "closed-duplicate"
+          : "closed-other";
+
+export interface ClosedDriftTicket {
+  number: number;
+  title: string;
+  url: string;
+  closure: Closure;
+  /** The GitHub login of the closing actor, never "a human"; null when unreadable. */
+  closedBy: string | null;
+  closedAt: string | null;
+  fold: "known" | "unknown";
+  unknownBecause: string[];
+  ticketResponsible: string | null;
+  members: { deliverable: string; responsible: string | null }[];
+  completions: string[];
+  /** Effective `complete` records: responsibility has ended (empty when none is effective). */
+  effectiveCompletion: string[];
+  evaluation: DeliveryEvaluation | null;
+  notEvaluated: string | null;
+}
+export interface ClosedDriftScan {
+  since: string;
+  /** Closed issues in the window that were read. */
+  scanned: number;
+  /** Of those, issues carrying a delivery record (the only ones in drift scope). */
+  withRecords: number;
+  complete: boolean;
+  warnings: string[];
+  tickets: ClosedDriftTicket[];
+}
+
+interface ClosedIssueNode {
+  number: number;
+  title: string;
+  url: string;
+  state: string;
+  stateReason: string | null;
+  closedAt: string | null;
+  timelineItems?: { nodes: ({ actor?: { login?: string } | null } | null)[] };
+  comments: {
+    nodes: DeliveryComment[];
+    pageInfo?: { hasPreviousPage?: boolean; startCursor?: string | null };
+  };
+}
+
+/**
+ * Reads closed issues updated since `since` (one bounded page) and, for those carrying a
+ * delivery record, folds and evaluates delivery live (issue closed). Historical closed tickets
+ * outside the window are out of scope by contract; a truncated window or unreadable history is
+ * reported incomplete, never as "no drift".
+ */
+export async function diagnoseClosedDrift(
+  repository: string,
+  since: string,
+  rt: Required<Pick<DeliveryDoctorRuntime, "trust" | "live">> & { signal?: AbortSignal },
+): Promise<ClosedDriftScan> {
+  const scan: ClosedDriftScan = {
+    since,
+    scanned: 0,
+    withRecords: 0,
+    complete: true,
+    warnings: [],
+    tickets: [],
+  };
+  const [owner, name] = repository.split("/");
+  let nodes: ClosedIssueNode[];
+  try {
+    const data = (await rt.live.query(
+      `query($owner:String!,$name:String!,$since:DateTime!,$first:Int!){repository(owner:$owner,name:$name){issues(states:CLOSED,first:$first,orderBy:{field:UPDATED_AT,direction:DESC},filterBy:{since:$since}){nodes{number title url state stateReason closedAt timelineItems(itemTypes:[CLOSED_EVENT],last:1){nodes{... on ClosedEvent{actor{login}}}} comments(last:100){nodes{${deliveryCommentFields}} pageInfo{hasPreviousPage startCursor}}} pageInfo{hasNextPage}}}}`,
+      { owner, name, since, first: closedDriftIssueCap },
+    )) as {
+      repository: {
+        issues: { nodes: ClosedIssueNode[]; pageInfo: { hasNextPage: boolean } };
+      } | null;
+    };
+    if (!data.repository) throw new Error(`repository ${repository} unavailable`);
+    nodes = data.repository.issues.nodes;
+    if (data.repository.issues.pageInfo.hasNextPage) {
+      scan.complete = false;
+      scan.warnings.push(
+        `more than ${closedDriftIssueCap} issues closed and updated since ${since}; drift beyond them is unknown (narrow --since)`,
+      );
+    }
+  } catch (error) {
+    scan.complete = false;
+    scan.warnings.push(
+      `closed issues since ${since} could not be read (${error instanceof Error ? error.message : "unknown error"}); closed-issue drift is unknown`,
+    );
+    return scan;
+  }
+  let evaluated = 0;
+  for (const node of nodes) {
+    rt.signal?.throwIfAborted();
+    scan.scanned++;
+    let history: Awaited<ReturnType<typeof readDeliveryComments>>;
+    try {
+      history = await readDeliveryComments(repository, node.number, node.comments, rt.live.query);
+    } catch (error) {
+      // A failed older page (rate limit, network) is incomplete coverage, never "no record".
+      scan.complete = false;
+      scan.warnings.push(
+        `${node.url}: comment history could not be read (${error instanceof Error ? error.message : "unknown error"}); its delivery drift is unknown`,
+      );
+      continue;
+    }
+    if (!history.comments.some((c) => parseDeliveryComment(c.body).kind !== "none")) {
+      // An unseen older page may hold a record: that is unknown, never "no record".
+      if (!history.complete) {
+        scan.complete = false;
+        scan.warnings.push(
+          `${node.url}: comment history truncated; whether it carries a delivery record is unknown`,
+        );
+      }
+      continue;
+    }
+    const { records: classified, fold } = await readDeliveryFold(
+      history.comments,
+      history.complete,
+      { repository, issue: node.number },
+      rt.trust,
+    );
+    // An effective `complete` (issue closed, evaluation unchanged) ends all responsibility.
+    const effects = completionEffects(classified, fold, true);
+    const ended = effectiveResponsibility(fold, effects);
+    // Only ignored markers (a verified non-writer's, or a copy bound to another issue) mean no
+    // delivery record: out of drift scope. An unknown fold stays in scope as unknown.
+    if (!fold.recordsUnknown && !fold.hasTrustedRecord) continue;
+    scan.withRecords++;
+    const t: ClosedDriftTicket = {
+      number: node.number,
+      title: node.title,
+      url: node.url,
+      closure: closureOf(node.state, node.stateReason),
+      closedBy: node.timelineItems?.nodes?.[0]?.actor?.login ?? null,
+      closedAt: node.closedAt ?? null,
+      fold: fold.recordsUnknown ? "unknown" : "known",
+      unknownBecause: [...fold.unknownBecause],
+      ticketResponsible: ended.ticketResponsible,
+      members: ended.members,
+      completions: [...fold.completions],
+      effectiveCompletion: effects.filter((e) => e.effective).map((e) => e.comment),
+      evaluation: null,
+      notEvaluated: null,
+    };
+    scan.tickets.push(t);
+    if (fold.recordsUnknown) continue;
+    if (evaluated >= deliveryDoctorTicketCap) {
+      t.notEvaluated = `more than ${deliveryDoctorTicketCap} closed tickets with delivery records; this one was not evaluated`;
+      scan.complete = false;
+      continue;
+    }
+    evaluated++;
+    t.evaluation = evaluateDelivery(
+      await collectDeliveryFacts(
+        { repository, issue: node.number, issueOpen: false, fold, legacyHandoff: false },
+        rt.live,
+      ),
+    );
+  }
+  if (scan.tickets.some((t) => t.notEvaluated))
+    scan.warnings.push(
+      `delivery evaluated for ${deliveryDoctorTicketCap} closed tickets; the rest with delivery records were not evaluated`,
+    );
+  return scan;
 }

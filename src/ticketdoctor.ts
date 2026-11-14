@@ -13,7 +13,12 @@ import { complexityLabelFindings, metricLabelFindings } from "./estimation/compl
 import { impactMetric } from "./estimation/metrics.js";
 import { closingPrEvidence } from "./ranking.js";
 import type { Issue, PullRequest, Snapshot } from "./github/types.js";
-import type { DeliveryDiagnosis, IssueDeliveryDiagnosis } from "./deliverydoctor.js";
+import type {
+  ClosedDriftScan,
+  ClosedDriftTicket,
+  DeliveryDiagnosis,
+  IssueDeliveryDiagnosis,
+} from "./deliverydoctor.js";
 
 /**
  * Whether a PR's contribution is evidently finished: out of draft, checks passing, no open or
@@ -76,6 +81,8 @@ export interface TicketDoctorOptions {
    * trusted delivery records supersede the two label-only review checks for that ticket.
    */
   delivery?: DeliveryDiagnosis;
+  /** #192: closed-issue drift for an explicit `--since` window; absent means not scanned. */
+  closedDrift?: ClosedDriftScan;
 }
 export interface TicketDoctorReport {
   schemaVersion: 1;
@@ -90,6 +97,8 @@ export interface TicketDoctorReport {
   omittedTickets: number;
   completeness: { complete: boolean; warnings: string[] };
   guidance: string;
+  /** #192: present only with `--since`: the bounded closed-issue drift window that was read. */
+  closedScan?: { since: string; scanned: number; withRecords: number; complete: boolean };
 }
 
 /**
@@ -430,6 +439,122 @@ function deliveryFindings(
   // `submitted` with every member open or draft is waiting on review or CI: not a finding.
 }
 
+/**
+ * #192 closed-issue drift (S5, S16, S68 after closing). Closure is reported beside delivery and
+ * never reversed: no step reopens an issue. Unknown evidence yields inspection only.
+ */
+function closedDriftFindings(
+  t: ClosedDriftTicket,
+  add: AddFinding,
+  cmd: ReturnType<typeof planCommands>,
+  repository: string,
+): void {
+  const closed = `Closed ${t.closure.replace("closed-", "")}${t.closedBy ? ` by ${t.closedBy}` : " (closing actor unreadable)"}${t.closedAt ? ` at ${t.closedAt}` : ""}`;
+  const facts = [
+    `${closed}; a login is reported, never a person, and closure is never evidence of delivery.`,
+    // An unknown fold cannot name anyone: its null is unknown, never "nobody".
+    ...(t.fold === "known"
+      ? [
+          `Ticket responsible: ${t.ticketResponsible ?? "nobody"}.`,
+          ...t.members.map((m) => `${m.deliverable}: responsible ${m.responsible ?? "nobody"}.`),
+        ]
+      : ["Responsibility is unknown: the delivery records could not all be read or trusted."]),
+  ];
+  const inspect = cmd.deliveryDryRun(t.number, t.ticketResponsible ?? "<AGENT>");
+  const unknown = (why: string[]) =>
+    add(
+      t,
+      "closed-delivery-unknown",
+      "unknown",
+      `${closed}; delivery cannot be verified, so drift is unknown (not absent).`,
+      [cmd.inspectIssue(t.number), inspect],
+      { facts: [...facts, ...why] },
+    );
+  if (t.fold === "unknown") return unknown(t.unknownBecause);
+  if (!t.evaluation) return unknown([t.notEvaluated ?? "delivery was not evaluated"]);
+  const e = t.evaluation;
+  const lines = e.perDeliverable.map(
+    (m) => `${m.deliverable} -> ${m.target}: ${m.state} (${m.why}).`,
+  );
+  if (e.delivery === "unknown") return unknown([...e.because, ...lines]);
+  const localPr = (label: string): number | null => {
+    const m = label.match(prLabel);
+    return m && m[1].toLowerCase() === repository.toLowerCase() ? Number(m[2]) : null;
+  };
+  if (e.delivery !== "delivered" && e.delivery !== "attested" && t.effectiveCompletion.length) {
+    // Completion took effect, so responsibility ended; the evidence regressed afterwards (for
+    // example the target lost the delivered commit). Nobody is addressed; inspection only.
+    add(
+      t,
+      "delivery-regressed-after-completion",
+      "candidate",
+      `${closed}; completion (${t.effectiveCompletion.join(", ")}) took effect, but delivery is now ${e.delivery}. Responsibility ended with completion; nothing is reassigned or reopened.`,
+      [cmd.inspectIssue(t.number), cmd.deliveryDryRun(t.number, "<AGENT>")],
+      { judgment: true, facts: [...facts, ...e.because, ...lines] },
+    );
+    return;
+  }
+  if (t.closure === "closed-completed") {
+    if (e.delivery === "delivered" || e.delivery === "attested") return;
+    const raced = t.completions.length
+      ? [
+          `A complete record (${t.completions.join(", ")}) exists, but delivery no longer holds: a change after the completion check (residual race). The issue is not reopened.`,
+        ]
+      : [];
+    const outstanding = e.perDeliverable.filter((m) => m.state !== "merged");
+    add(
+      t,
+      "closed-not-delivered",
+      "candidate",
+      `${closed}, delivery not verified (${e.delivery}). This is a discrepancy, not proof of unauthorised closure; the issue is never reopened automatically.`,
+      [
+        cmd.inspectIssue(t.number),
+        inspect,
+        ...outstanding.flatMap((m) => {
+          const n = localPr(m.deliverable);
+          return n ? [cmd.pr(n)] : [];
+        }),
+      ],
+      { judgment: true, facts: [...facts, ...raced, ...e.because, ...lines] },
+    );
+    return;
+  }
+  // Not planned, duplicate or other: closure is reported as not delivered and respected. Open
+  // required PRs become cleanup attention for their responsible agent (close or explain).
+  const open = e.perDeliverable
+    .map((m, i) => ({ ...m, responsible: t.members[i]?.responsible ?? null }))
+    .filter((m) => m.state === "open" || m.state === "draft");
+  if (!open.length) return;
+  add(
+    t,
+    "closed-cleanup",
+    "candidate",
+    `${closed} with required ${open.map((m) => `${m.deliverable} (${m.state}, responsible ${m.responsible ?? "nobody"})`).join(", ")} still open: cleanup for the responsible agent, close or explain. The closure stands.`,
+    [
+      cmd.inspectIssue(t.number),
+      ...open.flatMap((m) => {
+        const n = localPr(m.deliverable);
+        return n ? [cmd.pr(n), cmd.closePr(n, m.responsible)] : [];
+      }),
+    ],
+    { judgment: true, facts: [...facts, ...lines] },
+  );
+}
+
+/** #192: delivery responsibility beside a possibly stale claim (absent without a diagnosis). */
+function responsibilityFacts(d: IssueDeliveryDiagnosis | undefined, claimant: string): string[] {
+  if (!d) return [];
+  if (d.fold !== "known")
+    return [
+      "Delivery responsibility is unknown (records unread or unverifiable); it is not absent.",
+    ];
+  if (!d.trustedRecord) return [];
+  const mine = d.members.filter((m) => m.responsible === claimant).map((m) => m.deliverable);
+  return [
+    `Delivery responsibility: ticket ${d.ticketResponsible ?? "nobody"}${mine.length ? `; ${claimant} is responsible for ${mine.join(", ")}` : ""}. Releasing the claim does not end responsibility, and inactivity never transfers it (only an explicit handoff, reassign or reset does).`,
+  ];
+}
+
 export function ticketDoctor(
   snapshot: Snapshot,
   {
@@ -439,6 +564,7 @@ export function ticketDoctor(
     offline = false,
     impactEnabled = true,
     delivery,
+    closedDrift,
   }: TicketDoctorOptions = {},
 ): TicketDoctorReport {
   const open = snapshot.issues.filter((i) => i.state === "OPEN");
@@ -977,6 +1103,9 @@ export function ticketDoctor(
               claim.latestActivity
                 ? `Last activity ${claim.latestActivity.at} (${claim.latestActivity.source}).`
                 : "Last activity unknown.",
+              // #192: the claim and delivery responsibility are distinct; releasing a stale claim
+              // never ends responsibility, and inactivity never transfers it.
+              ...responsibilityFacts(delivery?.issues.get(claim.number), agent.agent),
             ],
           },
         );
@@ -991,6 +1120,8 @@ export function ticketDoctor(
     }
   }
 
+  for (const t of closedDrift?.tickets ?? []) closedDriftFindings(t, add, cmd, snapshot.repository);
+
   const order: Record<Certainty, number> = { definite: 0, candidate: 1, unknown: 2 };
   const all = [...tickets.values()]
     .map((t) => ({
@@ -1003,7 +1134,12 @@ export function ticketDoctor(
     );
   const count = (k: Certainty): number =>
     all.reduce((n, t) => n + t.findings.filter((f) => f.certainty === k).length, 0);
-  const warnings = [...snapshot.warnings, ...gaps, ...(delivery?.warnings ?? [])];
+  const warnings = [
+    ...snapshot.warnings,
+    ...gaps,
+    ...(delivery?.warnings ?? []),
+    ...(closedDrift?.warnings ?? []),
+  ];
   return {
     schemaVersion: 1,
     kind: "ticket-doctor",
@@ -1022,6 +1158,16 @@ export function ticketDoctor(
     tickets: all.slice(0, limit),
     omittedTickets: Math.max(0, all.length - limit),
     completeness: { complete: !warnings.length, warnings },
+    ...(closedDrift
+      ? {
+          closedScan: {
+            since: closedDrift.since,
+            scanned: closedDrift.scanned,
+            withRecords: closedDrift.withRecords,
+            complete: closedDrift.complete,
+          },
+        }
+      : {}),
     guidance:
       "Read-only. Definite findings break a recorded rule; candidates and unknowns need inspection. Suggested commands are never run; choices marked judgment need a decision, <PLACEHOLDERS> need filling, and claim commands are only for the claimant.",
   };

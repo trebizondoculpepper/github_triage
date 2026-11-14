@@ -245,6 +245,18 @@ export function planCommands(repository: string) {
           ],
         },
       ),
+    /** #192 (S5): cleanup of a required PR left open after the issue was closed not planned. */
+    closePr: (pr: number, agent: string | null) =>
+      step(
+        "manual",
+        `If PR #${pr} is no longer wanted, close it with an explanation; otherwise explain on it why it stays open.`,
+        ["gh", "pr", "close", String(pr), ...repo, "--comment", "<WHY>"],
+        {
+          choice: `close-pr-${pr}`,
+          ...(agent ? { runBy: `agent ${agent} only (responsible for the PR)` } : {}),
+          preconditions: ["The issue's closure is respected: never reopen it to keep the PR."],
+        },
+      ),
     /** #192: confirm an open required set is complete; delivery is then re-evaluated, not assumed. */
     membershipComplete: (n: number, agent: string) =>
       step(

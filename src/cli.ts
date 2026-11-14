@@ -26,7 +26,7 @@ import { roleNames, roleRegistry } from "./roles.js";
 import { prStatusText, pullRequestStatus } from "./prstatus.js";
 import { pullRequestReviewHistory, reviewHistoryText } from "./reviewhistory.js";
 import { doctorStaleHours, ticketDoctor, ticketDoctorText } from "./ticketdoctor.js";
-import { diagnoseDelivery } from "./deliverydoctor.js";
+import { diagnoseClosedDrift, diagnoseDelivery } from "./deliverydoctor.js";
 import {
   applyPlan,
   claimPolicy,
@@ -176,9 +176,12 @@ Rollback: pdb config set briefing.engine typescript.
   team [--stale-hours N]  Read-only: each agent's claims, linked PRs, activity and warnings
   who N [--stale-hours N]  Read-only: who is working on ticket N? Claims, PRs, activity,
                         handoff evidence and contradictions in one operation
-  ticket-doctor [--stale-hours N] [--limit N]  Read-only consistency scan of all open tickets
+  ticket-doctor [--stale-hours N] [--limit N] [--since ISO]  Read-only consistency scan of all open tickets
                         (including conflicting complexity labels), with suggested correction
                         commands per finding (never run; claim commands only for the claimant)
+                        and delivery drift; --since also checks closed issues with delivery
+                        records updated in that window (closed but not delivered; open PRs left
+                        after a not-planned closure). Never reopens anything.
   doctor [--agent NAME] [--role NAME] [--entry KEY | --harness NAME]  Read-only local
                         configuration checks: Node, gh install/auth, checkout, agent-inbox.toml
                         presence, parse, Git ignore vs tracked, selected entry, persisted name
@@ -664,6 +667,7 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
         limit: { type: "string" },
         cache: { type: "string" },
         offline: { type: "boolean" },
+        since: { type: "string" },
       },
     });
     if (values.repo && !/^[\w.-]+\/[\w.-]+$/.test(values.repo))
@@ -676,6 +680,13 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
     if (!Number.isInteger(limit) || limit <= 0)
       throw new Error("--limit must be a positive integer.");
     if (values.offline && !values.cache) throw new Error("--offline requires --cache PATH.");
+    // #192: closed-issue drift reads an explicit bounded window live; never from a cache.
+    if (values.since !== undefined && (values.offline || Number.isNaN(Date.parse(values.since))))
+      throw new Error(
+        values.offline
+          ? "--since reads closed issues live and cannot be used with --offline."
+          : "--since must be an ISO 8601 timestamp.",
+      );
     const snapshot = values.offline
       ? await cachedSnapshot(values.cache ?? "", values.repo)
       : await runtime.collect(values.repo ?? (await runtime.currentRepository()), {});
@@ -690,8 +701,16 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
       trust: rest ? markerTrust(permissionLookup(snapshot.repository, rest)) : undefined,
       live: rest ? { query: runtime.query ?? ghQuery, rest } : undefined,
     });
+    const closedDrift =
+      values.since !== undefined && rest
+        ? await diagnoseClosedDrift(snapshot.repository, new Date(values.since).toISOString(), {
+            trust: markerTrust(permissionLookup(snapshot.repository, rest)),
+            live: { query: runtime.query ?? ghQuery, rest },
+          })
+        : undefined;
     const report = ticketDoctor(snapshot, {
       delivery,
+      closedDrift,
       staleHours,
       limit,
       now: runtime.now?.() ?? new Date(),
