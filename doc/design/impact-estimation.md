@@ -36,7 +36,7 @@ Every complexity mechanism has an impact counterpart. The implementation general
 | v2 provenance comment (`github-triage:complexity-estimate v2`)                           | `github-triage:impact-estimate v1`                                                  | Same writer/parser shape, separate marker                |
 | Idempotent retry, partial-write reporting, no rollback                                   | Identical                                                                           | Unchanged                                                |
 | `sizeReport` staleness and queue (`src/estimation.ts`)                                   | Same staleness tests against impact provenance and guidance version                 | Parameterise by descriptor                               |
-| `complexity.enabled` (`src/config.ts`)                                                   | `impact.enabled`                                                                    | Same registered-key mechanism                            |
+| `complexity.enabled` (`src/config/config.ts`)                                            | `impact.enabled`                                                                    | Same registered-key mechanism                            |
 | CLI/MCP help from one guidance definition                                                | Same renderer, second definition                                                    | Unchanged pattern                                        |
 
 Not reused: `immediateUnlocks`, `UnlockImpact`, `compareImpact` and `--order impact` in `src/ranking.ts`. Those compute dependency-unlock utility, which is a different fact (next section).

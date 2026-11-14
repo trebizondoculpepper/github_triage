@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { resolveEngineSetting } from "./engine-setting.js";
+import { resolveEngineSetting } from "./config/engine-setting.js";
 /** One read-only intake command. Contract: doc/pdb-cli.md. */
 import { realpathSync } from "node:fs";
 import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
@@ -58,8 +58,8 @@ import { pickupOrders } from "./ranking.js";
 import type { PickupOrder } from "./ranking.js";
 import { complexityGuidanceJson, complexityGuidanceText } from "./complexity.js";
 import { impactGuidanceJson, impactGuidanceText } from "./impact.js";
-import { runConfig } from "./configcli.js";
-import type { ConfigRuntime } from "./configcli.js";
+import { runConfig } from "./config/configcli.js";
+import type { ConfigRuntime } from "./config/configcli.js";
 import { estimateUsage, runEstimate } from "./estimate.js";
 import {
   applyDeliverables,
@@ -84,8 +84,8 @@ import type { LabelEstimationRuntime } from "./complexitylabels.js";
 import { metricStatus } from "./complexitylabels.js";
 import { impactMetric } from "./metrics.js";
 import type { EstimateRuntime } from "./estimate.js";
-import { localDoctor, localDoctorExitCode, localDoctorText } from "./localdoctor.js";
-import type { LocalDoctorRuntime } from "./localdoctor.js";
+import { localDoctor, localDoctorExitCode, localDoctorText } from "./config/localdoctor.js";
+import type { LocalDoctorRuntime } from "./config/localdoctor.js";
 import type { GhRun } from "./dependencies.js";
 import type { Query, Rest } from "./github.js";
 import type { Snapshot } from "./types.js";

@@ -14,8 +14,8 @@ import {
   suggestedMetricSize,
   suggestedSize,
 } from "./complexitylabels.js";
-import { CONFIG_KEYS, TOML_CONFIG_PATH, loadConfig } from "./config.js";
-import type { ConfigFileSystem, GitRunner } from "./config.js";
+import { CONFIG_KEYS, TOML_CONFIG_PATH, loadConfig } from "./config/config.js";
+import type { ConfigFileSystem, GitRunner } from "./config/config.js";
 import type { TrustDecision } from "./delivery.js";
 import {
   parseImpactProvenance,

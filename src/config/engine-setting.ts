@@ -8,7 +8,7 @@ import {
   nodeFileSystem,
   nodeGit,
 } from "./config.js";
-import type { GuideRuntime } from "./process.js";
+import type { GuideRuntime } from "../process.js";
 export type EngineName = "typescript" | "datalog";
 export const defaultEngine = (): EngineName =>
   CONFIG_KEYS.find((k) => k.key === "briefing.engine")?.defaultValue === "datalog"

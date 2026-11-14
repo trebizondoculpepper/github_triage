@@ -1,4 +1,4 @@
-import type { LockTiming } from "./filelock.js";
+import type { LockTiming } from "./config/filelock.js";
 import { describe, expect, it } from "vite-plus/test";
 import {
   chmod,
@@ -53,7 +53,7 @@ import {
   type ConfigFileSystem,
   type ConfigSchema,
   type GitRunner,
-} from "./config.js";
+} from "./config/config.js";
 import { briefing, dependencyDone, textReport } from "./briefing.js";
 import {
   commandRegistry,
@@ -107,10 +107,20 @@ import {
   readIdentity,
   resolveIdentityTarget,
   setIdentity,
-} from "./identity.js";
-import { detectClientEntry, detectHarness, HARNESS_DETECTORS, resolveEntry } from "./harness.js";
-import { localDoctor, localDoctorExitCode, localDoctorText, nodeProbe } from "./localdoctor.js";
-import { configArgumentsFor } from "./configcli.js";
+} from "./config/identity.js";
+import {
+  detectClientEntry,
+  detectHarness,
+  HARNESS_DETECTORS,
+  resolveEntry,
+} from "./config/harness.js";
+import {
+  localDoctor,
+  localDoctorExitCode,
+  localDoctorText,
+  nodeProbe,
+} from "./config/localdoctor.js";
+import { configArgumentsFor } from "./config/configcli.js";
 import { changeSubject, parseDuration, resolveWindow, snapshotChangeEvidence } from "./changes.js";
 import type { Issue, Page, PullRequest, Snapshot } from "./types.js";
 

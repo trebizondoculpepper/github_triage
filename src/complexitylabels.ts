@@ -28,8 +28,8 @@ import {
   resolveRepositoryTarget,
   retiredKeyNotices,
   settingFor,
-} from "./config.js";
-import type { ConfigFileSystem, GitRunner } from "./config.js";
+} from "./config/config.js";
+import type { ConfigFileSystem, GitRunner } from "./config/config.js";
 import { sizeReport } from "./estimation.js";
 import type { EstimationFinding, EstimationReport, SizeReading, SizeSource } from "./estimation.js";
 import type { PickupContext } from "./ranking.js";

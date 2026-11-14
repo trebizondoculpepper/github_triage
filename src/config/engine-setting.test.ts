@@ -1,14 +1,14 @@
 import { Client } from "@modelcontextprotocol/client";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
-import { createServer, envelope } from "./mcp.js";
+import { createServer, envelope } from "../mcp.js";
 import { describe, it, expect } from "vite-plus/test";
 import { parseConfig, settingFor } from "./config.js";
 import { resolveEngineSetting } from "./engine-setting.js";
-import { emptyFileSystem, fakeGit, SYNTHETIC_ROOT } from "../scripts/benchmark-isolation.js";
-import { presentBriefing, readBriefing } from "./service.js";
-import { main } from "./cli.js";
-import { dependencyReport } from "./dependencies.js";
-import type { Issue, Snapshot } from "./types.js";
+import { emptyFileSystem, fakeGit, SYNTHETIC_ROOT } from "../../scripts/benchmark-isolation.js";
+import { presentBriefing, readBriefing } from "../service.js";
+import { main } from "../cli.js";
+import { dependencyReport } from "../dependencies.js";
+import type { Issue, Snapshot } from "../types.js";
 const item: Issue = {
   number: 1,
   title: "An available job",

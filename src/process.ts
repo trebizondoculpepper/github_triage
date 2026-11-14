@@ -25,8 +25,8 @@ import {
   nodeGit,
   resolveRepositoryTarget,
   settingFor,
-} from "./config.js";
-import type { ConfigFileSystem, GitRunner } from "./config.js";
+} from "./config/config.js";
+import type { ConfigFileSystem, GitRunner } from "./config/config.js";
 
 /** Version of the `process` object's own shape. */
 export const PROCESS_SCHEMA_VERSION = 1;
