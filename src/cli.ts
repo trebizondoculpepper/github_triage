@@ -35,8 +35,8 @@ import {
   planNeedsHuman,
   planRelease,
 } from "./claims.js";
-import { cachedCheckForUpdate } from "./updatecache.js";
-import { installedVersion, optOutEnv, legacyOptOutEnv, updateAdvisory } from "./updates.js";
+import { cachedCheckForUpdate } from "./updates/updatecache.js";
+import { installedVersion, optOutEnv, legacyOptOutEnv, updateAdvisory } from "./updates/updates.js";
 import { defaultStaleHours, teamText, teamView } from "./team.js";
 import { ticketOwnership, ticketOwnershipText } from "./who.js";
 import { migrationPlanText, planMigration } from "./migration.js";

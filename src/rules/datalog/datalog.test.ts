@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vite-plus/test";
 import { evaluateDatalog } from "./datalog.js";
-import type { Snapshot, Issue, Page, PullRequest } from "./types.js";
-import type { SubjectAssessments, MetricView } from "./assessments.js";
+import type { Snapshot, Issue, Page, PullRequest } from "../../types.js";
+import type { SubjectAssessments, MetricView } from "../../assessments.js";
 const page = <T>(nodes: T[] = []): Page<T> => ({
   nodes,
   pageInfo: { hasNextPage: false, endCursor: null },

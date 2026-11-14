@@ -2,10 +2,10 @@
 import ds from "datascript";
 import type { Datom, Value, Db } from "datascript";
 import { createHash } from "node:crypto";
-import type { Snapshot, Issue, PullRequest } from "./types.js";
-import type { SubjectAssessments } from "./assessments.js";
-import type { RankedAction, RankedActions, BlendedRole, ActionKind, Band } from "./blended.js";
-import type { PickupOrder } from "./ranking.js";
+import type { Snapshot, Issue, PullRequest } from "../../types.js";
+import type { SubjectAssessments } from "../../assessments.js";
+import type { RankedAction, RankedActions, BlendedRole, ActionKind, Band } from "../../blended.js";
+import type { PickupOrder } from "../../ranking.js";
 import {
   definitions,
   clauses,
@@ -25,7 +25,7 @@ import {
   eligibilityWitnesses,
   sortClauses,
   policyVersion,
-} from "./datalog-policy.js";
+} from "./policy.js";
 
 export interface DatalogOptions {
   role: BlendedRole;

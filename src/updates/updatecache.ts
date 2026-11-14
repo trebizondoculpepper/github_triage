@@ -13,7 +13,7 @@ import { randomBytes } from "node:crypto";
 import * as nodeFs from "node:fs/promises";
 import { join } from "node:path";
 import envPaths from "env-paths";
-import { acquireFileLock, type LockFs } from "./filelock.js";
+import { acquireFileLock, type LockFs } from "../filelock.js";
 import {
   checkForUpdate,
   type CheckOptions,

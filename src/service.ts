@@ -57,8 +57,9 @@ export async function presentBriefing(
   redactDiagnostic?: (text: string) => string,
   trust?: TrustDecision,
   signal?: AbortSignal,
-  loadEngine: () => Promise<Pick<typeof import("./datalog.js"), "evaluateDatalog">> = () =>
-    import("./datalog.js"),
+  loadEngine: () => Promise<
+    Pick<typeof import("./rules/datalog/datalog.js"), "evaluateDatalog">
+  > = () => import("./rules/datalog/datalog.js"),
 ): Promise<PresentedBriefing> {
   // Sizes come from the snapshot's labels (#152); only configuration is read here.
   const collected = await collectLabelEstimationInput(snapshot.repository, estimationRuntime);
@@ -88,7 +89,7 @@ export async function presentBriefing(
   const responsibility = await readSnapshotResponsibility(snapshot, trust, signal);
   options = { ...options, responsible: responsibility.responsible };
   let experimental:
-    | Awaited<ReturnType<(typeof import("./datalog.js"))["evaluateDatalog"]>>
+    | Awaited<ReturnType<(typeof import("./rules/datalog/datalog.js"))["evaluateDatalog"]>>
     | undefined;
   const selection = options.engineSetting ?? {
     requested: defaultEngine(),

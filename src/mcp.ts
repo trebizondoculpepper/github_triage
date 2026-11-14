@@ -27,8 +27,8 @@ import {
   sharedCollect,
   systemClock,
   Watcher,
-} from "./polling.js";
-import type { Clock } from "./polling.js";
+} from "./mcp/polling.js";
+import type { Clock } from "./mcp/polling.js";
 import type { ReadRuntime } from "./service.js";
 import type { ConfigFileSystem, GitRunner } from "./config.js";
 import { validateHarness } from "./harness.js";
@@ -36,7 +36,7 @@ import type { Environment } from "./harness.js";
 import { validateEntryKey } from "./identity.js";
 import { resolveReadIdentity } from "./readidentity.js";
 import type { ReadIdentity } from "./readidentity.js";
-import { installedVersion } from "./updates.js";
+import { installedVersion } from "./updates/updates.js";
 import { pickupOrders } from "./ranking.js";
 import { roleNames } from "./roles.js";
 
