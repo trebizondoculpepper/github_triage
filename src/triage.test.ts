@@ -2441,6 +2441,20 @@ describe("pr status: why is a PR not progressing (#59)", () => {
     closingIssuesReferences: { nodes: o.issues ?? [] },
     ...o.pr,
   });
+  it("computes head acceptance over every receipt before the display limit (#192)", async () => {
+    const { prStatus } = await import("./prstatus.js");
+    const bots = [1, 2, 3, 4].map((n) => ({
+      author: { login: "coderabbitai[bot]" },
+      createdAt: `2026-11-12T10:0${n}:00Z`,
+      url: `https://c/b${n}`,
+      body: `note ${n}`,
+    }));
+    const r = prStatus(repo, pull({ comments: [codexComment(head), ...bots] }));
+    expect(r.receipts).toHaveLength(3);
+    expect(r.receipts.some((c: { codexState: unknown }) => c.codexState)).toBe(false);
+    expect(r.headReviewed).toBe(true);
+  });
+
   it("classifies checks: passed, pending, cancelled, failed, unknown", async () => {
     const { classifyCheck } = await import("./prstatus.js");
     expect(classifyCheck(run("a"))).toBe("passed");

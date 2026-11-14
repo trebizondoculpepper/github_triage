@@ -19,7 +19,7 @@ import type { MemberState, TicketDelivery } from "./completion.js";
 import type { Issue, PullRequest, Snapshot } from "./github/types.js";
 import { prChecks, workflow } from "./briefing.js";
 import type { PrStatusReport } from "./prstatus.js";
-import { headAccepted, headReviewed } from "./reviewevidence.js";
+import { headReviewed } from "./reviewevidence.js";
 
 /**
  * Follow-up for one required deliverable: `waiting` on checks or review (attention released,
@@ -175,11 +175,8 @@ export function reportFollowUpFacts(r: PrStatusReport): FollowUpFacts {
     unresolvedThreads: r.threads.unresolved.length + r.threads.omitted > 0,
     mergeable: r.pullRequest.mergeable,
     mergeState: r.pullRequest.mergeState,
-    headReviewed: headAccepted(
-      r.pullRequest.head,
-      r.reviews.map((v) => ({ state: v.state, commit: v.reviewedCommit })),
-      r.receipts.map((c) => ({ by: c.by, state: c.codexState?.code_review })),
-    ),
+    // Computed by prstatus over every fetched review and receipt, before display truncation.
+    headReviewed: r.headReviewed,
   };
 }
 
@@ -440,6 +437,11 @@ export async function readIssuesDelivery(
       const node = data.repository?.issue;
       if (!node) throw new Error("not readable");
       const history = await readDeliveryComments(repository, number, node.comments, rt.query);
+      // The page bound leaves older comments unread: a record may be among them.
+      if (!history.complete)
+        omissions.push(
+          `#${number}: comment history truncated at the page limit; its delivery records may be unseen`,
+        );
       issues.push({
         ...node,
         comments: {

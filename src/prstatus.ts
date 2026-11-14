@@ -10,7 +10,7 @@
  * approval.
  */
 import { workflow } from "./briefing.js";
-import { codexMarker } from "./reviewevidence.js";
+import { codexMarker, headAccepted } from "./reviewevidence.js";
 export { codexMarker };
 import { ghQuery, prop, selected } from "./github/github.js";
 import type { Query } from "./github/github.js";
@@ -151,6 +151,11 @@ export type PrStatusReport = {
   receipts: Receipt[];
   /** Earlier receipts dropped by the presentation limit. */
   omittedReceipts: number;
+  /**
+   * #341 head acceptance over every fetched review and receipt (before the presentation limit):
+   * an approval or clean Codex receipt bound to the current head, vetoed by head findings.
+   */
+  headReviewed: boolean;
   reviewRequest: { at: string; url: string; status: string } | null;
   linkedIssues: {
     number: number;
@@ -467,6 +472,11 @@ export function prStatus(
     },
     receipts: receipts.slice(-limits.receipts),
     omittedReceipts: Math.max(0, receipts.length - limits.receipts),
+    headReviewed: headAccepted(
+      head,
+      pr.reviews.nodes.map((v) => ({ state: v.state, commit: v.commit?.oid ?? null })),
+      receipts.map((c) => ({ by: c.by, state: c.codexState?.code_review })),
+    ),
     reviewRequest: request,
     linkedIssues,
     blockers,

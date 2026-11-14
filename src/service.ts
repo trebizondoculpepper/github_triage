@@ -14,7 +14,7 @@ import type { EngineSetting, DecisionEngineMetadata } from "./config/engine-sett
 import { collect, IssueUnavailable, permissionLookup } from "./github/github.js";
 import type { IssueDiagnosis, Query, Rest } from "./github/github.js";
 import { diagnoseDelivery } from "./deliverydoctor.js";
-import { deliveryRead } from "./deliveryread.js";
+import { deliveryRead, omissionLines } from "./deliveryread.js";
 import type { DeliveryRead } from "./deliveryread.js";
 import { markerTrust } from "./delivery.js";
 import { readSnapshotResponsibility } from "./responsibility.js";
@@ -195,13 +195,17 @@ export async function presentBriefing(
   const engineHeader = experimental
     ? `Decision engine: Datalog (policy ${experimental.decisionEngine.policyVersion}; ${experimental.decisionEngine.rulesHash.slice(0, 12)})\n`
     : "";
+  // Delivery omissions are shown in text too, within the compact budget.
+  const omitted = omissionLines(delivery);
+  const footer = omitted.length ? omitted.join("\n") + "\n" : "";
   return {
     report,
     text:
       engineHeader +
       (compact
-        ? compactText(compact, Math.max(0, options.maxChars - engineHeader.length))
-        : textReport(expanded)),
+        ? compactText(compact, Math.max(0, options.maxChars - engineHeader.length - footer.length))
+        : textReport(expanded)) +
+      footer,
     complete: report.completeness.complete,
   };
 }

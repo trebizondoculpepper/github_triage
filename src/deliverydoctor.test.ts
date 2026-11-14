@@ -1081,6 +1081,21 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
       q.includes("issue(number:$number){number title")
         ? { repository: { issue: nodes[Number(v.number)] } }
         : fake.rt.query(q, v);
+    // A history cut at the page limit is an omission, never "no record".
+    const cut = {
+      ...issueNode(71, []),
+      comments: { nodes: [], pageInfo: { hasPreviousPage: true, startCursor: null } },
+    };
+    const truncated = await readIssuesDelivery(repo, [71], {
+      query: (async (q: string, v: Record<string, unknown>) =>
+        q.includes("issue(number:$number){number title")
+          ? { repository: { issue: cut } }
+          : fake.rt.query(q, v)) as never,
+      rest: fake.rt.rest,
+      trust,
+    });
+    expect(truncated.complete).toBe(false);
+    expect(truncated.omissions.join(" ")).toContain("#71: comment history truncated");
     const issuesRead = await readIssuesDelivery(repo, [68, 69, 70], {
       query: query as never,
       rest: fake.rt.rest,
@@ -1256,6 +1271,7 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
       threads: { unresolved: [], omitted: 0 },
       reviews: [{ state: "APPROVED", reviewedCommit: "old" }],
       receipts: [],
+      headReviewed: false,
       completeness: { complete: true, warnings: [] },
     } as unknown as PrStatusReport;
     expect(classifyFollowUp(reportFollowUpFacts(report))).toEqual([
@@ -1268,6 +1284,7 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
         ...report,
         checks: { ...report.checks, required: { class: "passed", outcome } },
         receipts: [],
+        headReviewed: true,
         reviews: [{ state: "APPROVED", reviewedCommit: "h1" }],
         pullRequest: { ...report.pullRequest, mergeState: "CLEAN" },
       } as unknown as PrStatusReport;
@@ -1275,6 +1292,7 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
     }
     const codex = {
       ...report,
+      headReviewed: true,
       receipts: [
         {
           by: "chatgpt-codex-connector",
@@ -1321,6 +1339,8 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
       if (read.kind !== "report") throw new Error("unavailable");
       expect(read.complete).toBe(false);
       expect(read.report.completeness.warnings.join(" ")).toContain("1 more with delivery records");
+      expect(read.text).toContain("INCOMPLETE (delivery):");
+      expect(read.text.length).toBeLessThanOrEqual(4000);
     });
 
     it("an explicit intake evaluates its own ticket even past the cap", async () => {
