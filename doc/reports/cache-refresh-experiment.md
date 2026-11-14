@@ -36,8 +36,6 @@ All under `doc/reports/examples/cache-experiments/`, following the convention of
 - `refresh.test.ts` — 23 tests: one per scenario (expected versus observed misses for every strategy) plus manifest, watermark and 304 handling.
 - `refresh-run.ts` — the runner. Fixture mode (default) prints a `schemaVersion: 1, kind: cache-experiment` JSON report with no network. `--live` is explicit, requires `--repo` and `--state` (a file outside the repository holding the previous manifest and ETags), is serial, has a hard budget of 60 requests per run, and stops at the first rate-limit response. It never issues a write.
 
-The contract names the report `cache-refresh-experiment.md`; this report uses the file name requested for the #202 delivery, `conditional-refresh-experiment.md`, and is the same deliverable.
-
 ## Method
 
 Live runs were read-only against `trebizondoculpepper/presidential-daily-briefing` on 2026-11-14 between 18:27 and 18:30 UTC (one cold run, three warm runs), from macOS over a home connection, with `gh` 2.103.3 and Node 26.7.0, source revision `55e0760`. The repository had 195 issues and 180 PRs, one PR open (#365). Per-subject resources used issue #202 and PR #365. Each figure is one run, not a statistical study.
