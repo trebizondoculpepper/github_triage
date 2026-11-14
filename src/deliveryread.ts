@@ -660,6 +660,24 @@ export function withDeliveryCompleteness<
   };
 }
 
-/** Text lines for delivery omissions, appended to a surface's text output. */
-export const omissionLines = (read: { omissions: string[] } | null): string[] =>
-  (read?.omissions ?? []).map((o) => `INCOMPLETE (delivery): ${o}`);
+/** Delivery omission lines shown in text; the rest are counted (JSON keeps every one). */
+export const omissionTextLimit = 3;
+
+/**
+ * Text lines for delivery omissions, appended to a surface's text output: at most `limit`
+ * warnings plus a count of the rest, so a long list never crowds out the report itself.
+ */
+export const omissionLines = (
+  read: { omissions: string[] } | null,
+  limit = omissionTextLimit,
+): string[] => {
+  const all = read?.omissions ?? [];
+  return [
+    ...all.slice(0, limit).map((o) => `INCOMPLETE (delivery): ${o}`),
+    ...(all.length > limit
+      ? [
+          `INCOMPLETE (delivery): ${all.length - limit} more delivery warning(s) omitted; use --json`,
+        ]
+      : []),
+  ];
+};

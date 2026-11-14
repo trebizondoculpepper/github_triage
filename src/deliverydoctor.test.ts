@@ -1457,8 +1457,27 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
       if (read.kind !== "report") throw new Error("unavailable");
       expect(read.complete).toBe(false);
       expect(read.report.completeness.warnings.join(" ")).toContain("1 more with delivery records");
-      expect(read.text).toContain("INCOMPLETE (delivery):");
+      expect(read.text).toContain("INCOMPLETE: ");
       expect(read.text.length).toBeLessThanOrEqual(4000);
+    });
+
+    it("bounds delivery warnings in text and keeps every warning in JSON", async () => {
+      const long = Array.from(
+        { length: 30 },
+        (_, i) => ({ ...issue(300 + i, ["bug"]), comments: page([], true) }) as Issue,
+      );
+      const read = await readBriefing(runtime(snapshot(long), fakeFor(0)), {
+        repository: repo,
+        limit: 10,
+        maxChars: 1500,
+      });
+      if (read.kind !== "report") throw new Error("unavailable");
+      expect(read.report.delivery?.omissions).toHaveLength(30);
+      expect(read.report.completeness.warnings).toHaveLength(30);
+      expect(read.text.length).toBeLessThanOrEqual(1500);
+      const shown = read.text.split("\n").filter((l) => l.startsWith("INCOMPLETE"));
+      expect(shown).toHaveLength(6);
+      expect(shown.at(-1)).toContain("25 more warning(s) omitted; use --json");
     });
 
     it("an explicit intake evaluates its own ticket even past the cap", async () => {
