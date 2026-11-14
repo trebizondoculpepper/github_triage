@@ -34,7 +34,7 @@ import {
   type LoadResult,
   type WriteStep,
 } from "./storage.js";
-import { spawnWorker } from "./storage-worker.js";
+import { releaseTogether, spawnWorker } from "./storage-worker.js";
 
 interface Row {
   id: string;
@@ -456,8 +456,18 @@ export async function runExperiment(base: string, iterations: number) {
         go,
       ]),
     );
-    await Promise.all(workers.map((w) => w.waitFor("ready")));
-    writeFileSync(go, "");
+    const barrier = await releaseTogether(workers, go);
+    if (!barrier.ok) {
+      // Every worker has been stopped and joined; the row fails with the reason.
+      concurrency.push({ writers, writesEach: each, barrierFailed: barrier.error });
+      row(
+        `W${writers}`,
+        `${writers} processes x ${each} read-modify-writes`,
+        `${writers * each} records; every writer exit 0 with ${each} written, none failed; overlapped`,
+        `barrier failed: ${barrier.error}`,
+      );
+      continue;
+    }
     const results = await Promise.all(workers.map((w) => w.done));
     const wall = Math.round(performance.now() - t);
     const final = await confirmed(root);

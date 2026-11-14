@@ -5,7 +5,7 @@
  * (and "held" while holding a lock). Only touches the root it is given.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -73,6 +73,32 @@ export function spawnWorker(args: string[]): Worker {
         waiters.push({ line, ok, fail });
         settle();
       }),
+  };
+}
+
+/**
+ * Readiness barrier: wait until every worker prints "ready", then create `go` so they start
+ * together. If any worker exits (or fails) before reporting ready, the go file is never created;
+ * every other worker is stopped and joined, so none is left running, and the barrier fails.
+ */
+export async function releaseTogether(
+  workers: Worker[],
+  go: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const ready = await Promise.allSettled(workers.map((w) => w.waitFor("ready")));
+  const failed = ready.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+  if (failed.length === 0) {
+    writeFileSync(go, "");
+    return { ok: true };
+  }
+  for (const w of workers)
+    if (w.child.exitCode === null && w.child.signalCode === null) w.child.kill();
+  await Promise.all(workers.map((w) => w.done));
+  return {
+    ok: false,
+    error: failed
+      .map((f) => (f.reason instanceof Error ? f.reason.message : "rejected"))
+      .join("; "),
   };
 }
 

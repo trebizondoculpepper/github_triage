@@ -452,7 +452,9 @@ export function applyObservation(
   const kept = new Set(records.map((r) => r.subject));
   const listedNow = new Set(manifest.map((m) => m.subject));
   const evicted = [...new Set([...(previous?.omissions.evicted ?? []), ...omissions.evicted])]
-    .filter((x) => listedNow.has(x) && !kept.has(x))
+    // Cleared once stored again, or once a complete manifest no longer lists it. A partial
+    // manifest that does not list it proves nothing, so the eviction stays on record.
+    .filter((x) => !kept.has(x) && (listedNow.has(x) || !complete))
     .sort();
   const c = key.canonical;
   return {

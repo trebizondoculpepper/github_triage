@@ -26,7 +26,7 @@ import {
   type WriteStep,
 } from "./storage.js";
 import { rewriteVerdict, writersVerdict } from "./storage-run.js";
-import { spawnWorker } from "./storage-worker.js";
+import { releaseTogether, spawnWorker } from "./storage-worker.js";
 
 const roots: string[] = [];
 const newRoot = () => {
@@ -430,8 +430,7 @@ describe("separate processes", () => {
     const go = join(root, "go");
     const a = spawnWorker(["write", root, JSON.stringify(ctx), "a", "15", "0", go]);
     const b = spawnWorker(["write", root, JSON.stringify(ctx), "b", "15", "1000", go]);
-    await Promise.all([a.waitFor("ready"), b.waitFor("ready")]);
-    writeFileSync(go, "");
+    expect(await releaseTogether([a, b], go)).toEqual({ ok: true });
     const [ra, rb] = await Promise.all([a.done, b.done]);
     expect(ra.code, ra.stderr).toBe(0);
     expect(rb.code, rb.stderr).toBe(0);
@@ -915,4 +914,45 @@ describe("an unreadable previous snapshot is never replaced", () => {
     writeFileSync(file(root), "{");
     expect(await write(root, 3)).toMatchObject({ status: "written", previous: "truncated" });
   });
+});
+
+describe("third-round review fixes", () => {
+  it("a partial manifest keeps earlier evictions for subjects it does not list", () => {
+    const k = key();
+    const capped = applyObservation(undefined, k, syntheticObservation(300, at()), T0).snapshot;
+    expect(capped.omissions.evicted).toHaveLength(44);
+    // Partial: lists only 5 subjects, none of them evicted ones.
+    const partial = applyObservation(capped, k, syntheticObservation(5, at(), "partial"), T0);
+    expect(partial.snapshot.omissions.evicted).toEqual(capped.omissions.evicted);
+    // Complete manifest that no longer lists them: cleared.
+    const complete = applyObservation(partial.snapshot, k, syntheticObservation(5, at()), T0);
+    expect(complete.snapshot.omissions.evicted).toEqual([]);
+  });
+
+  it("a partial snapshot with a kept eviction reloads as incomplete", async () => {
+    const root = newRoot();
+    await write(root, 300);
+    await storeSnapshot(root, ctx, () => syntheticObservation(5, at(), "partial"), {
+      now: () => T0,
+    });
+    const r = await read(root);
+    expect(r.status === "hit" && r.storedOmissions.evicted.length).toBe(44);
+    expect(r).toMatchObject({ coverageComplete: false });
+  });
+
+  it("the barrier stops and joins every worker when one exits before ready", async () => {
+    const root = newRoot();
+    const go = join(root, "go");
+    const good = spawnWorker(["write", root, JSON.stringify(ctx), "g", "5", "0", go]);
+    const bad = spawnWorker(["write", root, "{not json", "b", "5", "0", go]);
+    const result = await releaseTogether([good, bad], go);
+    expect(result.ok).toBe(false);
+    expect(existsSync(go)).toBe(false);
+    // Both are joined: the good one was stopped while waiting, the bad one failed.
+    const [dg, db] = await Promise.all([good.done, bad.done]);
+    expect(good.child.exitCode !== null || good.child.signalCode !== null).toBe(true);
+    expect(dg.result).toBeUndefined(); // it never wrote
+    expect(db.code).toBe(1);
+    expect(existsSync(file(root))).toBe(false);
+  }, 30_000);
 });
