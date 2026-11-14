@@ -24,6 +24,12 @@ Prefer TOML for project-owned configuration. The local root-level `agent-inbox.t
 - Native blockedBy/blocking relationships are authoritative; body text is migration/drift context. `deps add`/`deps remove`, `claim` and `needs-human` are the implemented mutations; `release`/handoff (#62) is unfinished and automatic migration apply is deferred (#48). Never apply a live migration without a reviewed plan.
 - Use injected `gh`/clock/filesystem boundaries in tests. Do not add tokens, live snapshots, agent identity files or private configuration to this public repo.
 
+## Automated review and release gate
+
+Owner policy: either Codex or CodeRabbit may satisfy automated review. Required CI (`verify`) must pass on the current PR head, and at least one provider must have completed a clean review covering that head. A completed current-head Codex receipt with no unresolved findings is sufficient; a passing current-head CodeRabbit review is sufficient. Both are not required. Quota skips, neutral checks without a completed review, pending/error reviews and stale-head receipts are not approval. Address every substantive outstanding finding from either reviewer before merging, even when the other provider is clean. A missing second-provider review alone is not a blocker. Follow [review-gate.md](doc/design/review-gate.md).
+
+A merge does not publish to npm. Publication still requires the owner's explicit release request and the existing verified `npm run release` process. Never bypass required CI or use an admin/force merge merely because one reviewer is clean.
+
 ## Work and checks
 
 Use this project's own toolchain for ticket intake, prioritization, claims, handoffs, estimation and diagnostics so routine work tests the product itself. No separate communications platform or external check-in is required. Use this project's triage tool instead of direct `gh` wherever the operation is supported. Use full ticket intake and native dependency views before separate GitHub searches; fall back to `gh` only for unsupported operations, missing evidence or triage diagnosis. Check current `--help`, not planned command syntax.
