@@ -76,6 +76,48 @@ function stats(values: number[]) {
   };
 }
 
+type Tally = { written?: number; notWritten?: Record<string, number> } | undefined;
+const completed = (code: number | null, result: unknown, expected: number) => {
+  const t = result as Tally;
+  return (
+    code === 0 &&
+    t?.written === expected &&
+    t.notWritten !== undefined &&
+    Object.keys(t.notWritten).length === 0
+  );
+};
+
+/** R1 verdict: the writer must have finished every replacement, and readers saw only whole files. */
+export function rewriteVerdict(
+  expected: number,
+  code: number | null,
+  result: unknown,
+  seen: Record<string, number>,
+): string {
+  const reads = Object.values(seen).reduce((a, b) => a + b, 0);
+  const torn = Object.keys(seen).filter((k) => k !== "hit:20" && k !== "hit:200");
+  const writer = completed(code, result, expected)
+    ? `writer exit 0, ${expected} written`
+    : `writer exit ${String(code)}, ${JSON.stringify(result)}`;
+  const readers =
+    reads === 0
+      ? "no reads taken"
+      : torn.length
+        ? `unexpected ${torn.join(",")}`
+        : "no torn or failed reads";
+  return `${writer}; ${readers}`;
+}
+
+/** W verdict: every writer process must exit 0 having written all of its records. */
+export function writersVerdict(
+  each: number,
+  results: { code: number | null; result: unknown }[],
+): string {
+  return results.length > 0 && results.every((x) => completed(x.code, x.result, each))
+    ? `every writer exit 0 with ${each} written, none failed`
+    : `writers ${JSON.stringify(results)}`;
+}
+
 export async function runExperiment(base: string, iterations: number) {
   const rows: Row[] = [];
   const row = (id: string, scenario: string, expected: string, observed: string) =>
@@ -308,6 +350,14 @@ export async function runExperiment(base: string, iterations: number) {
       read: describe(loaded),
       previousBytesIntact: readFileSync(fileOf(root), "utf8") === before,
     });
+    // The scenario counts only if the worker really died at the injected point (exit 70).
+    const replaced = step === "fsync-dir" || step === "unlock";
+    row(
+      `K-${step}`,
+      `process killed before ${step}`,
+      `exit 70; read hit:${replaced ? 7 : 2}`,
+      `exit ${String(done.code)}; read ${describe(loaded)}`,
+    );
   }
 
   // --- Locks ----------------------------------------------------------------------------------
@@ -329,8 +379,8 @@ export async function runExperiment(base: string, iterations: number) {
     row(
       "L1",
       "write while a crashed holder's lock remains",
-      "lock-timeout; lock kept",
-      `${String((locks.crashedHolder as { writeResult: string }).writeResult)}; lock ${(locks.crashedHolder as { lockStillPresent: boolean }).lockStillPresent ? "kept" : "REMOVED"}`,
+      "holder exit 70; lock-timeout; lock kept",
+      `holder exit ${String(crashed.code)}; ${String((locks.crashedHolder as { writeResult: string }).writeResult)}; lock ${(locks.crashedHolder as { lockStillPresent: boolean }).lockStillPresent ? "kept" : "REMOVED"}`,
     );
   }
   {
@@ -367,8 +417,8 @@ export async function runExperiment(base: string, iterations: number) {
     row(
       "L3",
       "live holder whose lock looks 20 s old",
-      "contender lock-timeout; holder written",
-      `contender ${r.status === "written" ? "written" : r.reason}; holder ${String((h.result as { status?: string } | undefined)?.status)}`,
+      "contender lock-timeout; holder exit 0, written",
+      `contender ${r.status === "written" ? "written" : r.reason}; holder exit ${String(h.code)}, ${String((h.result as { status?: string } | undefined)?.status)}`,
     );
   }
 
@@ -426,8 +476,11 @@ export async function runExperiment(base: string, iterations: number) {
     row(
       `W${writers}`,
       `${writers} processes x ${each} read-modify-writes`,
-      `${writers * each} records`,
-      `${final.status === "miss" ? final.reason : final.snapshot.records.length} records`,
+      `${writers * each} records; every writer exit 0 with ${each} written, none failed`,
+      `${final.status === "miss" ? final.reason : final.snapshot.records.length} records; ${writersVerdict(
+        each,
+        results.map((x) => ({ code: x.code, result: x.result })),
+      )}`,
     );
   }
   let readers: Record<string, unknown>;
@@ -444,13 +497,12 @@ export async function runExperiment(base: string, iterations: number) {
       seen[k] = (seen[k] ?? 0) + 1;
     }
     const d = await done;
-    readers = { writer: d.result, reads: seen };
-    const torn = Object.keys(seen).filter((k) => k !== "hit:20" && k !== "hit:200");
+    readers = { writerExit: d.code, writer: d.result, reads: seen };
     row(
       "R1",
       "reads during 100 replacements",
-      "no torn or failed reads",
-      torn.length ? `unexpected ${torn.join(",")}` : "no torn or failed reads",
+      "writer exit 0, 100 written; no torn or failed reads",
+      rewriteVerdict(100, d.code, d.result, seen),
     );
   }
 

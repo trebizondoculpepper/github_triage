@@ -484,20 +484,23 @@ export async function storeSnapshot(
   } catch (e) {
     return failed(e);
   }
-  let release: (() => Promise<void>) | null;
+  let release: (() => Promise<void>) | null = null;
   const started = lockNow();
   try {
-    release = await run("lock", () =>
-      acquireFileLock(
-        fs,
-        join(dir, LOCK_FILE),
-        // Age-based breaking disabled: an old lock is never removed (contract).
-        { waitMs: lockWaitMs, staleMs: Number.POSITIVE_INFINITY, pollMs: LOCK_POLL_MS },
-        lockNow,
-        sleep,
-      ),
+    step = "lock";
+    await beforeStep?.("lock");
+    // Assign before the after-hook runs, so a hook failure still releases a lock we took.
+    release = await acquireFileLock(
+      fs,
+      join(dir, LOCK_FILE),
+      // Age-based breaking disabled: an old lock is never removed (contract).
+      { waitMs: lockWaitMs, staleMs: Number.POSITIVE_INFINITY, pollMs: LOCK_POLL_MS },
+      lockNow,
+      sleep,
     );
+    if (release) await afterStep?.("lock");
   } catch (e) {
+    if (release) await release().catch(() => {});
     return failed(e);
   }
   if (!release) {
@@ -585,11 +588,19 @@ export async function storeSnapshot(
     return failed(e);
   } finally {
     if (tempCreated) await fs.unlink(temp).catch(() => {});
-    try {
-      await run("unlock", () => release!());
-    } catch {
-      // A failed release leaves the lock in place: later writers time out (miss), never take over.
-    }
+    // Hooks may fail, but the release itself always runs once. A release that fails leaves the
+    // lock in place: later writers time out (miss), never take over.
+    step = "unlock";
+    const quietly = async (f: () => unknown) => {
+      try {
+        await f();
+      } catch {
+        // reported nowhere: the write result is already decided
+      }
+    };
+    await quietly(() => beforeStep?.("unlock"));
+    await quietly(() => release());
+    await quietly(() => afterStep?.("unlock"));
   }
 }
 

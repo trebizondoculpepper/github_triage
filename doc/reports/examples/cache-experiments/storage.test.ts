@@ -24,6 +24,7 @@ import {
   type StorageFs,
   type WriteStep,
 } from "./storage.js";
+import { rewriteVerdict, writersVerdict } from "./storage-run.js";
 import { spawnWorker } from "./storage-worker.js";
 
 const roots: string[] = [];
@@ -232,6 +233,35 @@ describe("atomic replace and injected failures", () => {
       const loaded = await read(root, ctx, T0 + 1000);
       expect(loaded.status === "hit" && loaded.snapshot.lastSuccessfulAt).toBe(at(T0));
     });
+
+  it("a hook failure right after taking the lock releases it", async () => {
+    const root = newRoot();
+    await write(root, 2);
+    const r = await storeSnapshot(root, ctx, () => syntheticObservation(3, at()), {
+      now: () => T0,
+      afterStep: (s) => {
+        if (s === "lock") throw new Error("injected");
+      },
+    });
+    expect(r).toMatchObject({ status: "not-written", reason: "failed", step: "lock" });
+    expect(readdirSync(join(file(root), ".."))).toEqual([SNAPSHOT_FILE]);
+    expect((await write(root, 4)).status).toBe("written");
+  });
+
+  it("hook failures around unlock still release the lock", async () => {
+    const root = newRoot();
+    const r = await storeSnapshot(root, ctx, () => syntheticObservation(3, at()), {
+      now: () => T0,
+      beforeStep: (s) => {
+        if (s === "unlock") throw new Error("injected");
+      },
+      afterStep: (s) => {
+        if (s === "unlock") throw new Error("injected");
+      },
+    });
+    expect(r.status).toBe("written");
+    expect(readdirSync(join(file(root), ".."))).toEqual([SNAPSHOT_FILE]);
+  });
 
   it("a failure after the temp write removes the temp file", async () => {
     const root = newRoot();
@@ -524,5 +554,31 @@ describe("retention, eviction and cleanup", () => {
     const bounded = await cleanupExpired(root, { now: () => now, limit: 1 });
     expect(bounded.examined).toBe(1);
     expect(bounded.deferred).toBe(1);
+  });
+});
+
+describe("runner verdicts need completed workers", () => {
+  const ok = { written: 100, notWritten: {} };
+  const pass = "writer exit 0, 100 written; no torn or failed reads";
+  it("R1 passes only when the rewrite worker finished every replacement", () => {
+    const seen = { "hit:20": 5, "hit:200": 3 };
+    expect(rewriteVerdict(100, 0, ok, seen)).toBe(pass);
+    expect(rewriteVerdict(100, 1, undefined, seen)).not.toBe(pass);
+    expect(
+      rewriteVerdict(100, 0, { written: 40, notWritten: { "lock-timeout": 60 } }, seen),
+    ).not.toBe(pass);
+    expect(rewriteVerdict(100, 0, ok, {})).not.toBe(pass);
+    expect(rewriteVerdict(100, 0, ok, { ...seen, truncated: 1 })).not.toBe(pass);
+  });
+
+  it("W passes only when every writer exited 0 with all writes done", () => {
+    const pass10 = "every writer exit 0 with 10 written, none failed";
+    const good = { code: 0, result: { written: 10, notWritten: {} } };
+    expect(writersVerdict(10, [good, good])).toBe(pass10);
+    expect(writersVerdict(10, [good, { code: 1, result: undefined }])).not.toBe(pass10);
+    expect(
+      writersVerdict(10, [good, { code: 0, result: { written: 9, notWritten: { failed: 1 } } }]),
+    ).not.toBe(pass10);
+    expect(writersVerdict(10, [])).not.toBe(pass10);
   });
 });
