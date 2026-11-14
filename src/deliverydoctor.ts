@@ -434,7 +434,6 @@ export async function diagnoseClosedDrift(
     // delivery record: out of drift scope. An unknown fold stays in scope as unknown.
     if (!fold.recordsUnknown && !fold.hasTrustedRecord) continue;
     scan.withRecords++;
-    const ended = effectiveResponsibility(fold, completionEffects(classified, fold, true));
     const t: ClosedDriftTicket = {
       number: node.number,
       title: node.title,

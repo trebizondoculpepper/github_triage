@@ -18,7 +18,6 @@ import { evaluationRevision } from "./completion.js";
 import { ticketDoctor } from "./ticketdoctor.js";
 import type { TicketDoctorReport } from "./ticketdoctor.js";
 import type { Issue, PullRequest, Snapshot } from "./github/types.js";
-import { evaluationRevision } from "./completion.js";
 import {
   deliveryFields,
   deliveryRead,
