@@ -3,6 +3,7 @@
  * "#192 diagnostics and reads"). Injected trust, GraphQL and REST boundaries; no live calls.
  */
 import { describe, expect, it } from "vite-plus/test";
+import { planRelease } from "./claims.js";
 import { main } from "./cli.js";
 import { deliveryMarker, markerTrust, readDeliveryFold } from "./delivery.js";
 import type { Deliverable, DeliveryComment, DeliveryRecord, TrustDecision } from "./delivery.js";
@@ -27,7 +28,8 @@ const comment = (body: string, login = "writer"): DeliveryComment => {
     databaseId: id,
     body,
     url: `https://github.com/${repo}/issues/1#issuecomment-${id}`,
-    createdAt: `2026-11-13T09:${String(id % 60).padStart(2, "0")}:00Z`,
+    // Monotonic in posting order, so the fold's creation-time order matches the test's order.
+    createdAt: new Date(Date.parse("2026-11-13T09:00:00Z") + id * 1000).toISOString(),
     author: { __typename: "User", login },
     lastEditedAt: null,
     includesCreatedEdit: false,
@@ -55,10 +57,59 @@ const record = (issue: number, op: DeliveryRecord["op"], fields: Partial<Deliver
     ...fields,
   }) as DeliveryRecord;
 const post = (r: DeliveryRecord, login = "writer") => comment(deliveryMarker(r), login);
-const release = (agent: string, deliverable: string | null) =>
-  comment(
-    `Released.\n\n<!-- github-triage:release:abcdef12 ${JSON.stringify({ v: 1, agent, outcome: "done", deliverable })} -->`,
+/** A real v1 release comment body, exactly as `planRelease` writes it (no hand-written format). */
+const release = async (
+  agent: string,
+  deliverable: { pr: string } | { change: string },
+): Promise<DeliveryComment> => {
+  const p = (nodes: unknown[]) => ({
+    nodes,
+    pageInfo: { hasNextPage: false, hasPreviousPage: false, startCursor: null },
+  });
+  const query = async (text: string) =>
+    text.includes("resource(url")
+      ? { resource: { __typename: "PullRequest", state: "MERGED" } }
+      : {
+          repository: {
+            issueOrPullRequest: {
+              __typename: "Issue",
+              number: 6,
+              title: "T",
+              url: `https://github.com/${repo}/issues/6`,
+              state: "OPEN",
+              updatedAt: time,
+              labels: p([{ name: `agent:${agent}` }, { name: "bug" }]),
+              issueDependenciesSummary: { blockedBy: 0 },
+              blockedBy: p([]),
+              closedByPullRequestsReferences: p([]),
+              comments: p([]),
+              timelineItems: p([
+                {
+                  __typename: "LabeledEvent",
+                  createdAt: "2026-11-12T00:00:00Z",
+                  label: { name: `agent:${agent}` },
+                },
+              ]),
+            },
+            claims: p([{ number: 6, title: "T", url: `https://github.com/${repo}/issues/6` }]),
+            ownerLabel: { name: `agent:${agent}` },
+            questionLabel: null,
+            decisionLabel: null,
+            needsDesignLabel: null,
+            attentionLabel: null,
+            targetLabel: null,
+          },
+        };
+  const plan = await planRelease(
+    repo,
+    { number: 6, agent, outcome: "done", ...deliverable },
+    query as never,
+    async () => "write",
   );
+  if (!plan.ok) throw new Error("planRelease refused");
+  const argv = plan.changes[0].command;
+  return comment(argv[argv.indexOf("--body") + 1]);
+};
 
 const issue = (
   number: number,
@@ -295,7 +346,7 @@ describe("delivery-aware Ticket Doctor (#192)", () => {
 
   it("S1 names legacy attach candidates instead of the label-only awaiting-review check", async () => {
     const r = await doctor(
-      [issue(6, ["bug", "status:awaiting-review"], [release("alice", prLink(9))], [prLink(9)])],
+      [issue(6, ["bug", "status:awaiting-review"], [await release("alice", { pr: prLink(9) })])],
       {},
     );
     expect(kinds(r, 6)).not.toContain("awaiting-review-without-pr");
@@ -307,6 +358,86 @@ describe("delivery-aware Ticket Doctor (#192)", () => {
       `pdb deliverables 6 attest --legacy --agent '<AGENT>' --reason '<REASON>' --repo ${repo}`,
     ]);
     expect(f.plan.facts.join(" ")).toContain("not membership");
+  });
+
+  it("S1 turns a released --change commit URL into a --commit candidate", async () => {
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    const r = await doctor([
+      issue(
+        23,
+        ["bug"],
+        [await release("alice", { change: `https://github.com/${repo}/commit/${sha}` })],
+      ),
+    ]);
+    const f = finding(r, 23, "legacy-delivery");
+    expect(f.plan.steps.map((s) => s.argv.join(" "))).toContainEqual(
+      expect.stringContaining(`attach --legacy --agent <AGENT> --commit ${repo}@${sha}`),
+    );
+  });
+
+  it("reports an empty open required set after the last PR is detached", async () => {
+    const submit = post(record(24, "submit", { deliverables: [pr(31)], membership: "open" }));
+    const detach = post(record(24, "detach", { deliverables: [pr(31)] }));
+    const r = await doctor([issue(24, ["bug"], [submit, detach])]);
+    expect(kinds(r, 24)).toEqual(["delivery-membership-open"]);
+    const f = finding(r, 24, "delivery-membership-open");
+    expect(f.detail).toContain("No deliverable is required yet");
+    expect(f.plan.steps.some((s) => s.choice === "complete")).toBe(false);
+  });
+
+  it("an empty complete set with an attestation is completable; without one it is empty", async () => {
+    const attested = await doctor([
+      issue(
+        25,
+        ["bug"],
+        [
+          post(record(25, "submit", { deliverables: [], membership: "complete" })),
+          post(record(25, "attest", {})),
+        ],
+      ),
+    ]);
+    expect(kinds(attested, 25)).toEqual(["delivery-verified-open"]);
+    const empty = await doctor([
+      issue(
+        26,
+        ["bug"],
+        [post(record(26, "submit", { deliverables: [], membership: "complete" }))],
+      ),
+    ]);
+    expect(kinds(empty, 26)).toEqual(["delivery-empty"]);
+  });
+
+  it("an attestation never stands in for an outstanding member", async () => {
+    const r = await doctor(
+      [
+        issue(
+          27,
+          ["bug"],
+          [
+            post(record(27, "submit", { deliverables: [pr(32)], membership: "complete" })),
+            post(record(27, "attest", {})),
+          ],
+        ),
+      ],
+      { 32: "open" },
+    );
+    expect(kinds(r, 27)).toEqual([]);
+  });
+
+  it("S68 on an open issue: a complete record whose delivery no longer holds is reported, not re-closed", async () => {
+    const submit = post(record(28, "submit", { deliverables: [pr(33)], membership: "complete" }));
+    const done = post(
+      record(28, "complete", { verdict: "delivered", evaluationRevision: "r", evaluatedAt: time }),
+    );
+    const attach = post(record(28, "attach", { deliverables: [pr(34)] }));
+    const r = await doctor(
+      [issue(28, ["bug"], [submit, done, attach])],
+      { 33: { merged: "m33" }, 34: "open" },
+      { m33: "behind" },
+    );
+    expect(kinds(r, 28)).toEqual(["delivery-diverged-after-complete"]);
+    const f = finding(r, 28, "delivery-diverged-after-complete");
+    expect(f.plan.steps.every((s) => s.kind === "inspect")).toBe(true);
   });
 
   it("reports a partial delivery with per-member responsibility and supersedes ready-with-open-pr", async () => {

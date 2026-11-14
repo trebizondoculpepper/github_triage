@@ -363,6 +363,19 @@ function deliveryFindings(
     );
     return;
   }
+  // S68 on an open issue: a `complete` record was written but delivery no longer holds (a member
+  // or membership changed after it). Reported, never reverted or re-closed automatically.
+  if (d.completions.length) {
+    add(
+      issue,
+      "delivery-diverged-after-complete",
+      "candidate",
+      `A complete record (${d.completions.join(", ")}) exists but delivery is now ${e.delivery}; the issue stays open. ${responsible ?? "The responsible agent"} finishes the outstanding delivery, then completes again.`,
+      [inspect],
+      { judgment: true, facts: [...facts, ...e.because, ...lines] },
+    );
+    return;
+  }
   const stalled = e.perDeliverable.filter(
     (m) => m.state === "closed-unmerged" || m.state === "merged-off-target",
   );
@@ -401,7 +414,6 @@ function deliveryFindings(
   // so delivery is not complete and `complete` is never offered. The responsible agent decides.
   if (
     e.delivery === "submitted" &&
-    e.perDeliverable.length > 0 &&
     e.perDeliverable.every((m) => m.state === "merged") &&
     !e.derived.membershipComplete
   ) {
@@ -409,7 +421,7 @@ function deliveryFindings(
       issue,
       "delivery-membership-open",
       "candidate",
-      `Every recorded deliverable (${e.perDeliverable.length}) is merged into its target, but membership is still open, so delivery is not complete. ${responsible ?? "The responsible agent"} attaches the remaining deliverables or confirms the set is complete.`,
+      `${e.perDeliverable.length ? `Every recorded deliverable (${e.perDeliverable.length}) is merged into its target` : "No deliverable is required yet"}, but membership is still open, so delivery is not complete. ${responsible ?? "The responsible agent"} attaches the remaining deliverables${e.perDeliverable.length ? "" : " (or attests a non-code outcome once the empty set is complete)"} or confirms the set is complete.`,
       [inspect, ...(responsible ? [cmd.membershipComplete(n, responsible)] : [])],
       { judgment: true, facts: [...facts, ...e.because, ...lines] },
     );

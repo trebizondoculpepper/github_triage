@@ -60,6 +60,8 @@ export interface IssueDeliveryDiagnosis {
   /** A trusted, bound delivery record exists (only meaningful when the fold is known). */
   trustedRecord: boolean;
   ticketResponsible: string | null;
+  /** Comment ids of `complete` records in the fold (pending or effective). */
+  completions: string[];
   members: { deliverable: string; responsible: string | null }[];
   /** Live evaluation; null when it was not run (see `notEvaluated`). */
   evaluation: DeliveryEvaluation | null;
@@ -84,25 +86,28 @@ export interface DeliveryDiagnosis {
 }
 
 const releaseDone = /<!-- github-triage:release:[0-9a-f]+ /;
+const commitUrl = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/commit\/([0-9a-f]{7,40})\/?$/i;
 const commitForm = /^[\w.-]+\/[\w.-]+@[0-9a-f]{7,40}$/i;
 
-/** The agent and deliverable (a PR URL or `owner/name@sha`) a v1 release record names. */
+/**
+ * The agent and deliverable a v1 release comment names. `planRelease` (src/claims.ts) records the
+ * agent in the marker JSON and writes the deliverable only as a visible line of the same trusted
+ * comment: `Pull request: URL (STATE)` for --pr or `Change: VALUE` for --change.
+ */
 function releasePayload(body: string): { agent: string | null; deliverable: string | null } {
+  let agent: string | null = null;
   const m = body.match(releaseDone);
-  if (!m || m.index === undefined) return { agent: null, deliverable: null };
-  const start = m.index + m[0].length;
-  try {
-    const r = JSON.parse(body.slice(start, body.indexOf(" -->", start))) as {
-      deliverable?: unknown;
-      agent?: unknown;
-    };
-    return {
-      agent: typeof r.agent === "string" ? r.agent : null,
-      deliverable: typeof r.deliverable === "string" ? r.deliverable : null,
-    };
-  } catch {
-    return { agent: null, deliverable: null };
+  if (m && m.index !== undefined) {
+    const start = m.index + m[0].length;
+    try {
+      const r = JSON.parse(body.slice(start, body.indexOf(" -->", start))) as { agent?: unknown };
+      agent = typeof r.agent === "string" ? r.agent : null;
+    } catch {
+      agent = null;
+    }
   }
+  const line = body.match(/^(?:Pull request|Change): (\S+)/m);
+  return { agent, deliverable: line ? line[1] : null };
 }
 
 /** Attach candidates: the release's own deliverable, then PRs GitHub links as closing the issue. */
@@ -117,6 +122,11 @@ function legacyCandidates(
   const named = release ? releasePayload(release.body).deliverable : null;
   if (named && prUrl.test(named)) add("--pr", named);
   else if (named && commitForm.test(named)) add("--commit", named);
+  else if (named && commitUrl.test(named)) {
+    // `release --change URL` names a commit URL; attach takes `owner/name@SHA`.
+    const [, repository, oid] = named.match(commitUrl)!;
+    add("--commit", `${repository}@${oid}`);
+  }
   for (const node of issue.closedByPullRequestsReferences?.nodes ?? [])
     if (prUrl.test(node.url)) add("--pr", node.url);
   return out;
@@ -146,6 +156,7 @@ export async function diagnoseDelivery(
       unknownBecause: [],
       trustedRecord: false,
       ticketResponsible: null,
+      completions: [],
       members: [],
       evaluation: null,
       notEvaluated: null,
@@ -174,6 +185,7 @@ export async function diagnoseDelivery(
     d.unknownBecause = [...fold.unknownBecause];
     d.trustedRecord = fold.hasTrustedRecord;
     d.ticketResponsible = fold.ticketResponsible;
+    d.completions = [...fold.completions];
     d.members = fold.members.map((m) => ({
       deliverable: deliverableLabel(m.deliverable),
       responsible: m.responsible,
