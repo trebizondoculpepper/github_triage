@@ -13,12 +13,12 @@ import type { EngineSetting, DecisionEngineMetadata } from "./config/engine-sett
  */
 import { collect, IssueUnavailable, permissionLookup } from "./github/github.js";
 import type { IssueDiagnosis, Query, Rest } from "./github/github.js";
-import { diagnoseDelivery } from "./deliverydoctor.js";
+import { diagnoseDelivery } from "./workflow/deliverydoctor.js";
 import { deliveryRead } from "./deliveryread.js";
 import type { DeliveryRead } from "./deliveryread.js";
-import { markerTrust } from "./delivery.js";
-import { readSnapshotResponsibility } from "./responsibility.js";
-import type { TrustDecision } from "./delivery.js";
+import { markerTrust } from "./workflow/delivery.js";
+import { readSnapshotResponsibility } from "./workflow/responsibility.js";
+import type { TrustDecision } from "./workflow/delivery.js";
 import { impactMetric } from "./estimation/metrics.js";
 import { dependencyReport, dependencyText } from "./github/dependencies.js";
 import type { DependencyReport } from "./github/dependencies.js";

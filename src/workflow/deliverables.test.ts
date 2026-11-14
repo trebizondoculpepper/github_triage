@@ -13,7 +13,7 @@ import {
 import type { DeliverablesPlan, DeliverablesRequest, DeliverablesRuntime } from "./deliverables.js";
 import { deliveryMarker, markerTrust, parseDeliveryComment } from "./delivery.js";
 import type { DeliveryComment, DeliveryRecord } from "./delivery.js";
-import type { RepositoryPermission } from "./github/github.js";
+import type { RepositoryPermission } from "../github/github.js";
 
 const repo = "example/project";
 const other = "example/library";
@@ -196,7 +196,7 @@ const member = (n: number, r = repo) => ({
   target: { repository: r, branch: null },
 });
 const post = (r: DeliveryRecord, login = "writer") => comment(deliveryMarker(r), login);
-/** A v1 `release --as done` handoff comment, as src/claims.ts writes it. */
+/** A v1 `release --as done` handoff comment, as src/workflow/claims.ts writes it. */
 const v1Done = (login = "writer") =>
   comment(
     `Handoff by \`alice\`: done.\n\n<!-- github-triage:release:0123456789abcdef ${JSON.stringify({ v: 1, agent: "alice", outcome: "done", target: null, remove: ["agent:alice"], retained: [], claimedAt: "2026-11-12T00:00:00Z" })} -->`,

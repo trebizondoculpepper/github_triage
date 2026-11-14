@@ -15,7 +15,7 @@ import type {
   MemberObservation,
   TrustDecision,
 } from "./delivery.js";
-import type { RepositoryPermission } from "./github/github.js";
+import type { RepositoryPermission } from "../github/github.js";
 
 const repo = "example/project";
 const issue = 42;

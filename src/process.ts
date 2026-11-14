@@ -14,7 +14,7 @@
  */
 import { createHash } from "node:crypto";
 import { workflow, briefingStaleHours } from "./briefing.js";
-import { claimPolicy } from "./claims.js";
+import { claimPolicy } from "./workflow/claims.js";
 import { pickupOrders, pickupPolicy } from "./ranking.js";
 import { roleRegistry } from "./roles.js";
 import {

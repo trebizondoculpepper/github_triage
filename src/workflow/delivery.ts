@@ -11,7 +11,7 @@
 import { createHash } from "node:crypto";
 import { commentAuthority } from "./claims.js";
 import type { Authority, Comment } from "./claims.js";
-import type { PermissionLookup } from "./github/github.js";
+import type { PermissionLookup } from "../github/github.js";
 
 export const deliveryMarkerPrefix = "<!-- github-triage:delivery ";
 export const deliveryVersion = 1;

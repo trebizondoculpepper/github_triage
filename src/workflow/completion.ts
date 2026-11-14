@@ -18,7 +18,7 @@
  */
 import { createHash } from "node:crypto";
 import { parseArgs } from "node:util";
-import { workflow } from "./briefing.js";
+import { workflow } from "../briefing.js";
 import { claimPolicy, shellQuote } from "./claims.js";
 import type { Comment, PlanStep } from "./claims.js";
 import {

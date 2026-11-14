@@ -7,10 +7,10 @@
  * the injected `gh` write boundary. Label names come from the registered workflow policy.
  */
 import { createHash } from "node:crypto";
-import { workflow } from "./briefing.js";
-import { ghQuery, permissionLookup, writePermissions } from "./github/github.js";
-import type { PermissionLookup } from "./github/github.js";
-import { ghRun } from "./github/dependencies.js";
+import { workflow } from "../briefing.js";
+import { ghQuery, permissionLookup, writePermissions } from "../github/github.js";
+import type { PermissionLookup } from "../github/github.js";
+import { ghRun } from "../github/dependencies.js";
 
 const labelColours: Record<string, string> = {
   agent: "1d76db",

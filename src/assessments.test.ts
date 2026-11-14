@@ -16,7 +16,7 @@ import type { CompactBriefing } from "./compact.js";
 import { collectLabelEstimationInput } from "./estimation/complexitylabels.js";
 import { TOML_CONFIG_PATH } from "./config/config.js";
 import type { ConfigFileSystem, GitRunner } from "./config/config.js";
-import { markerTrust } from "./delivery.js";
+import { markerTrust } from "./workflow/delivery.js";
 import { provenanceComment } from "./estimation/estimate.js";
 import { collect, permissionLookup } from "./github/github.js";
 import type { Query, Rest } from "./github/github.js";

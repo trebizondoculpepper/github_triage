@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from "vite-plus/test";
 import { planRelease } from "./claims.js";
-import { main } from "./cli.js";
+import { main } from "../cli.js";
 import { deliveryMarker, markerTrust, readDeliveryFold } from "./delivery.js";
 import type { Deliverable, DeliveryComment, DeliveryRecord, TrustDecision } from "./delivery.js";
 import {
@@ -13,11 +13,11 @@ import {
   diagnoseClosedDrift,
   diagnoseDelivery,
 } from "./deliverydoctor.js";
-import type { RepositoryPermission, RestAnswer } from "./github/github.js";
+import type { RepositoryPermission, RestAnswer } from "../github/github.js";
 import { deliveryMemberCap, evaluationRevision } from "./completion.js";
 import { ticketDoctor } from "./ticketdoctor.js";
 import type { TicketDoctorReport } from "./ticketdoctor.js";
-import type { Issue, PullRequest, Snapshot } from "./github/types.js";
+import type { Issue, PullRequest, Snapshot } from "../github/types.js";
 import {
   classifyFollowUp,
   deliveryFields,
@@ -29,8 +29,8 @@ import {
   teamResponsibilities,
   teamResponsibilityLines,
   withDeliveryCompleteness,
-} from "./deliveryread.js";
-import { readBriefing } from "./service.js";
+} from "../deliveryread.js";
+import { readBriefing } from "../service.js";
 import type { PrStatusReport } from "./prstatus.js";
 import type { TeamAgent } from "./team.js";
 

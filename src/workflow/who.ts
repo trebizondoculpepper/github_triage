@@ -8,10 +8,10 @@
  * an authoritative claim parser. Recorded ownership, recent activity and presence are separate;
  * with no presence source, availability is unknown. Nothing is claimed, released or notified.
  */
-import { owners, workflow } from "./briefing.js";
+import { owners, workflow } from "../briefing.js";
 import { defaultStaleHours, latest, pullRequestState } from "./team.js";
 import type { LinkedPullRequest } from "./team.js";
-import type { Comment, PullRequest, Snapshot } from "./github/types.js";
+import type { Comment, PullRequest, Snapshot } from "../github/types.js";
 
 /** Kinds of historical comment evidence. */
 export type CommentEvidenceKind = "reported-work" | "handoff" | "release" | "done";

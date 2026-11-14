@@ -23,10 +23,10 @@ import {
   planDependencyChange,
 } from "./github/dependencies.js";
 import { roleNames, roleRegistry } from "./roles.js";
-import { prStatusText, pullRequestStatus } from "./prstatus.js";
-import { pullRequestReviewHistory, reviewHistoryText } from "./reviewhistory.js";
-import { doctorStaleHours, ticketDoctor, ticketDoctorText } from "./ticketdoctor.js";
-import { diagnoseClosedDrift, diagnoseDelivery } from "./deliverydoctor.js";
+import { prStatusText, pullRequestStatus } from "./workflow/prstatus.js";
+import { pullRequestReviewHistory, reviewHistoryText } from "./workflow/reviewhistory.js";
+import { doctorStaleHours, ticketDoctor, ticketDoctorText } from "./workflow/ticketdoctor.js";
+import { diagnoseClosedDrift, diagnoseDelivery } from "./workflow/deliverydoctor.js";
 import {
   deliveryFields,
   deliveryLines,
@@ -47,11 +47,11 @@ import {
   planClaim,
   planNeedsHuman,
   planRelease,
-} from "./claims.js";
+} from "./workflow/claims.js";
 import { cachedCheckForUpdate } from "./updates/updatecache.js";
 import { installedVersion, optOutEnv, legacyOptOutEnv, updateAdvisory } from "./updates/updates.js";
-import { defaultStaleHours, teamText, teamView } from "./team.js";
-import { ticketOwnership, ticketOwnershipText } from "./who.js";
+import { defaultStaleHours, teamText, teamView } from "./workflow/team.js";
+import { ticketOwnership, ticketOwnershipText } from "./workflow/who.js";
 import { migrationPlanText, planMigration } from "./github/migration.js";
 import { presentBriefing, unavailableText } from "./service.js";
 import { runBriefing } from "./catchupcli.js";
@@ -84,15 +84,15 @@ import {
   reworkAuthority,
   reworkMembershipRequest,
   planDeliverables,
-} from "./deliverables.js";
-import { markerTrust } from "./delivery.js";
+} from "./workflow/deliverables.js";
+import { markerTrust } from "./workflow/delivery.js";
 import {
   applyComplete,
   completeArguments,
   completeHelp,
   completeText,
   planComplete,
-} from "./completion.js";
+} from "./workflow/completion.js";
 import type { LabelEstimationRuntime } from "./estimation/complexitylabels.js";
 import { metricStatus } from "./estimation/complexitylabels.js";
 import { impactMetric } from "./estimation/metrics.js";

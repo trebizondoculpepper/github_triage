@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 import { readAssessment } from "../assessments.js";
 import type { AssessmentSubject } from "../assessments.js";
-import type { Comment } from "../claims.js";
+import type { Comment } from "../workflow/claims.js";
 import {
   classifyMetricLabels,
   metricLabelFindings,
@@ -16,7 +16,7 @@ import {
 } from "./complexitylabels.js";
 import { CONFIG_KEYS, TOML_CONFIG_PATH, loadConfig } from "../config/config.js";
 import type { ConfigFileSystem, GitRunner } from "../config/config.js";
-import type { TrustDecision } from "../delivery.js";
+import type { TrustDecision } from "../workflow/delivery.js";
 import {
   parseImpactProvenance,
   parseLabelProvenance,
@@ -27,7 +27,7 @@ import {
 import type { ImpactEstimateProvenance, MetricProvenance } from "./estimate.js";
 import { impactGuidance } from "./impact.js";
 import { IMPACT_LABEL_COLOR, METRICS, complexityMetric, impactMetric } from "./metrics.js";
-import { ticketDoctor } from "../ticketdoctor.js";
+import { ticketDoctor } from "../workflow/ticketdoctor.js";
 import type { Issue, Snapshot } from "../github/types.js";
 
 const sha = "a".repeat(40);

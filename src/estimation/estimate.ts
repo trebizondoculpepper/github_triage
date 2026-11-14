@@ -27,8 +27,8 @@ import { parseArgs } from "node:util";
 import { COMPLEXITY_SIZES, complexityGuidance } from "./complexity.js";
 import type { ComplexitySize } from "./complexity.js";
 import { classifyMetricLabels, metricLabelName, metricLabelSize } from "./complexitylabels.js";
-import type { Comment } from "../claims.js";
-import type { TrustDecision } from "../delivery.js";
+import type { Comment } from "../workflow/claims.js";
+import type { TrustDecision } from "../workflow/delivery.js";
 import { COMPLEXITY_LABEL_COLOR, METRICS, complexityMetric, impactMetric } from "./metrics.js";
 import type { EstimateMetric, MetricDescriptor } from "./metrics.js";
 import {

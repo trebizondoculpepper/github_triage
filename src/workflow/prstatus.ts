@@ -9,11 +9,11 @@
  * issues and their explicit owners. Green evidence means "inspect / consider merging", never
  * approval.
  */
-import { workflow } from "./briefing.js";
+import { workflow } from "../briefing.js";
 import { codexMarker, headAccepted, headCodexFindings } from "./reviewevidence.js";
 export { codexMarker };
-import { ghQuery, prop, selected } from "./github/github.js";
-import type { Query } from "./github/github.js";
+import { ghQuery, prop, selected } from "../github/github.js";
+import type { Query } from "../github/github.js";
 
 type Login = { login: string } | null;
 type PageInfo = { hasNextPage?: boolean; hasPreviousPage?: boolean };
