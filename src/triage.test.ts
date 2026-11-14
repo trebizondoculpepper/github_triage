@@ -6310,6 +6310,49 @@ describe("estimation queue and briefing visibility from size labels (#122, #152)
       [3, "stale", expect.stringContaining("guidance version 0 < 1")],
     ]);
   });
+  it("never treats a missing or invalid recordedAt as fresh after a description edit (#281)", async () => {
+    // `marker` defaults recordedAt, so drop the key from the JSON to model a missing one.
+    const missing = marker("M", "DROP").replace(',"recordedAt":"DROP"', "");
+    expect(missing).not.toContain("recordedAt");
+    const edited = (number: number, recordedAt: string | undefined): Issue => ({
+      ...withComment(
+        sized(number, ["complexity:M"]),
+        recordedAt === undefined ? missing : marker("M", recordedAt),
+      ),
+      lastEditedAt: "2026-11-13T00:00:00Z",
+    });
+    const { report } = await brief(null, [
+      edited(1, undefined),
+      edited(2, "last tuesday"),
+      edited(3, "2026-02-30T25:61:00Z"),
+    ]);
+    expect(
+      report.estimation.queue.items.map(
+        (e: { number: number; state: string; reasons: string[] }) => [e.number, e.state, e.reasons],
+      ),
+    ).toEqual(
+      [1, 2, 3].map((n) => [
+        n,
+        "stale",
+        [
+          "description edited 2026-11-13T00:00:00Z; recorded time unknown, so the estimate cannot be shown fresh",
+        ],
+      ]),
+    );
+  });
+  it("keeps well-formed complexity provenance output byte-identical (#281 parity)", async () => {
+    // Captured from origin/main before the fix: well-formed records must not change.
+    const golden = `{"fieldId":null,"requested":false,"guidanceVersion":1,"findings":[],"boundaries":"Optional work after PR follow-up, own work and eligible pickup. Estimating acquires no claim, reserves nothing and does not unblock or re-rank.","status":"available","detail":"1 ticket(s) to estimate (unestimated or stale, blocked included).","unknown":0,"conflicts":{"total":0,"omitted":0,"items":[]},"offered":true,"queue":{"total":1,"omitted":0,"items":[{"number":3,"title":"Ticket 3","url":"https://github.com/example/project/issues/3","createdAt":"2026-11-12T10:00:00.000Z","size":"M","state":"stale","recorded":{"size":"M","rationale":"contained capability across modules","assumptions":["blocker #9 supplies the API; waiting excluded"],"estimator":"ana","recordedAt":"2026-11-12T10:00:00.000Z","guidanceVersion":1,"url":"https://github.com/example/project/issues/3#c"},"implementation":"ineligible","reasons":["description edited 2026-11-13T00:00:00Z after the estimate"]}]}}`;
+    const { report } = await brief(null, [
+      { ...withComment(sized(1, ["complexity:M"]), marker("M")), lastEditedAt: time },
+      withComment(sized(2, ["complexity:M"]), marker("M")),
+      {
+        ...withComment(sized(3, ["complexity:M"]), marker("M")),
+        lastEditedAt: "2026-11-13T00:00:00Z",
+      },
+    ]);
+    expect(JSON.stringify(report.estimation)).toBe(golden);
+  });
   it("keeps truncated labels unknown and conflicting labels as inspection, never queued", async () => {
     const { code, report } = await brief(null, [
       sized(1, ["status:ready"], true),
