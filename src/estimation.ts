@@ -190,6 +190,13 @@ export function sizeReport(
           if (edited > at) {
             state = "stale";
             reasons.push(`description edited ${issue.lastEditedAt} after the estimate`);
+          } else if (!Number.isNaN(edited) && Number.isNaN(at)) {
+            // An unparseable or missing recordedAt is unavailable freshness evidence: a later
+            // description edit cannot be ruled out, so it never reads as fresh (#281).
+            state = "stale";
+            reasons.push(
+              `description edited ${issue.lastEditedAt}; recorded time unknown, so the estimate cannot be shown fresh`,
+            );
           }
         }
       }
