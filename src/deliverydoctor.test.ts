@@ -949,6 +949,99 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
     expect(c.tickets[0].because.join(" ")).toContain("inconclusive");
   });
 
+  it("a completed Codex receipt with findings on the head is actionable without threads", async () => {
+    const pull = snapPr(96, "SUCCESS", { mergeState: "CLEAN" }) as unknown as {
+      comments: { nodes: unknown[] };
+    };
+    pull.comments.nodes.push({
+      author: { login: "chatgpt-codex-connector" },
+      body: `<!-- codex-review-state:v1 ${JSON.stringify({ code_review: { status: "completed", commit_sha: "head96", has_unresolved_findings: true } })} -->`,
+    });
+    const r = await read(
+      [issue(77, ["bug"], [submitted(77, [96])])],
+      [pull as unknown as PullRequest],
+      { 96: "open" },
+    );
+    expect(r.tickets[0].deliverables[0]).toMatchObject({
+      followUp: "actionable",
+      followUpWhy: "Codex reports unresolved findings on the current head",
+    });
+  });
+
+  it("S5: an open required PR on a not-planned or duplicate issue is closure cleanup", async () => {
+    for (const reason of ["NOT_PLANNED", "DUPLICATE"]) {
+      const closed = {
+        ...issue(78, ["bug"], [submitted(78, [97])]),
+        state: "CLOSED",
+        stateReason: reason,
+      } as Issue;
+      const r = await read([closed], [snapPr(97, "PENDING")], { 97: "open" });
+      expect(r.tickets[0].deliverables[0].followUp).toBe("actionable");
+      expect(r.tickets[0].deliverables[0].followUpWhy).toContain("closure cleanup");
+    }
+    // A completed closure with an open PR is S16 drift, classified as ordinary follow-up.
+    const completed = {
+      ...issue(79, ["bug"], [submitted(79, [98])]),
+      state: "CLOSED",
+      stateReason: "COMPLETED",
+    } as Issue;
+    const c = await read([completed], [snapPr(98, "PENDING")], { 98: "open" });
+    expect(c.tickets[0].deliverables[0].followUpWhy).toBe("awaiting checks");
+  });
+
+  it("pr N keeps closure cleanup on a not-planned issue and reads head findings from the report", () => {
+    const member = {
+      deliverable: `${repo}#99`,
+      url: prLink(99),
+      target: `${repo}:(default branch)`,
+      state: "open" as const,
+      why: "open",
+      responsible: "alice",
+      followUp: "actionable" as const,
+      followUpWhy:
+        "closure cleanup: the issue is closed-not-planned; close this PR or explain why it stays open (the closure stands)",
+    };
+    const read = {
+      tickets: [
+        {
+          number: 80,
+          url: "",
+          closure: "closed-not-planned" as const,
+          records: "known" as const,
+          delivery: "submitted" as const,
+          because: [],
+          responsibility: { ticket: "alice", since: null, members: [] },
+          deliverables: [member],
+          next: [],
+        },
+      ],
+      closures: [{ number: 80, closure: "closed-not-planned" as const }],
+      complete: true,
+      omissions: [],
+      guidance: "",
+    };
+    const facts = {
+      draft: false,
+      complete: true,
+      failing: false,
+      pending: true,
+      unknownChecks: false,
+      verified: false,
+      changesRequested: false,
+      unresolvedThreads: false,
+      mergeable: "MERGEABLE",
+      mergeState: "BLOCKED",
+      headReviewed: false,
+      headFindings: false,
+    };
+    expect(prDelivery(prLink(99), facts, true, read, repo).issues[0].followUpWhy).toContain(
+      "closure cleanup",
+    );
+    expect(
+      classifyFollowUp({ ...facts, pending: false, verified: true, headFindings: true }),
+    ).toEqual(["actionable", "Codex reports unresolved findings on the current head"]);
+  });
+
   it("an unverifiable legacy release is unknown delivery, with its diagnostics", async () => {
     const legacy = await release("alice", { pr: prLink(9) });
     const r = await read(
@@ -1113,6 +1206,7 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
       mergeable: "MERGEABLE",
       mergeState: "BLOCKED",
       headReviewed: false,
+      headFindings: false,
     };
     const waiting = prDelivery(prLink(90), { ...facts, pending: true }, true, issuesRead, repo);
     expect(waiting.issues).toEqual([
@@ -1272,6 +1366,7 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
       reviews: [{ state: "APPROVED", reviewedCommit: "old" }],
       receipts: [],
       headReviewed: false,
+      headFindings: false,
       completeness: { complete: true, warnings: [] },
     } as unknown as PrStatusReport;
     expect(classifyFollowUp(reportFollowUpFacts(report))).toEqual([

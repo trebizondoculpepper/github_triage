@@ -10,7 +10,7 @@
  * approval.
  */
 import { workflow } from "./briefing.js";
-import { codexMarker, headAccepted } from "./reviewevidence.js";
+import { codexMarker, headAccepted, headCodexFindings } from "./reviewevidence.js";
 export { codexMarker };
 import { ghQuery, prop, selected } from "./github/github.js";
 import type { Query } from "./github/github.js";
@@ -156,6 +156,8 @@ export type PrStatusReport = {
    * an approval or clean Codex receipt bound to the current head, vetoed by head findings.
    */
   headReviewed: boolean;
+  /** A Codex receipt on the current head reports unresolved findings (all receipts, #192). */
+  headFindings: boolean;
   reviewRequest: { at: string; url: string; status: string } | null;
   linkedIssues: {
     number: number;
@@ -475,6 +477,10 @@ export function prStatus(
     headReviewed: headAccepted(
       head,
       pr.reviews.nodes.map((v) => ({ state: v.state, commit: v.commit?.oid ?? null })),
+      receipts.map((c) => ({ by: c.by, state: c.codexState?.code_review })),
+    ),
+    headFindings: headCodexFindings(
+      head,
       receipts.map((c) => ({ by: c.by, state: c.codexState?.code_review })),
     ),
     reviewRequest: request,

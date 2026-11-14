@@ -2453,6 +2453,13 @@ describe("pr status: why is a PR not progressing (#59)", () => {
     expect(r.receipts).toHaveLength(3);
     expect(r.receipts.some((c: { codexState: unknown }) => c.codexState)).toBe(false);
     expect(r.headReviewed).toBe(true);
+    expect(r.headFindings).toBe(false);
+    const flagged = prStatus(
+      repo,
+      pull({ comments: [codexComment(head, "completed", true), ...bots] }),
+    );
+    expect(flagged.headFindings).toBe(true);
+    expect(flagged.headReviewed).toBe(false);
   });
 
   it("classifies checks: passed, pending, cancelled, failed, unknown", async () => {

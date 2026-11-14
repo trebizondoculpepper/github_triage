@@ -19,7 +19,7 @@ import type { MemberState, TicketDelivery } from "./completion.js";
 import type { Issue, PullRequest, Snapshot } from "./github/types.js";
 import { prChecks, workflow } from "./briefing.js";
 import type { PrStatusReport } from "./prstatus.js";
-import { headReviewed } from "./reviewevidence.js";
+import { codexMarker, headCodexFindings, headReviewed } from "./reviewevidence.js";
 
 /**
  * Follow-up for one required deliverable: `waiting` on checks or review (attention released,
@@ -87,6 +87,8 @@ export interface FollowUpFacts {
   mergeState: string;
   /** #341 acceptance: approval or a clean Codex receipt bound to the current head, no veto. */
   headReviewed: boolean;
+  /** A Codex receipt on the current head reports unresolved findings (even with no threads). */
+  headFindings: boolean;
 }
 
 /**
@@ -100,6 +102,8 @@ export function classifyFollowUp(f: FollowUpFacts): [FollowUp, string] {
   if (f.failing) return ["actionable", "failing checks on the current head"];
   if (f.changesRequested) return ["actionable", "changes requested"];
   if (f.unresolvedThreads) return ["actionable", "unresolved review threads"];
+  if (f.headFindings)
+    return ["actionable", "Codex reports unresolved findings on the current head"];
   if (workflow.conflicts.includes(f.mergeable)) return ["actionable", "merge conflict"];
   if (f.pending) return ["waiting", "awaiting checks"];
   if (f.unknownChecks || !f.verified)
@@ -157,6 +161,13 @@ export function snapshotFollowUpFacts(pr: PullRequest, warnings: string[]): Foll
     mergeable: pr.mergeable,
     mergeState: pr.mergeStateStatus ?? "UNKNOWN",
     headReviewed: headReviewed(pr),
+    headFindings: headCodexFindings(
+      pr.headRefOid,
+      pr.comments.nodes.map((c) => ({
+        by: c.author?.login ?? "",
+        state: codexMarker(c.body)?.code_review,
+      })),
+    ),
   };
 }
 
@@ -177,6 +188,7 @@ export function reportFollowUpFacts(r: PrStatusReport): FollowUpFacts {
     mergeState: r.pullRequest.mergeState,
     // Computed by prstatus over every fetched review and receipt, before display truncation.
     headReviewed: r.headReviewed,
+    headFindings: r.headFindings,
   };
 }
 
@@ -197,6 +209,7 @@ function memberView(
   d: IssueDeliveryDiagnosis,
   prs: Map<string, PullRequest>,
   warnings: string[],
+  closure: Closure,
 ): DeliverableView[] {
   const evaluated = d.evaluation?.perDeliverable;
   return d.members.map((m, i) => {
@@ -237,6 +250,17 @@ function memberView(
           warnings,
         );
     }
+    // S5: an open required PR on an issue closed not planned, duplicate or otherwise is closure
+    // cleanup for its responsible agent (close it or explain), not ordinary follow-up.
+    if (
+      (e.state === "open" || e.state === "draft") &&
+      closure !== "open" &&
+      closure !== "closed-completed"
+    )
+      [followUp, followUpWhy] = [
+        "actionable",
+        `closure cleanup: the issue is ${closure}; close this PR or explain why it stays open (the closure stands)`,
+      ];
     return { ...base, target: e.target, state: e.state, why: e.why, followUp, followUpWhy };
   });
 }
@@ -291,7 +315,9 @@ export function deliveryView(
           members: d.members,
         }
       : null,
-    deliverables: known ? memberView(repository, d, prs, warnings) : [],
+    deliverables: known
+      ? memberView(repository, d, prs, warnings, closureOf(issue.state, issue.stateReason))
+      : [],
     next: [
       `pdb --issue ${issue.number} --json --repo ${repository}`,
       ...(known && d.trustedRecord
@@ -525,7 +551,10 @@ export function prDelivery(
         const member = view?.deliverables.find((m) => m.url?.toLowerCase() === prUrl.toLowerCase());
         // This PR's follow-up comes from this report's own fresh, structured evidence.
         const [fresh, freshWhy] = classifyFollowUp(facts);
-        const own = !!member && open && (member.state === "open" || member.state === "draft");
+        // The fresh report decides ordinary follow-up; closure cleanup (S5) keeps the view's.
+        const cleanup = closure !== "open" && closure !== "closed-completed";
+        const own =
+          !!member && open && !cleanup && (member.state === "open" || member.state === "draft");
         const followUp: FollowUp | null = !member ? null : own ? fresh : member.followUp;
         return {
           number,

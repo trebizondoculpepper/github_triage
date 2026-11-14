@@ -55,3 +55,16 @@ export function headAccepted(
     )
   );
 }
+
+/** A Codex receipt by the Codex account on the current head reports unresolved findings. */
+export function headCodexFindings(
+  head: string,
+  codexStates: { by: string; state: CodexReviewState | undefined }[],
+): boolean {
+  return codexStates.some(
+    (c) =>
+      c.by.replace(/\[bot\]$/, "") === codexReviewer &&
+      c.state?.commit_sha === head &&
+      c.state.has_unresolved_findings === true,
+  );
+}
