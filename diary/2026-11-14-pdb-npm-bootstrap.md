@@ -1,0 +1,3 @@
+# 2026-11-14 — PDB npm bootstrap
+
+Bootstrapped `@trebizondoculpepper/presidential-daily-briefing` at 0.7.0 rather than the contract's 0.6.0, because the old package had already released 0.6.0 with tag `v0.6.0`. The first trusted-publishing attempt returned a 404 until the package had its own trust configuration (`npm trust github ... --allow-publish`). After that, `make-prerelease` published 0.7.1-next.1 with provenance. A retry for a fixed SHA was correctly refused because main had moved. The old package is still listed on the registry. npmjs.com's install box cannot be configured, so the README now shows the global install first. Remaining CLI errors now use the `pdb:` prefix.
