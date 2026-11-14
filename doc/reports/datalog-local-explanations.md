@@ -50,10 +50,11 @@ npm run --silent triage -- --repo OWNER/REPOSITORY \
 npx tsx doc/reports/examples/datalog-local/run.ts \
   --engine-module /tmp/triage-datalog-engine/node_modules/datascript \
   --snapshot /tmp/pdb-snapshot.json --baseline /tmp/pdb-baseline.json \
+  --agent YOUR_AGENT --platform codex \
   --out /tmp/pdb-comparison.json
 ```
 
-Replace the repository and agent placeholders. These collection commands read GitHub and save local files; the offline command does not fetch newer facts. A fresh collection will naturally differ from the historical 43-ticket input. The historical snapshot and baseline are intentionally not committed.
+Replace the repository and agent placeholders. Pass the same agent and platform to the baseline and trial; the trial records these explicit context values. Omit platform in both commands when the viewer platform is unknown. The historical snapshot used unknown platform; its result is a bounded observation, not a complete context/parity comparison. These collection commands read GitHub and save local files; the offline command does not fetch newer facts. A fresh collection will naturally differ from the historical 43-ticket input. The historical snapshot and baseline are intentionally not committed.
 
 To evaluate an already frozen input, additionally pass `--snapshot PATH` and `--baseline PATH`, using the raw snapshot and its corresponding structured briefing. These must refer to the same collection; keep them unversioned. The engine path explicitly loads trusted local executable code.
 

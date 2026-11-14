@@ -103,6 +103,8 @@ const { values } = parseArgs({
     snapshot: { type: "string" },
     baseline: { type: "string" },
     out: { type: "string" },
+    agent: { type: "string" },
+    platform: { type: "string" },
   },
 });
 if (!values["engine-module"] || !values.out)
@@ -631,6 +633,7 @@ const real = snapshot.issues.map((s): Subject => {
   };
 });
 const result = {
+  context: { agent: values.agent ?? "", platform: values.platform ?? "unknown" },
   schemaVersion: 1,
   kind: "bounded-datalog-explanation-trial",
   source: "67ed2ed",
@@ -638,7 +641,10 @@ const result = {
   scope:
     "Research subset; NOT the complete #303/#304 evaluator. No urgency/unlock tie policy, own-claim continuation, full review/responsibility coverage, config or MCP integration. Missing paired assessment inputs remain unknown.",
   tests,
-  roles: { designer: evaluate(real, "designer"), implementer: evaluate(real, "implementer") },
+  roles: {
+    designer: evaluate(real, "designer", values.agent, values.platform),
+    implementer: evaluate(real, "implementer", values.agent, values.platform),
+  },
   baselineActions: baseline.rankedActions.items,
 };
 fs.writeFileSync(values.out, JSON.stringify(result, null, 2));
