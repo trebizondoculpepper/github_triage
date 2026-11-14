@@ -279,6 +279,66 @@ describe("live run budget (#202)", () => {
     );
   });
 
+  it("samples a fresh 200 without an ETag instead of the saved payload", async () => {
+    const state = tempState();
+    await liveRun(fakeGitHub([]), args(state));
+    const runs = (n: number) => ({
+      total_count: n,
+      check_runs: Array.from({ length: n }, () => ({ completed_at: "2026-11-15T00:00:00Z" })),
+    });
+    const warm = await liveRun(
+      fakeGitHub([], undefined, (a) =>
+        a.includes("check-runs")
+          ? { exitCode: 0, stderr: "", stdout: `HTTP/2.0 200 OK\n\n${JSON.stringify(runs(3))}` }
+          : undefined,
+      ),
+      args(state),
+    );
+    expect((warm.conditional as Record<string, string>)["check-runs"]).toBe("fresh");
+    expect((warm.invalidation as { seen: Record<string, number> }).seen.check_run_completed).toBe(
+      3,
+    );
+    // The superseded validator is dropped, so the next run reads in full rather than revalidating.
+    const log: string[] = [];
+    await liveRun(fakeGitHub(log), args(state));
+    expect(log.find((a) => a.includes("check-runs"))).not.toContain("If-None-Match");
+  });
+
+  it("leaves stale manifest entries out of the invalidation measurements", async () => {
+    const state = tempState();
+    writeFileSync(
+      state,
+      JSON.stringify({
+        contextKey: "github.com|o/n|someone|refresh-v1",
+        resources: {},
+        manifest: {
+          coverage: "complete",
+          observedAt: 1,
+          entries: [
+            { key: "issue#1", state: "OPEN", updatedAt: 1 },
+            { key: "pr#7", state: "OPEN", updatedAt: 1, headOid: "sha" },
+          ],
+        },
+      }),
+    );
+    const log: string[] = [];
+    const bad: GhResult = { exitCode: 1, stderr: "", stdout: "HTTP/2.0 502 Bad Gateway\n\n" };
+    const report = await liveRun(
+      fakeGitHub(log, undefined, (a) => (a.includes("graphql -f query=query(") ? bad : undefined)),
+      args(state),
+    );
+    expect(report.manifest).toMatchObject({ coverage: "stale", observedThisRun: 0 });
+    expect(report.invalidation).toMatchObject({ subjects: [], seen: {}, afterUpdatedAt: {} });
+    expect(log.some((a) => a.includes("/timeline") && !a.includes("issues/1/timeline"))).toBe(
+      false,
+    );
+    expect(log.some((a) => a.includes("check-runs"))).toBe(false);
+    expect(report.skipped).toMatchObject({
+      "check-runs": expect.stringMatching(/head of pr#7 unknown/),
+    });
+    expect(report.ghCache).toMatchObject({ servedFromDisk: expect.stringMatching(/^unknown/) });
+  });
+
   it("sends nothing after a secondary rate limit", async () => {
     const log: string[] = [];
     const report = await liveRun(fakeGitHub(log, "comments"), args(tempState()));

@@ -417,8 +417,9 @@ export async function liveRun(
   if (read.advanced && manifest && state.manifest)
     report.diff = diffManifest(state.manifest, manifest);
   if (read.advanced && manifest) state.manifest = manifest;
-  // Candidate subjects come from what was actually observed, complete or not.
-  const observed = read.observed.length ? read.observed : (manifest?.entries ?? []);
+  // Measurements use only entries observed on this run, complete or not; a stale manifest's
+  // entries are never treated as current timestamps or heads.
+  const observed = read.observed;
 
   const pr = opt("--pr");
   const issue = opt("--issue");
@@ -438,12 +439,13 @@ export async function liveRun(
   resources["issue-list"] = `${base}/issues?state=all&sort=updated&per_page=100`;
   const head = observed.find((e) => e.key === `pr#${pr}`)?.headOid;
   if (head) resources["check-runs"] = `${base}/commits/${head}/check-runs?per_page=100`;
+  else if (pr) skipped["check-runs"] = `head of pr#${pr} unknown: not observed on this run`;
 
   const outcomes: Record<string, string> = {};
   report.conditional = outcomes;
   const lastModified: Record<string, string> = {};
-  // Saved payloads are reused only for paths that returned 200 or a matching 304 on this run.
-  const revalidated = new Set<string>();
+  // Payloads usable on this run: a 200 body, or the saved body after a matching 304.
+  const thisRun = new Map<string, string>();
   await section(skipped, "conditional", async () => {
     for (const [label, path] of Object.entries(resources)) {
       const stored = state.resources[path];
@@ -455,7 +457,7 @@ export async function liveRun(
         "rest",
       );
       const r = applyConditional(stored, contextKey, stored?.etag, call.out);
-      if (r.kind === "fresh" || r.kind === "validated") revalidated.add(path);
+      if (r.kind === "fresh" || r.kind === "validated") thisRun.set(path, r.body);
       // One page only: a resource with more pages is partial evidence, whatever the validator
       // says. Coverage is stored with the payload, so a later 304 keeps the omission notice.
       const coverage =
@@ -470,6 +472,8 @@ export async function liveRun(
       outcomes[label] = (r.kind === "miss" ? `miss: ${r.reason}` : r.kind) + partial;
       if (r.kind === "fresh" && r.etag)
         state.resources[path] = { contextKey, etag: r.etag, body: r.body, coverage };
+      // A 200 without a validator supersedes the saved copy, which must not be revalidated later.
+      else if (r.kind === "fresh") delete state.resources[path];
       if (call.out.kind === "ok" && call.out.lastModified)
         lastModified[label] = call.out.lastModified;
     }
@@ -506,17 +510,25 @@ export async function liveRun(
         "graphql",
         "probe:graphql",
       );
+      // The validator probe must succeed; the conditional probe's HTTP status is the measurement,
+      // so any status counts, but a transport failure leaves it unknown.
+      if (g1.out.kind !== "ok" || g2.out.kind === "transport-error") {
+        report.graphql = {
+          unknown: `validator probe ${g1.out.kind}, conditional probe ${g2.out.kind}`,
+        };
+        return;
+      }
       report.graphql = {
         etag: etag ?? null,
         lastModified: lastMod ?? null,
-        conditionalStatus: g2.out.kind === "transport-error" ? "transport" : g2.out.status,
+        conditionalStatus: g2.out.status,
       };
     });
 
     await section(skipped, "gh-cache", async () => {
       // gh --cache: TTL reuse, no revalidation. Compare Date headers. Both calls are budgeted,
       // although the second is expected to be served from disk.
-      const dates: string[] = [];
+      const dates: (string | undefined)[] = [];
       for (let i = 0; i < 2; i++) {
         const r = await live.call(
           `gh --cache 1h #${i + 1}`,
@@ -524,9 +536,12 @@ export async function liveRun(
           "core",
           "probe:gh-cache",
         );
-        dates.push(headerOf(r.raw.stdout, "date") ?? "");
+        dates.push(r.out.kind === "ok" ? headerOf(r.raw.stdout, "date") : undefined);
       }
-      report.ghCache = { dates, servedFromDisk: dates[0] === dates[1] };
+      report.ghCache =
+        dates[0] && dates[1]
+          ? { dates, servedFromDisk: dates[0] === dates[1] }
+          : { dates, servedFromDisk: "unknown: a response failed or had no Date header" };
     });
 
     // Invalidation sample: events timestamped after their subject's updatedAt.
@@ -538,8 +553,10 @@ export async function liveRun(
     const seen: Record<string, number> = {};
     const truncated: string[] = [];
     const sampled: string[] = [];
+    const unread: string[] = [];
     report.invalidation = {
       subjects: sampled,
+      unread,
       seen,
       afterUpdatedAt: late,
       firstPageOnly: truncated,
@@ -553,15 +570,26 @@ export async function liveRun(
           "core",
           "probe:invalidation",
         );
-        if (out.kind !== "ok") continue;
-        sampled.push(e.key);
-        if (hasNextLink(raw.stdout)) truncated.push(e.key);
-        for (const ev of JSON.parse(out.body) as {
+        if (out.kind !== "ok") {
+          unread.push(`${e.key}: ${out.kind}`);
+          continue;
+        }
+        let events: {
           event: string;
           created_at?: string;
           submitted_at?: string;
           updated_at?: string;
-        }[]) {
+        }[];
+        try {
+          events = JSON.parse(out.body);
+          if (!Array.isArray(events)) throw new Error();
+        } catch {
+          unread.push(`${e.key}: unexpected body`);
+          continue;
+        }
+        sampled.push(e.key);
+        if (hasNextLink(raw.stdout)) truncated.push(e.key);
+        for (const ev of events) {
           const t = Date.parse(ev.updated_at ?? ev.submitted_at ?? ev.created_at ?? "");
           if (Number.isNaN(t)) continue;
           seen[ev.event] = (seen[ev.event] ?? 0) + 1;
@@ -570,17 +598,20 @@ export async function liveRun(
       }
     });
     const checkRunsPath = resources["check-runs"];
-    const checkRuns =
-      checkRunsPath && revalidated.has(checkRunsPath) ? state.resources[checkRunsPath] : undefined;
+    const checkRuns = checkRunsPath ? thisRun.get(checkRunsPath) : undefined;
     if (checkRunsPath && !checkRuns)
       (report.invalidation as Record<string, unknown>).checkRuns =
         `stale or unknown: ${outcomes["check-runs"] ?? "not read on this run"}`;
     const prUpdated = observed.find((e) => e.key === `pr#${pr}`)?.updatedAt;
     if (checkRuns && prUpdated !== undefined) {
-      const body = JSON.parse(checkRuns.body) as {
-        total_count: number;
-        check_runs: { completed_at: string | null }[];
-      };
+      let body: { total_count: number; check_runs: { completed_at: string | null }[] };
+      try {
+        body = JSON.parse(checkRuns);
+        if (!Array.isArray(body.check_runs)) throw new Error();
+      } catch {
+        body = { total_count: 0, check_runs: [] };
+        (report.invalidation as Record<string, unknown>).checkRuns = "unknown: unexpected body";
+      }
       if (body.total_count > body.check_runs.length) truncated.push(`pr#${pr} check runs`);
       for (const run of body.check_runs) {
         seen["check_run_completed"] = (seen["check_run_completed"] ?? 0) + 1;
