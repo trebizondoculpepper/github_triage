@@ -110,6 +110,18 @@ export const complexityGuidance: ComplexityGuidance = {
 
 /** Plain-text rendering used by `github-triage estimate --help`. */
 export function complexityGuidanceText(g: ComplexityGuidance = complexityGuidance): string {
+  return guidanceText(
+    "Complexity estimation guidance",
+    g,
+    "With --help: --json gives the versioned structured guidance (schemaVersion 1).",
+  );
+}
+
+/**
+ * The one plain-text renderer every bundled guidance definition shares (complexity, and impact
+ * since #246): only the title and the closing pointer differ per metric.
+ */
+export function guidanceText(title: string, g: ComplexityGuidance, footer: string): string {
   const list = (items: readonly string[]) => items.map((item) => `  - ${item}`).join("\n");
   const width = Math.max(...g.bands.map((b) => b.size.length));
   const bands = g.bands
@@ -117,7 +129,7 @@ export function complexityGuidanceText(g: ComplexityGuidance = complexityGuidanc
       (b) => `  ${b.size.padEnd(width)}  ${b.guidance}\n  ${"".padEnd(width)}  e.g. ${b.example}`,
     )
     .join("\n");
-  return `Complexity estimation guidance (version ${g.guidanceVersion}):
+  return `${title} (version ${g.guidanceVersion}):
 
 Scale: ${g.scale}
 ${bands}
@@ -134,7 +146,7 @@ Prerequisites:
 ${list(g.prerequisites)}
 Boundaries:
 ${list(g.boundaries)}
-With --help: --json gives the versioned structured guidance (schemaVersion 1).
+${footer}
 `;
 }
 

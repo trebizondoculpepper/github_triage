@@ -122,6 +122,16 @@ try {
       !guidance.stdout.includes("github-triage:impact-estimate v1")
     )
       throw new Error(`Installed bin does not document impact estimates in ${cwd}.`);
+    // Impact guidance (#246): the bundled impact definition ships and renders as text and JSON.
+    const impactHelp = await cli(["estimate", "--help", "--metric", "impact"]);
+    const impactJson = await cli(["estimate", "--help", "--metric", "impact", "--json"]);
+    if (
+      !impactHelp.stdout.includes("Impact estimation guidance (version") ||
+      !impactHelp.stdout.includes("impact:XS") ||
+      !help.stdout.includes("estimate --help --metric impact") ||
+      (JSON.parse(impactJson.stdout) as { kind?: string }).kind !== "impact-guidance"
+    )
+      throw new Error(`Installed bin printed no impact guidance in ${cwd}.`);
     if (/setup complexity|issue field|fieldId/.test(help.stdout + guidance.stdout))
       throw new Error(`Installed bin still advertises retired native-field setup in ${cwd}.`);
     // Repository briefing mode (#170): the installed help documents the mode and its windows.
@@ -215,6 +225,12 @@ try {
   );
   if (!mcpHelp.stdout.startsWith("Usage: github-triage-mcp"))
     throw new Error("Installed MCP bin printed no help.");
+  // #246: MCP help carries the same bundled impact guidance and the CLI commands for it.
+  if (
+    !mcpHelp.stdout.includes("Impact estimation guidance (version") ||
+    !mcpHelp.stdout.includes("github-triage estimate --help --metric impact")
+  )
+    throw new Error("Installed MCP help carries no impact guidance.");
   console.log(
     "ok   installed github-triage-mcp completes a stdio round trip (four read-only tools)",
   );

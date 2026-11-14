@@ -11,7 +11,7 @@
  * No collection, no weighted score and no network lookup happen here.
  *
  * The additive `rankedActions` object is new; the legacy `actions` and `role.next` projections
- * are not derived from it in this slice (#259 and #246 wire the role views).
+ * are not derived from it (#259). The designer NEXT STEPS text renders it since #246.
  */
 import type { AssessmentState, MetricView, SubjectAssessments } from "./assessments.js";
 import type { ComplexitySize } from "./complexity.js";
@@ -332,8 +332,8 @@ export function roleCandidates(input: CandidateInput): ActionFacts[] {
     const detail = s.isIssue
       ? `github-triage --repo ${input.repository} --issue ${s.number} --json`
       : `gh pr view ${s.number} --repo ${input.repository}`;
-    const estimate = (m: string) =>
-      `github-triage estimate ${s.number} --metric ${m} --size SIZE --rationale TEXT --repo ${input.repository}`;
+    const estimate = (m: string, invalid = false) =>
+      `github-triage estimate ${s.number} --metric ${m} --size SIZE --rationale TEXT${invalid ? " --replace-invalid" : ""} --repo ${input.repository}`;
     const restricted = s.labels.some((l) => l.startsWith("platform:"));
     const claim = `github-triage claim ${s.number} --repo ${input.repository} --agent ${agent}${
       restricted && input.platform ? ` --platform ${input.platform}` : ""
@@ -350,7 +350,12 @@ export function roleCandidates(input: CandidateInput): ActionFacts[] {
       implement: otherClaims.length ? handoff : claim,
       "estimate-complexity": estimate("complexity"),
       "assess-impact": estimate("impact"),
-      "inspect-assessment": null,
+      // Designer inspection of known bad impact evidence carries the Ticket Doctor fix (#246,
+      // doc/design/impact-estimation.md "The unassessed-work queue"): the judged size replaces
+      // the conflicting labels, or removes the invalid ones. The implementer's complexity
+      // inspection stays command-free here; #259 owns that view.
+      "inspect-assessment":
+        metric === "impact" ? estimate("impact", a.impact.state === "invalid") : null,
       inspect: null,
     };
     const next = kind in command ? (command[kind] ?? null) : detail;

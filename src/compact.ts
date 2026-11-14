@@ -4,13 +4,14 @@ import type { BriefingProcess } from "./process.js";
 import type { Briefing, BriefingOptions, Bounded, CheckOutcome } from "./briefing.js";
 import { estimateLine } from "./estimation.js";
 import { assessmentsText, provenanceText } from "./assessments.js";
-import type { SubjectAssessments } from "./assessments.js";
+import type { MetricAvailability, SubjectAssessments } from "./assessments.js";
 import type { EstimateEntry } from "./estimation.js";
 import { compareImpact, impactLookup, urgencyBand } from "./ranking.js";
 import { followUpRules, roleSectionRows, roleView } from "./roles.js";
 import type { RoleContext } from "./roles.js";
 import { designFollowUpSections, rankActions, roleCandidates } from "./blended.js";
 import type { BlendedRole, RankedActions } from "./blended.js";
+import { impactGuidance } from "./impact.js";
 import type { RoleView } from "./roles.js";
 import type { Action, Issue, PullRequest, Snapshot } from "./types.js";
 
@@ -110,11 +111,41 @@ export interface CompactSubject {
    */
   assessments?: SubjectAssessments | null;
 }
+/**
+ * The designer's impact-assessment summary (#246, doc/design/impact-estimation.md "The
+ * unassessed-work queue"), shaped like the estimation object. Counts, never a second queue: the
+ * actions themselves are `assess-impact` and `inspect-assessment` items in `rankedActions`.
+ */
+export interface ImpactEstimation {
+  /** `impact.enabled`: available, disabled (hidden, nothing deleted) or unknown (unreadable). */
+  status: MetricAvailability;
+  guidanceVersion: number;
+  /** Open issues whose impact is unassessed or stale (blocked tickets included). */
+  eligible: number;
+  /** `assess-impact` actions in the ranked queue, before the display limit (parked excluded). */
+  ranked: number;
+  /** `assess-impact` actions in the bounded `rankedActions.items`. */
+  shown: number;
+  /** True when at least one assessment entered the ranked queue, regardless of truncation. */
+  offered: boolean;
+  /** `inspect-assessment` actions (conflicting or invalid impact labels): ranked and shown. */
+  inspections: { ranked: number; shown: number };
+  /** Open issues with several recognized impact labels. */
+  conflicts: number;
+  /** Open issues with an `impact:*` label outside XS..XXL. */
+  invalid: number;
+  /** Open issues whose impact evidence is incomplete: unknown, never queued or defaulted. */
+  unknown: number;
+  guidance: string;
+  boundaries: string;
+}
+
 export function compactBriefing(
   snapshot: Snapshot,
   options: Pick<BriefingOptions, "limit" | "agent" | "estimate"> & { role?: string },
   expanded: Briefing,
   assessments?: ReadonlyMap<string, SubjectAssessments>,
+  impactStatus: MetricAvailability = "available",
 ) {
   const bound = <T>(items: T[], size = 3): Bounded<T> => ({
     total: items.length,
@@ -283,7 +314,7 @@ export function compactBriefing(
   // Additive blended ranking (#248); the legacy `actions` and `role.next` are unchanged.
   const blendedRole: BlendedRole | null =
     role && (role.name === "implementer" || role.name === "designer") ? role.name : null;
-  const rankedActions: RankedActions | null =
+  const fullRanking: RankedActions | null =
     role && blendedRole && assessments
       ? rankActions(
           roleCandidates({
@@ -321,8 +352,19 @@ export function compactBriefing(
             urgency: (url) => urgencyBand(defined(byUrl.get(url))),
             ownedByViewer: (url) => isMine(defined(byUrl.get(url))),
           }),
-          { order: facts.ranking.order, limit: options.limit },
+          // Rank everything once; the display limit is applied below, so counts see it all.
+          { order: facts.ranking.order, limit: Number.MAX_SAFE_INTEGER },
         )
+      : null;
+  const shownRanked = fullRanking?.items.slice(0, Math.max(0, options.limit)) ?? [];
+  const rankedActions: RankedActions | null = fullRanking && {
+    ...fullRanking,
+    omitted: fullRanking.total - shownRanked.length,
+    items: shownRanked,
+  };
+  const impactEstimation: ImpactEstimation | null =
+    fullRanking && blendedRole === "designer" && assessments
+      ? impactEstimationReport(impactStatus, assessments, fullRanking.items, shownRanked)
       : null;
   const ordered = role
     ? role.next.map(({ url }) => ({ target: url, findings: grouped.get(url) ?? [] }))
@@ -349,6 +391,8 @@ export function compactBriefing(
   };
   const urls = new Set([
     ...actions.items.map((item) => item.target),
+    // Designer NEXT STEPS renders the ranked actions (#246); their subjects must be present.
+    ...(impactEstimation ? (rankedActions?.items.map((item) => item.target) ?? []) : []),
     ...Object.values(sections).flatMap((s) => s.items),
     ...(role?.sections.flatMap((s) => s.items.map((row) => row.url)) ?? []),
   ]);
@@ -402,6 +446,8 @@ export function compactBriefing(
     sections,
     role,
     rankedActions,
+    // Additive and designer-only (#246): other views keep their exact previous shape.
+    ...(impactEstimation ? { impactEstimation } : {}),
     estimation,
     subjects,
     changes: facts.changes,
@@ -412,6 +458,37 @@ export function compactBriefing(
   };
 }
 export type CompactBriefing = ReturnType<typeof compactBriefing>;
+
+function impactEstimationReport(
+  status: MetricAvailability,
+  assessments: ReadonlyMap<string, SubjectAssessments>,
+  ranked: RankedActions["items"],
+  shown: RankedActions["items"],
+): ImpactEstimation {
+  const states = [...assessments.values()].map((a) => a.impact.state);
+  const count = (...wanted: string[]) => states.filter((s) => wanted.includes(s)).length;
+  const kind = (items: RankedActions["items"], k: string) =>
+    items.filter((i) => i.kind === k).length;
+  const rankedCount = kind(ranked, "assess-impact");
+  return {
+    status,
+    guidanceVersion: impactGuidance.guidanceVersion,
+    eligible: count("unassessed", "stale"),
+    ranked: rankedCount,
+    shown: kind(shown, "assess-impact"),
+    offered: rankedCount > 0,
+    inspections: {
+      ranked: kind(ranked, "inspect-assessment"),
+      shown: kind(shown, "inspect-assessment"),
+    },
+    conflicts: count("conflict"),
+    invalid: count("invalid"),
+    unknown: count("unknown"),
+    guidance: "github-triage estimate --help --metric impact",
+    boundaries:
+      "Assessment acquires no claim, reserves nothing and does not unblock or re-rank; blocked tickets are assessed under stated assumptions.",
+  };
+}
 export function compactText(
   report: CompactBriefing & { process?: BriefingProcess },
   maxChars = 10000,
@@ -458,12 +535,32 @@ export function compactText(
     );
   };
   if (estimation.requested) estimationRows();
+  // Designer NEXT STEPS (#246): the blended ranked actions, with kind, why, the paired
+  // assessments and the exact next command. Role sections below still give each subject's
+  // detail, so these rows do not mark subjects as shown.
+  const rankedRows = (ranked: RankedActions, impact: ImpactEstimation): void => {
+    rows.push(`\nNEXT STEPS (${ranked.total}; ${ranked.omitted} omitted)`);
+    for (const item of ranked.items) {
+      const s = defined(subjects.get(item.target));
+      const why = roleReasons.get(item.target);
+      rows.push(
+        `- #${s.number} ${s.title} — ${item.kind} (${item.reasonCodes.join(", ")})${s.assessments ? `\n  ${assessmentsText(s.assessments)}` : ""}${why ? `\n  Why: ${why}` : ""}${item.nextCommand ? `\n  Next: ${item.nextCommand}${item.thenCommand ? `\n  Then: ${item.thenCommand}` : ""}` : `\n  Inspect: ${item.inspection ?? s.detailCommand}`}\n  ${item.target}`,
+      );
+    }
+    // Hidden, never deleted, when impact.enabled is false.
+    if (impact.status !== "disabled")
+      rows.push(
+        `- Impact assessment: ${impact.eligible} eligible, ${impact.ranked} ranked, ${impact.shown} shown; ${impact.conflicts} conflicting, ${impact.invalid} invalid, ${impact.unknown} unknown${impact.status === "unknown" ? " (impact.enabled unreadable)" : ""}. Guidance: ${impact.guidance}`,
+      );
+  };
   const roleReasons = new Map(
     report.role?.sections.flatMap((s) =>
       s.items.map((row): [string, string] => [row.url, row.reason]),
     ) ?? [],
   );
-  add("NEXT STEPS", report.actions, roleReasons);
+  const impact = "impactEstimation" in report ? report.impactEstimation : undefined;
+  if (impact && report.rankedActions) rankedRows(report.rankedActions, impact);
+  else add("NEXT STEPS", report.actions, roleReasons);
   if (estimation.offered && !estimation.requested)
     rows.push("- No higher-priority work: estimation is offered below (optional).");
   if (report.role) {

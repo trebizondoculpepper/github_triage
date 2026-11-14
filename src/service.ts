@@ -67,9 +67,10 @@ export async function presentBriefing(
       }
     : collected;
   // One shared paired-facts read per snapshot (#247); without `trust` provenance is unknown.
+  const impactStatus = await metricStatus(impactMetric, snapshot.repository, estimationRuntime);
   const assessments = await readSnapshotAssessments(snapshot, {
     complexity: collected.status,
-    impact: await metricStatus(impactMetric, snapshot.repository, estimationRuntime),
+    impact: impactStatus,
     trust,
     platform: options.platform,
     signal,
@@ -86,7 +87,9 @@ export async function presentBriefing(
         },
     now,
   );
-  const built = options.full ? null : compactBriefing(snapshot, options, expanded, assessments);
+  const built = options.full
+    ? null
+    : compactBriefing(snapshot, options, expanded, assessments, impactStatus);
   // Additive: the process object is only present when the front end resolved a guide setting.
   const compact = built && options.process ? { ...built, process: options.process } : built;
   const report = compact ?? expanded;
