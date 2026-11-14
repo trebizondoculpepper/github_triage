@@ -1034,6 +1034,13 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
     );
     // #192: delivery and responsibility for the issues this PR is linked to close.
     const live = deliveryBoundaries(runtime, repository, false);
+    // Keep each linked issue's repository: a PR may close an issue elsewhere.
+    const linked = status.linkedIssues.map((i) => {
+      const m = i.url.match(/^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/issues\/\d+/);
+      return { number: i.number, repository: m ? m[1] : "(unknown repository)" };
+    });
+    const local = linked.filter((i) => i.repository.toLowerCase() === repository.toLowerCase());
+    const foreign = linked.filter((i) => i.repository.toLowerCase() !== repository.toLowerCase());
     const delivery =
       live.trust && live.live
         ? prDelivery(
@@ -1042,9 +1049,11 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
             status.pullRequest.state === "OPEN",
             await readIssuesDelivery(
               repository,
-              status.linkedIssues.map((i) => i.number),
+              local.map((i) => i.number),
               { ...live.live, trust: live.trust },
             ),
+            repository,
+            foreign,
           )
         : null;
     const report = delivery ? { ...status, delivery } : status;

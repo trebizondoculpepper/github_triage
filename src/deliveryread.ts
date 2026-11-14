@@ -188,7 +188,11 @@ export function deliveryView(
 export function deliveryRead(snapshot: Snapshot, diagnosis: DeliveryDiagnosis): DeliveryRead {
   const prs = new Map(snapshot.pullRequests.map((p) => [p.url.toLowerCase(), p]));
   const tickets = snapshot.issues
-    .filter((i) => diagnosis.issues.has(i.number))
+    // Only ignored markers (a verified non-writer's, or a copy bound elsewhere) are no record.
+    .filter((i) => {
+      const d = diagnosis.issues.get(i.number);
+      return !!d && (d.fold !== "known" || d.trustedRecord || !!d.legacy);
+    })
     .sort((a, b) => a.number - b.number)
     .map((i) => deliveryView(snapshot.repository, i, diagnosis.issues.get(i.number)!, prs));
   return {
@@ -343,7 +347,10 @@ export interface PrDelivery {
   scope: "closing-references";
   issues: {
     number: number;
-    closure: Closure;
+    /** The issue's repository (a PR may close an issue in another repository). */
+    repository: string;
+    /** Null when the issue was not read (another repository). */
+    closure: Closure | null;
     /** This PR is a trusted required member of that issue (null when records are unknown). */
     required: boolean | null;
     responsible: string | null;
@@ -361,42 +368,66 @@ export function prDelivery(
   blockers: string[],
   open: boolean,
   read: Awaited<ReturnType<typeof readIssuesDelivery>>,
+  repository: string,
+  foreign: { repository: string; number: number }[] = [],
 ): PrDelivery {
   const views = new Map(read.tickets.map((t) => [t.number, t]));
+  // Issues in another repository are not read here: their records bind that repository and
+  // issue, never this repository's issue with the same number. Reported unknown, out of scope.
+  const outside: PrDelivery["issues"] = foreign.map((f) => ({
+    number: f.number,
+    repository: f.repository,
+    closure: null,
+    required: null,
+    responsible: null,
+    delivery: "unknown",
+    ticketResponsible: null,
+    followUp: null,
+    followUpWhy: `in ${f.repository}: not read by this command; run pdb who ${f.number} --repo ${f.repository}`,
+  }));
   return {
     scope: "closing-references",
-    issues: read.closures.map(({ number, closure }) => {
-      const view = views.get(number) ?? null;
-      const member = view?.deliverables.find((m) => m.url?.toLowerCase() === prUrl.toLowerCase());
-      // This PR's follow-up comes from this report's own fresh blockers.
-      const followUp: FollowUp | null = !member
-        ? null
-        : !open || member.state === "unknown" || member.state === "not-evaluated"
-          ? member.followUp
-          : !blockers.length
-            ? "actionable"
-            : blockers.every((b) => waitingBlocker.test(b))
-              ? "waiting"
-              : "actionable";
-      return {
-        number,
-        closure,
-        required: view ? (view.responsibility ? !!member : null) : false,
-        responsible: member?.responsible ?? null,
-        delivery: view ? view.delivery : null,
-        ticketResponsible: view?.responsibility?.ticket ?? null,
-        followUp,
-        followUpWhy: !member
+    issues: [
+      ...read.closures.map(({ number, closure }) => {
+        const view = views.get(number) ?? null;
+        const member = view?.deliverables.find((m) => m.url?.toLowerCase() === prUrl.toLowerCase());
+        // This PR's follow-up comes from this report's own fresh blockers.
+        const followUp: FollowUp | null = !member
           ? null
-          : followUp === member.followUp
-            ? member.followUpWhy
-            : blockers.length
-              ? blockers.join("; ")
-              : "accepted on the current head but not merged: merge or update the branch",
-      };
-    }),
+          : !open || member.state === "unknown" || member.state === "not-evaluated"
+            ? member.followUp
+            : !blockers.length
+              ? "actionable"
+              : blockers.every((b) => waitingBlocker.test(b))
+                ? "waiting"
+                : "actionable";
+        return {
+          number,
+          repository,
+          closure,
+          required: view ? (view.responsibility ? !!member : null) : false,
+          responsible: member?.responsible ?? null,
+          delivery: view ? view.delivery : null,
+          ticketResponsible: view?.responsibility?.ticket ?? null,
+          followUp,
+          followUpWhy: !member
+            ? null
+            : followUp === member.followUp
+              ? member.followUpWhy
+              : blockers.length
+                ? blockers.join("; ")
+                : "accepted on the current head but not merged: merge or update the branch",
+        };
+      }),
+      ...outside,
+    ],
     complete: read.complete,
-    omissions: read.omissions,
+    omissions: [
+      ...read.omissions,
+      ...foreign.map(
+        (f) => `${f.repository}#${f.number}: another repository; its delivery is unknown here`,
+      ),
+    ],
   };
 }
 export function prDeliveryLines(d: PrDelivery): string[] {
@@ -406,7 +437,7 @@ export function prDeliveryLines(d: PrDelivery): string[] {
     ...(d.issues.length ? [] : ["  none linked"]),
     ...d.issues.map(
       (i) =>
-        `  #${i.number} ${i.closure}: delivery ${i.delivery ?? "no record"}; ${i.required === null ? "required unknown" : i.required ? `required, responsible ${i.responsible ?? "nobody"}, follow-up ${i.followUp} (${i.followUpWhy})` : "not a required member"}; ticket responsible ${i.ticketResponsible ?? (i.required === null ? "unknown" : "nobody")}`,
+        `  ${i.repository}#${i.number} ${i.closure ?? "closure unknown"}: delivery ${i.delivery ?? "no record"}; ${i.required === null ? "required unknown" : i.required ? `required, responsible ${i.responsible ?? "nobody"}, follow-up ${i.followUp} (${i.followUpWhy})` : "not a required member"}; ticket responsible ${i.ticketResponsible ?? (i.required === null ? "unknown" : "nobody")}`,
     ),
     ...d.omissions.map((o) => `  INCOMPLETE: ${o}`),
   ];

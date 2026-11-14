@@ -888,6 +888,24 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
     expect(r.tickets[0].deliverables.map((m) => m.followUp)).toEqual(["none", "waiting"]);
   });
 
+  it("a ticket whose only markers are ignored is out of the delivery block", async () => {
+    const r = await read(
+      [
+        issue(
+          73,
+          ["bug"],
+          [
+            post(record(73, "submit", { deliverables: [pr(93)] }), "reader"),
+            post(record(98, "submit", { deliverables: [pr(93)] })),
+          ],
+        ),
+      ],
+      [],
+      { 93: "open" },
+    );
+    expect(r.tickets).toEqual([]);
+  });
+
   it("offline, responsibility is unknown (null), never nobody, and delivery is unknown", async () => {
     const r = await read([issue(62, ["bug"], [submitted(62, [86])])], [], {}, {}, false);
     expect(r.tickets[0]).toMatchObject({
@@ -985,7 +1003,13 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
       rest: fake.rt.rest,
       trust,
     });
-    const waiting = prDelivery(prLink(90), ["1 check(s) still pending: waiting"], true, issuesRead);
+    const waiting = prDelivery(
+      prLink(90),
+      ["1 check(s) still pending: waiting"],
+      true,
+      issuesRead,
+      repo,
+    );
     expect(waiting.issues).toEqual([
       expect.objectContaining({
         number: 68,
@@ -997,13 +1021,13 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
       expect.objectContaining({ number: 69, required: false, delivery: null }),
       expect.objectContaining({ number: 70, required: null, delivery: "unknown" }),
     ]);
-    expect(prDelivery(prLink(90), [], true, issuesRead).issues[0]).toMatchObject({
+    expect(prDelivery(prLink(90), [], true, issuesRead, repo).issues[0]).toMatchObject({
       followUp: "actionable",
       followUpWhy: "accepted on the current head but not merged: merge or update the branch",
     });
-    expect(prDelivery(prLink(90), ["changes requested"], true, issuesRead).issues[0].followUp).toBe(
-      "actionable",
-    );
+    expect(
+      prDelivery(prLink(90), ["changes requested"], true, issuesRead, repo).issues[0].followUp,
+    ).toBe("actionable");
     expect(prDeliveryLines(waiting).join("\n")).toContain(
       "#70 open: delivery unknown; required unknown",
     );
