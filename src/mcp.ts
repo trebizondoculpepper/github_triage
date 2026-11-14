@@ -28,6 +28,7 @@ import {
   systemClock,
   Watcher,
 } from "./polling.js";
+import type { Clock } from "./polling.js";
 import type { ReadRuntime } from "./service.js";
 import type { ConfigFileSystem, GitRunner } from "./config.js";
 import { validateHarness } from "./harness.js";
@@ -709,6 +710,31 @@ export const defaultRuntime = (options: McpOptions): McpRuntime => ({
   guide: options.project ? { cwd: options.project } : undefined,
 });
 
+/**
+ * Bind the opt-in watcher to the one explicit startup target (#271, #291). Refuses before any
+ * repository resolution, collection or timer when neither --repo nor --project was given; a
+ * per-tool repo never binds this process-wide watcher. The caller starts the returned watcher.
+ */
+export async function bindPolling(
+  options: McpOptions,
+  runtime: McpRuntime,
+  clock: Clock = systemClock,
+): Promise<Watcher | undefined> {
+  if (!options.poll) return undefined;
+  // Polling watches exactly one explicitly resolved repository, never arbitrary targets.
+  // As for tool calls, never watch whatever repository the launch directory holds (#271).
+  if (!options.repo && !options.project)
+    throw new Error("--poll needs --repo owner/name or --project /absolute/project/path.");
+  const repository = options.repo ?? (await runtime.currentRepository(options.project));
+  if (!repoPattern.test(repository)) throw new Error("--poll needs a resolvable --repo.");
+  runtime.collect = sharedCollect(runtime.collect);
+  runtime.watcher = new Watcher(
+    { repository, intervalMinutes: options.pollIntervalMinutes },
+    { collect: runtime.collect, clock },
+  );
+  return runtime.watcher;
+}
+
 function isEntryPoint(entry: string | undefined): boolean {
   if (!entry) return false;
   try {
@@ -725,19 +751,7 @@ if (isEntryPoint(process.argv[1])) {
     else {
       const { version } = await installedVersion();
       const runtime = defaultRuntime(options);
-      if (options.poll) {
-        // Polling watches exactly one explicitly resolved repository, never arbitrary targets.
-        // As for tool calls, never watch whatever repository the launch directory holds (#271).
-        if (!options.repo && !options.project)
-          throw new Error("--poll needs --repo owner/name or --project /absolute/project/path.");
-        const repository = options.repo ?? (await runtime.currentRepository(options.project));
-        if (!repoPattern.test(repository)) throw new Error("--poll needs a resolvable --repo.");
-        runtime.collect = sharedCollect(runtime.collect);
-        runtime.watcher = new Watcher(
-          { repository, intervalMinutes: options.pollIntervalMinutes },
-          { collect: runtime.collect, clock: systemClock },
-        );
-      }
+      await bindPolling(options, runtime);
       const watcher = runtime.watcher;
       const handle = serveStdio(() => createServer(options, runtime, version ?? "0.0.0"), {
         onerror: (error) => process.stderr.write(`pdb-mcp: ${error.message}\n`),

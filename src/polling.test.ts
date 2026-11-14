@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 import { Client } from "@modelcontextprotocol/client";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
@@ -10,7 +11,7 @@ import {
   Watcher,
 } from "./polling.js";
 import type { Clock, Collect, DomainEvent } from "./polling.js";
-import { createServer, envelope, mcpArguments } from "./mcp.js";
+import { bindPolling, createServer, envelope, mcpArguments } from "./mcp.js";
 import { RateLimitError } from "./dependencies.js";
 import { closingPrEvidence } from "./ranking.js";
 import { rateLimitFailure } from "./github.js";
@@ -808,5 +809,119 @@ describe("optional polling and domain events (#32)", () => {
     const bad = await client.callTool({ name: "triage_events", arguments: { limit: 101 } });
     expect(bad.isError).toBe(true);
     w.stop();
+  });
+});
+
+describe("polling startup binds only an explicit startup target (#271, #291)", () => {
+  const daemonRepo = "daemon/unrelated-checkout";
+  /** Injected boundaries recording every resolution, collection and timer the binding makes. */
+  const boundaries = (resolve: (cwd?: string) => Promise<string> = async () => daemonRepo) => {
+    const time = fakeClock();
+    const resolved: (string | undefined)[] = [];
+    const { collect, calls } = scripted([snap()]);
+    const runtime: McpRuntime = {
+      collect,
+      dependencyReport: async () => {
+        throw new Error("unused");
+      },
+      currentRepository: async (cwd) => {
+        resolved.push(cwd);
+        return resolve(cwd);
+      },
+    };
+    return { time, resolved, calls, runtime };
+  };
+  const refusedWithNothingStarted = (b: ReturnType<typeof boundaries>) => {
+    expect(b.runtime.watcher).toBeUndefined();
+    expect(b.time.timers.size).toBe(0);
+    expect(b.calls).toHaveLength(0);
+  };
+
+  it("refuses --poll with no startup target despite a valid daemon checkout, never resolving cwd", async () => {
+    const b = boundaries();
+    await expect(bindPolling(mcpArguments(["--poll"]), b.runtime, b.time.clock)).rejects.toThrow(
+      "--poll needs --repo owner/name or --project /absolute/project/path.",
+    );
+    expect(b.resolved).toEqual([]);
+    expect(b.resolved).not.toContain(undefined);
+    await b.time.advance(120 * minute);
+    refusedWithNothingStarted(b);
+  });
+
+  it("does not let a tool-level repo authorise a process-wide watcher", async () => {
+    const b = boundaries();
+    await expect(bindPolling(mcpArguments(["--poll"]), b.runtime, b.time.clock)).rejects.toThrow(
+      /--poll needs --repo/,
+    );
+    refusedWithNothingStarted(b);
+    // Without --poll, ordinary on-demand operation stays available: a tool call naming its own
+    // repository still works and reports polling disabled rather than watching that repository.
+    expect(await bindPolling(mcpArguments([]), b.runtime, b.time.clock)).toBeUndefined();
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await createServer({}, b.runtime).connect(serverSide);
+    const client = new Client({ name: "test", version: "1.0.0" });
+    await client.connect(clientSide);
+    const read = envelope.parse(
+      (await client.callTool({ name: "triage_briefing", arguments: { repo } })).structuredContent,
+    );
+    expect(read.selection).toMatchObject({ repository: repo });
+    const events = envelope.parse(
+      (await client.callTool({ name: "triage_events", arguments: {} })).structuredContent,
+    );
+    expect(events).toMatchObject({ result: { enabled: false } });
+    expect(b.resolved).toEqual([]);
+    expect(b.time.timers.size).toBe(0);
+  });
+
+  it("binds an explicit startup --repo without resolving any directory or starting a timer", async () => {
+    const b = boundaries();
+    const w = await bindPolling(mcpArguments(["--repo", repo, "--poll"]), b.runtime, b.time.clock);
+    expect(w?.repository).toBe(repo);
+    expect(b.runtime.watcher).toBe(w);
+    expect(b.resolved).toEqual([]);
+    expect(b.time.timers.size).toBe(0);
+    expect(b.calls).toHaveLength(0);
+    w!.start();
+    await b.time.advance(0);
+    expect(b.calls).toHaveLength(1);
+    w!.stop();
+  });
+
+  it("binds the repository resolved from a configured --project", async () => {
+    const project = resolve("/work/configured-project");
+    const b = boundaries(async (cwd) => (cwd === project ? repo : daemonRepo));
+    const w = await bindPolling(
+      mcpArguments(["--project", project, "--poll"]),
+      b.runtime,
+      b.time.clock,
+    );
+    expect(b.resolved).toEqual([project]);
+    expect(w?.repository).toBe(repo);
+    expect(b.time.timers.size).toBe(0);
+  });
+
+  it("refuses when the configured project cannot be resolved, starting nothing", async () => {
+    const failing = boundaries(async () => {
+      throw new Error("not a GitHub checkout");
+    });
+    await expect(
+      bindPolling(
+        mcpArguments(["--project", "/nowhere", "--poll"]),
+        failing.runtime,
+        failing.time.clock,
+      ),
+    ).rejects.toThrow("not a GitHub checkout");
+    expect(failing.resolved).toEqual([resolve("/nowhere")]);
+    refusedWithNothingStarted(failing);
+
+    const unusable = boundaries(async () => "not a repository");
+    await expect(
+      bindPolling(
+        mcpArguments(["--project", "/odd", "--poll"]),
+        unusable.runtime,
+        unusable.time.clock,
+      ),
+    ).rejects.toThrow(/resolvable --repo/);
+    refusedWithNothingStarted(unusable);
   });
 });
