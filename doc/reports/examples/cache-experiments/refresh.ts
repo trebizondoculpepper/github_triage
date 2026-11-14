@@ -346,6 +346,18 @@ export const RECONCILE_MINUTES = 30;
 const GRAPHQL_FULL_PAGE = 25; // nested selections force small pages
 const GRAPHQL_MANIFEST_PAGE = 100;
 
+/**
+ * One direct read of a subject that disappeared from a complete inventory, to tell transfer,
+ * deletion and lost access apart. It answers 404, 301 or 403, never a free 304, so it costs a
+ * request, a core point and a headers-sized payload. Shared so every strategy charges it alike.
+ */
+export function chargeDiagnosisRead(c: Counters): void {
+  c.restRequests++;
+  c.corePoints++;
+  c.diagnosisReads++;
+  c.bytes += HEADERS_ONLY_BYTES;
+}
+
 function chunks(n: number, size: number): number {
   return Math.ceil(n / size);
 }
@@ -449,10 +461,7 @@ export function warmRefresh(
       // One direct read per subject (404, 301 or 403; charged, not a 304) diagnoses which before
       // the cached record is dropped.
       for (const key of diff.removed) {
-        c.restRequests++;
-        c.corePoints++;
-        c.diagnosisReads++;
-        c.bytes += HEADERS_ONLY_BYTES;
+        chargeDiagnosisRead(c);
         view.delete(key);
       }
       const hydrate = [...diff.added, ...diff.changed];
@@ -557,10 +566,9 @@ export function warmRefresh(
         }
         view.set(s.key, copy);
       }
-      // A deleted or transferred subject 404s on its next conditional read.
-      c.restRequests += [...cached.keys()].filter(
-        (k) => !next.subjects.some((s) => s.key === k),
-      ).length;
+      // A subject the inventory no longer lists gets the same diagnosis read.
+      for (const k of cached.keys())
+        if (!next.subjects.some((s) => s.key === k)) chargeDiagnosisRead(c);
       break;
     }
   }
