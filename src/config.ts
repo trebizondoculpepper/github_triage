@@ -76,10 +76,10 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
     key: "briefing.engine",
     type: "string",
     nullable: false,
-    defaultValue: "typescript",
+    defaultValue: "datalog",
     choices: ["typescript", "datalog"],
     description:
-      "Next-action decision engine: typescript (default) or opt-in datalog. Datalog requires --role implementer or designer; rollback: github-triage config set briefing.engine typescript.",
+      "Next-action decision engine: datalog (default) or explicit typescript rollback. Datalog uses --role implementer or designer, defaulting to the implementer view; rollback: github-triage config set briefing.engine typescript.",
   },
   {
     key: "complexity.enabled",

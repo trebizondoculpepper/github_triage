@@ -46,9 +46,9 @@ const local = (raw = 'schemaVersion = 1\n[briefing]\nengine = "datalog"\n') => (
   },
 });
 describe("repository-scoped experimental engine selection", () => {
-  it("registers and validates the enum, with TypeScript default", () => {
+  it("registers and validates the enum, with Datalog default", () => {
     expect(settingFor(parseConfig('{"schemaVersion":1}', undefined), "briefing.engine").value).toBe(
-      "typescript",
+      "datalog",
     );
     expect(() =>
       parseConfig('{"schemaVersion":1,"briefing":{"engine":"invented"}}', undefined),
@@ -60,24 +60,24 @@ describe("repository-scoped experimental engine selection", () => {
       source: "config",
     });
     expect(await resolveEngineSetting("another/repo", local())).toMatchObject({
-      requested: "typescript",
+      requested: "datalog",
       source: "no-matching-project",
     });
     expect(await resolveEngineSetting(snapshot.repository)).toMatchObject({
-      requested: "typescript",
+      requested: "datalog",
       source: "no-matching-project",
     });
     await expect(resolveEngineSetting(snapshot.repository, local("garbage"))).rejects.toThrow(
       "no decision engine was run",
     );
   });
-  it("does not load the evaluator in default or full-intake paths", async () => {
+  it("does not load the evaluator for explicit TypeScript rollback or full intake", async () => {
     const never = async () => {
       throw new Error("evaluator initialized");
     };
     const normal = await presentBriefing(
       snapshot,
-      { limit: 10, maxChars: 10000 },
+      { limit: 10, maxChars: 10000, engineSetting: { requested: "typescript", source: "config" } },
       local(),
       new Date(),
       undefined,
@@ -109,9 +109,9 @@ describe("repository-scoped experimental engine selection", () => {
       maxChars: 10000,
       engineSetting: { requested: "datalog" as const, source: "config" as const },
     };
-    await expect(presentBriefing(snapshot, selected, local())).rejects.toThrow(
-      "--role implementer",
-    );
+    await expect(
+      presentBriefing(snapshot, { ...selected, role: "unsupported" }, local()),
+    ).rejects.toThrow("--role implementer");
     await expect(
       presentBriefing(
         snapshot,
@@ -232,4 +232,14 @@ it("returns sanitized MCP configuration repair guidance without an unusable roll
     await client.close();
     await server.close();
   }
+});
+
+it("defaults to an explicitly reported implementer view without inferring identity", async () => {
+  const result = await presentBriefing(snapshot, { limit: 10, maxChars: 10000 }, local());
+  expect(result.report.decisionEngine).toMatchObject({
+    used: "datalog",
+    role: { used: "implementer", source: "default" },
+  });
+  expect("role" in result.report && result.report.role?.name).toBe("implementer");
+  expect(result.text).toContain("No --agent given");
 });

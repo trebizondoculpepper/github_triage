@@ -1,4 +1,4 @@
-import { BriefingEngineError, resolveEngineSetting } from "./engine-setting.js";
+import { BriefingEngineError, resolveEngineSetting, defaultEngine } from "./engine-setting.js";
 import type { EngineSetting, DecisionEngineMetadata } from "./engine-setting.js";
 /**
  * Transport-neutral read service shared by the CLI and the MCP adapter (doc/design/mcp.md).
@@ -87,11 +87,13 @@ export async function presentBriefing(
     | Awaited<ReturnType<(typeof import("./datalog.js"))["evaluateDatalog"]>>
     | undefined;
   const selection = options.engineSetting ?? {
-    requested: "typescript" as const,
+    requested: defaultEngine(),
     source: "default" as const,
   };
+  const roleSource = options.role === undefined ? ("default" as const) : ("request" as const);
   // Full issue intake is outside the experimental next-action slice.
   if (selection.requested === "datalog" && !options.full && !options.issue) {
+    options = { ...options, role: options.role ?? "implementer" };
     if (options.role !== "implementer" && options.role !== "designer")
       throw new BriefingEngineError(
         "decision-engine-role",
@@ -135,7 +137,11 @@ export async function presentBriefing(
   // Additive: the process object is only present when the front end resolved a guide setting.
   const compact = built && options.process ? { ...built, process: options.process } : built;
   const decisionEngine = experimental
-    ? { ...experimental.decisionEngine, source: selection.source }
+    ? {
+        ...experimental.decisionEngine,
+        source: selection.source,
+        role: { used: options.role ?? "implementer", source: roleSource },
+      }
     : {
         requested: selection.requested,
         used: "typescript" as const,

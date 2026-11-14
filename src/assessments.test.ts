@@ -294,6 +294,7 @@ describe("side-by-side assessments (#247)", () => {
         currentRepository: async () => repo,
         now: () => new Date(time),
         estimation: estimation(),
+        guide: estimation('schemaVersion=1\n[briefing]\nengine="typescript"\n'),
         rest: permissions(),
       },
     );
@@ -448,7 +449,11 @@ describe("side-by-side assessments (#247)", () => {
 describe("legacy complexity and estimation stay byte-compatible (#247)", () => {
   it("produces the same `complexity` and `estimation` JSON with and without assessments", async () => {
     const snapshot = await collector(fixture)(repo);
-    const options = { limit: 10, maxChars: 10000 };
+    const options = {
+      limit: 10,
+      maxChars: 10000,
+      engineSetting: { requested: "typescript" as const, source: "config" as const },
+    };
     const input = await collectLabelEstimationInput(repo, estimation());
     const wide = { ...options, estimation: input, limit: 2000 };
     const legacyExpanded = briefing(snapshot, wide, new Date(time));
