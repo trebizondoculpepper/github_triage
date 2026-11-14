@@ -204,6 +204,10 @@ Ticket Doctor (#192) must replay the same validator and report rejected/conflict
 
 [delivery-owner-clarifications.md](delivery-owner-clarifications.md) specifies the owner-approved replacement defaults for legacy membership, commit correction selectors and ticket-level active-claim handoff, and clarifies explicit off-target progress evidence. It takes precedence over conflicting command examples below when implemented; runtime changes follow review. The existing live target-containment and unknown-evidence rules remain authoritative.
 
+## Reset-plan clarification
+
+[reset-readiness.md](reset-readiness.md) (#276) defines corrected fresh reset label plans, the existing optional observedLabels observation, and conservative historical retry compatibility. It takes precedence over contradictory reset label-plan shorthand below after reviewed implementation; all authority and live-state prerequisites remain.
+
 ## Transitions and commands
 
 All commands use the existing refusal shape (stable error ID, facts, failed prerequisite, recovery commands) and text/JSON parity. None is exposed through MCP until a separate reviewed mutation contract.
