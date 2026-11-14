@@ -16,7 +16,8 @@
   },
   "files": [
     "dist/cli.mjs",
-    "dist/mcp.mjs"
+    "dist/mcp.mjs",
+    "third-party"
   ],
   "type": "module",
   "publishConfig": {
@@ -39,6 +40,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.4.0",
+    "datascript": "1.8.1",
     "env-paths": "4.0.0",
     "smol-toml": "1.9.1",
     "zod": "4.6.7"

@@ -21,7 +21,15 @@ const windows = process.platform === "win32";
 const npm = (args: string[], cwd: string) =>
   run(windows ? "npm.cmd" : "npm", args, { cwd, shell: windows });
 const root = resolve(".");
-const expected = ["LICENSE", "README.md", "dist/cli.mjs", "dist/mcp.mjs", "package.json"];
+const expected = [
+  "LICENSE",
+  "README.md",
+  "dist/cli.mjs",
+  "dist/mcp.mjs",
+  "package.json",
+  "third-party/README.md",
+  "third-party/datascript-LICENSE",
+];
 
 interface PackResult {
   filename: string;
