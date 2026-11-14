@@ -347,10 +347,16 @@ export function deliveryRead(snapshot: Snapshot, diagnosis: DeliveryDiagnosis): 
         snapshot.warnings ?? [],
       ),
     );
+  // Per-ticket coverage gaps (truncated history, member cap) are omissions too, so the
+  // report is incomplete rather than complete with an unknown buried in one ticket.
+  const coverage = tickets.flatMap((t) =>
+    (diagnosis.issues.get(t.number)?.coverageOmissions ?? []).map((o) => `#${t.number}: ${o}`),
+  );
+  const omissions = [...diagnosis.warnings, ...coverage];
   return {
     tickets,
-    complete: !diagnosis.warnings.length,
-    omissions: diagnosis.warnings,
+    complete: !omissions.length,
+    omissions,
     guidance:
       "Read-only. Delivery is evaluated from live evidence; closure is reported beside it and is never evidence of delivery. Unknown or not-evaluated is never 'not delivered' or 'nobody responsible'. A claim and delivery responsibility are distinct.",
   };
@@ -463,11 +469,7 @@ export async function readIssuesDelivery(
       const node = data.repository?.issue;
       if (!node) throw new Error("not readable");
       const history = await readDeliveryComments(repository, number, node.comments, rt.query);
-      // The page bound leaves older comments unread: a record may be among them.
-      if (!history.complete)
-        omissions.push(
-          `#${number}: comment history truncated at the page limit; its delivery records may be unseen`,
-        );
+      // A history cut at the page bound reaches deliveryRead's coverage omissions below.
       issues.push({
         ...node,
         comments: {

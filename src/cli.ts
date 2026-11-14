@@ -745,9 +745,15 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
     });
     // #192: the same delivery block as the briefing, for tickets with delivery evidence.
     const read = deliveryRead(snapshot, delivery);
-    const json = read.tickets.length ? { ...report, delivery: read } : report;
-    await output(values.json ? JSON.stringify(json, null, 2) + "\n" : ticketDoctorText(report));
-    return report.completeness.complete ? 0 : 2;
+    // Per-ticket coverage gaps join the scan's completeness, as on every read surface.
+    const coverage = read.omissions.filter((o) => !delivery.warnings.includes(o));
+    const doctor = withDeliveryCompleteness(report, {
+      complete: !coverage.length,
+      omissions: coverage,
+    });
+    const json = read.tickets.length ? { ...doctor, delivery: read } : doctor;
+    await output(values.json ? JSON.stringify(json, null, 2) + "\n" : ticketDoctorText(doctor));
+    return doctor.completeness.complete ? 0 : 2;
   }
   if (args[0] === "submit" || args[0] === "deliverables") {
     const submit = args[0] === "submit";

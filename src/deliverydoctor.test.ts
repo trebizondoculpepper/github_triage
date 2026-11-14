@@ -14,7 +14,7 @@ import {
   diagnoseDelivery,
 } from "./deliverydoctor.js";
 import type { RepositoryPermission, RestAnswer } from "./github/github.js";
-import { evaluationRevision } from "./completion.js";
+import { deliveryMemberCap, evaluationRevision } from "./completion.js";
 import { ticketDoctor } from "./ticketdoctor.js";
 import type { TicketDoctorReport } from "./ticketdoctor.js";
 import type { Issue, PullRequest, Snapshot } from "./github/types.js";
@@ -1040,6 +1040,29 @@ describe("delivery, responsibility and closure on read surfaces (#192)", () => {
     expect(
       classifyFollowUp({ ...facts, pending: false, verified: true, headFindings: true }),
     ).toEqual(["actionable", "Codex reports unresolved findings on the current head"]);
+  });
+
+  it("per-ticket coverage gaps (member cap, truncated history) make the report incomplete", async () => {
+    const many = Array.from({ length: deliveryMemberCap + 1 }, (_, i) => 700 + i);
+    const capped = await read([issue(81, ["bug"], [submitted(81, many)])], [], {});
+    expect(capped.tickets[0].delivery).toBe("unknown");
+    expect(capped.complete).toBe(false);
+    expect(capped.omissions.join(" ")).toContain(
+      `#81: ${deliveryMemberCap + 1} required members exceed the cap`,
+    );
+    const long = { ...issue(82, ["bug"]), comments: page([], true) } as Issue;
+    const truncated = await read([long], [], {});
+    expect(truncated.complete).toBe(false);
+    expect(truncated.omissions).toEqual([
+      "#82: comment history truncated; delivery records may be unseen",
+    ]);
+    const withRecord = {
+      ...issue(83, ["bug"], [submitted(83, [99])]),
+      comments: page([submitted(83, [99])], true),
+    } as Issue;
+    const partial = await read([withRecord], [], { 99: "open" });
+    expect(partial.complete).toBe(false);
+    expect(partial.omissions.join(" ")).toContain("#83: comment history truncated");
   });
 
   it("an unverifiable legacy release is unknown delivery, with its diagnostics", async () => {

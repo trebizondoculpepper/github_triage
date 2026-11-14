@@ -81,6 +81,8 @@ export interface IssueDeliveryDiagnosis {
   staleTransfers: StaleTransfer[];
   unverifiableTransfers: { comment: string; url: string | null }[];
   /** A legacy v1 `done` release: trusted, unverifiable, or absent (null). */
+  /** Coverage gaps (truncated history, member cap): read surfaces report them as omissions. */
+  coverageOmissions: string[];
   legacy: {
     status: "trusted" | "unknown";
     release: string | null;
@@ -178,6 +180,7 @@ export async function diagnoseDelivery(
       notEvaluated: null,
       staleTransfers: [],
       unverifiableTransfers: [],
+      coverageOmissions: [],
       legacy: null,
     };
     result.issues.set(issue.number, d);
@@ -186,6 +189,7 @@ export async function diagnoseDelivery(
       d.unknownBecause.push(
         "the comment history was truncated, so delivery records may be on unseen pages",
       );
+      d.coverageOmissions.push("comment history truncated; delivery records may be unseen");
       continue;
     }
     if (!rt.trust) {
@@ -195,6 +199,8 @@ export async function diagnoseDelivery(
       continue;
     }
     const historyComplete = !issue.comments.pageInfo.hasNextPage;
+    if (!historyComplete)
+      d.coverageOmissions.push("comment history truncated; delivery records may be unseen");
     const { records: classified, fold } = await readDeliveryFold(
       comments,
       historyComplete,
@@ -276,6 +282,7 @@ export async function diagnoseDelivery(
       rt.live,
     );
     d.evaluation = evaluateDelivery(facts);
+    d.coverageOmissions.push(...facts.coverage.omissions);
   }
   if (skipped)
     result.warnings.push(
