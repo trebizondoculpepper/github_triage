@@ -46,7 +46,7 @@ import type { GraphqlAnswer, GraphqlApi } from "./github.js";
 export const estimateUsage = `Usage: github-triage estimate N [--metric complexity|impact] --size SIZE --rationale TEXT
          [--assumption TEXT]... [--reference REF]... [--agent NAME] [--replace SIZE]
          [--replace-invalid] [--json] [--repo owner/name]
-       github-triage estimate --help [--json]
+       github-triage estimate --help [--metric complexity|impact] [--json]
 (From a source checkout, use npm run triage -- estimate ...)
 Record a complexity size for issue N as the label complexity:SIZE, with its provenance in an
 issue comment (marker github-triage:complexity-estimate v2).

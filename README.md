@@ -117,6 +117,7 @@ Use the configuration commands from the target checkout instead of editing confi
 github-triage config list
 github-triage config help
 github-triage estimate --help
+github-triage estimate --help --metric impact
 ```
 
 Complexity is enabled by default, with bundled XS–XXL guidance. Sizes are repository labels `complexity:XS`–`complexity:XXL`: `estimate N --size S --rationale TEXT` creates the requested label if missing, replaces other size labels and records provenance in a comment, and the briefing's estimation queue reads the labels with no setup. Repository calibration remains repository-specific. Disable the feature with `github-triage config set complexity.enabled false`.

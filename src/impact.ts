@@ -4,9 +4,11 @@
  *
  * One versioned definition, the same shape as `ComplexityGuidance`, so the same renderers can
  * serve it. It describes the judged benefit of the completed outcome, not effort, and never the
- * computed unlock utility (`immediateUnlocks`). Rendering it in CLI/MCP help is #246.
+ * computed unlock utility (`immediateUnlocks`). #246 renders it in CLI help
+ * (`estimate --help --metric impact [--json]`) and MCP help (`github-triage-mcp --help`) through
+ * the shared renderer, so the prose is never maintained twice.
  */
-import { COMPLEXITY_SIZES } from "./complexity.js";
+import { COMPLEXITY_SIZES, guidanceText } from "./complexity.js";
 import type { ComplexityGuidance } from "./complexity.js";
 
 /** The single bundled impact guidance. Bump guidanceVersion on any semantic change. */
@@ -84,3 +86,32 @@ export const impactGuidance: ComplexityGuidance = {
     "Impact is a judged benefit, distinct from complexity (effort) and unlock utility (computed).",
   ],
 };
+
+/** Plain-text rendering used by `github-triage estimate --help --metric impact`. */
+export function impactGuidanceText(g: ComplexityGuidance = impactGuidance): string {
+  return guidanceText(
+    "Impact estimation guidance",
+    g,
+    "With --help --metric impact: --json gives the versioned structured guidance (schemaVersion 1).",
+  );
+}
+
+/** Structured rendering for `estimate --help --metric impact --json`. */
+export function impactGuidanceJson(g: ComplexityGuidance = impactGuidance): string {
+  return JSON.stringify({ schemaVersion: 1, kind: "impact-guidance", ...g }, null, 2) + "\n";
+}
+
+/**
+ * The bounded MCP-help rendering (#246): the same definition's scale, bands, method and
+ * boundaries, without examples, and the CLI commands for the full guidance and for recording.
+ * The MCP server itself stays read-only and advertises no recording tool.
+ */
+export function impactGuidanceSummary(g: ComplexityGuidance = impactGuidance): string {
+  const width = Math.max(...g.bands.map((b) => b.size.length));
+  return `Impact estimation guidance (version ${g.guidanceVersion}): ${g.scale}
+${g.bands.map((b) => `  ${b.size.padEnd(width)}  ${b.guidance}`).join("\n")}
+${[...g.method, ...g.boundaries].map((line) => `  - ${line}`).join("\n")}
+Full guidance: github-triage estimate --help --metric impact [--json]
+Record (CLI): github-triage estimate N --metric impact --size SIZE --rationale TEXT --repo owner/name
+`;
+}

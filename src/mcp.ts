@@ -13,6 +13,7 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod";
 import { collect, currentRepository, ghRest } from "./github.js";
 import { dependencyReport } from "./dependencies.js";
+import { impactGuidanceSummary } from "./impact.js";
 import { readBriefing, readDependencies } from "./service.js";
 import { catchUp, catchUpLimits, catchUpText } from "./catchup.js";
 import { collectBriefing, WindowRefusal } from "./catchupcli.js";
@@ -81,7 +82,8 @@ Tools: triage_briefing, triage_issue, triage_dependencies, triage_events. Never 
                         Minutes between completed polls (default 30, 1 to 1440; needs --poll)
   --help                Show usage
 Stdout carries only the MCP protocol; diagnostics go to stderr.
-`;
+
+${impactGuidanceSummary()}`;
 
 const repoPattern = /^[\w.-]+\/[\w.-]+$/;
 const agentPattern = /^[A-Za-z0-9][\w.-]*$/;

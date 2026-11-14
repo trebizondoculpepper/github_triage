@@ -55,6 +55,7 @@ import type { GuideRuntime } from "./process.js";
 import { pickupOrders } from "./ranking.js";
 import type { PickupOrder } from "./ranking.js";
 import { complexityGuidanceJson, complexityGuidanceText } from "./complexity.js";
+import { impactGuidanceJson, impactGuidanceText } from "./impact.js";
 import { runConfig } from "./configcli.js";
 import type { ConfigRuntime } from "./configcli.js";
 import { estimateUsage, runEstimate } from "./estimate.js";
@@ -131,6 +132,7 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   deps N [--tree]       Read native upstream/downstream dependencies (deps --help)
   deps add|remove N --on M --note WHY [--dry-run]  Change native dependencies
   estimate --help       Complexity sizing guidance (XS..XXL)
+  estimate --help --metric impact  Impact (benefit) estimation guidance (XS..XXL)
   estimate N --size S --rationale TEXT [--assumption A]... [--replace OLD]  Record a size
                         as a complexity:S label with provenance (estimate --help);
                         --metric impact records a benefit estimate as impact:S
@@ -785,12 +787,27 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
   if (args[0] === "estimate") {
     const rest = args.slice(1);
     if (rest.includes("--help")) {
-      if (rest.some((a) => a !== "--help" && a !== "--json"))
-        throw new Error("Usage: github-triage estimate --help [--json]");
+      // #246: --metric impact selects the bundled impact guidance; the default is unchanged.
+      const metricAt = rest.indexOf("--metric");
+      const metric = metricAt === -1 ? "complexity" : rest[metricAt + 1];
+      const known = rest.filter(
+        (a, i) => a === "--help" || a === "--json" || i === metricAt || i === metricAt + 1,
+      );
+      if (
+        known.length !== rest.length ||
+        rest.filter((a) => a === "--metric").length > 1 ||
+        (metric !== "complexity" && metric !== "impact")
+      )
+        throw new Error(
+          "Usage: github-triage estimate --help [--metric complexity|impact] [--json]",
+        );
+      const impact = metric === "impact";
       await output(
         rest.includes("--json")
-          ? complexityGuidanceJson()
-          : `${estimateUsage}\n\n${complexityGuidanceText()}`,
+          ? impact
+            ? impactGuidanceJson()
+            : complexityGuidanceJson()
+          : `${estimateUsage}\n\n${impact ? impactGuidanceText() : complexityGuidanceText()}`,
       );
       return 0;
     }
