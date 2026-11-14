@@ -12,6 +12,7 @@ import { main } from "./cli.js";
 import { boundedEnvelope, budgetBytes, budgetErrorCode, resultBytes } from "./mcp/bounded.js";
 import { boundedResult } from "./mcp/bounded.js";
 import { flattenRelationships } from "./mcp/views.js";
+import { parityDifference, parsePath } from "./mcp/parity.js";
 import { createServer } from "./mcp.js";
 import type { McpRuntime } from "./mcp.js";
 import type { DependencyReport } from "./github/dependencies.js";
@@ -395,6 +396,167 @@ describe("bounded MCP results (#266)", () => {
     expect(result.structuredContent.data).toBeNull();
     expect(resultBytes(result)).toBeLessThanOrEqual(budgetBytes);
     expect(result.structuredContent.sourceCompleteness?.complete).toBe(false);
+  });
+
+  it("drops truncatedFields paths with the rows that pruning removes", () => {
+    const long = "r".repeat(350);
+    const result = boundedResult({
+      tool: "triage_briefing",
+      view: "briefing",
+      status: "complete",
+      repository: repo,
+      subject: null,
+      selection: {
+        repository: repo,
+        agent: null,
+        identitySource: "unresolved",
+        entry: null,
+        triageRole: null,
+        identityDiagnostic: null,
+      },
+      freshness: { fetchedAt: time },
+      sourceCompleteness: { complete: true, warnings: [] },
+      data: {
+        rankedActions: { total: 1, omitted: 0, items: [{ kind: "implement", why: long }] },
+        subjects: Array.from({ length: 100 }, (_, i) => ({
+          number: i,
+          findings: Array.from({ length: 5 }, () => ({ reason: long })),
+        })),
+      },
+      lists: () => [{ path: ["subjects"] }, { path: ["rankedActions", "items"] }],
+      text: () => [],
+      notices: [],
+      maxChars: 10_000,
+    });
+    expect(result.isError).toBeUndefined();
+    const { presentation, data } = result.structuredContent;
+    expect((data as { rankedActions: { items: unknown[] } }).rankedActions.items).toHaveLength(1);
+    const kept = (data as { subjects: unknown[] }).subjects.length;
+    expect(presentation.truncatedFields).toHaveLength(1 + kept * 5);
+    for (const path of presentation.truncatedFields) {
+      const index = /^subjects\[(\d+)\]/.exec(path)?.[1];
+      if (index !== undefined) expect(Number(index)).toBeLessThan(kept);
+    }
+    expect(resultBytes(result)).toBeLessThanOrEqual(budgetBytes);
+  });
+
+  it("returns dependencies for a requested issue that is not a shortlisted subject", async () => {
+    const rt = runtime();
+    rt.collect = (async () => ({
+      ...snapshot(),
+      issues: [
+        {
+          ...issues(1)[0],
+          number: 1,
+          state: "CLOSED",
+          stateReason: "COMPLETED",
+          labels: page([]),
+          comments: page([]),
+        },
+      ],
+    })) as unknown as McpRuntime["collect"];
+    const client = await connect(rt);
+    try {
+      const { structured } = await call(client, "triage_issue", { number: 1 });
+      const data = structured.data as { dependencies: { known: boolean; verdict: string } | null };
+      expect(data.dependencies).not.toBeNull();
+      expect(data.dependencies?.known).toBe(true);
+      expect(data.dependencies?.verdict).toMatch(/No open native blockers/);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("refuses a page that cannot return its first row instead of repeating an empty page", async () => {
+    const rt = runtime();
+    const giant = `https://example.com/${"a".repeat(20_000)}`;
+    rt.collect = (async () => ({
+      ...snapshot(),
+      issues: [{ ...issues(1)[0], number: 1, body: `intro\n${giant}\nafter` }],
+    })) as unknown as McpRuntime["collect"];
+    const client = await connect(rt);
+    try {
+      const first = await call(client, "triage_issue", { number: 1, section: "body", limit: 100 });
+      expect(first.structured.status).toBe("complete");
+      expect(first.structured.presentation.next?.arguments).toMatchObject({ offset: 1 });
+      const stuck = await call(client, "triage_issue", { number: 1, section: "body", offset: 1 });
+      expect(stuck.raw.isError).toBe(true);
+      expect(stuck.structured.error?.code).toBe(budgetErrorCode);
+      expect(stuck.structured.error?.message).toMatch(/first row/);
+      expect(stuck.bytes).toBeLessThanOrEqual(budgetBytes);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("bounds every result that echoes a 20,000-character agent name, and says so", async () => {
+    const agent = `a${"b".repeat(19_999)}`;
+    const failing = runtime();
+    failing.collect = (async () => {
+      throw new Error("network down");
+    }) as unknown as McpRuntime["collect"];
+    for (const [rt, name, args] of [
+      [failing, "triage_briefing", { agent }],
+      [runtime(), "triage_briefing", { agent }],
+      [runtime(), "triage_issue", { number: 3, agent }],
+    ] as const) {
+      const client = await connect(rt);
+      try {
+        const raw = await client.callTool({ name, arguments: args });
+        expect(resultBytes(raw), name).toBeLessThanOrEqual(budgetBytes);
+        const structured = boundedEnvelope.parse(raw.structuredContent);
+        expect(structured.status).toBe("error");
+        expect(structured.error?.message).toMatch(/Echoed input longer than 280 characters/);
+        expect((structured.selection.agent ?? "").length).toBeLessThanOrEqual(280);
+      } finally {
+        await client.close();
+      }
+    }
+    // Invalid input is rejected by the SDK before collection, within the budget too.
+    const client = await connect();
+    try {
+      const raw = await client
+        .callTool({ name: "triage_briefing", arguments: { agent: `-${agent}` } })
+        .catch((error: unknown) => ({ thrown: String(error) }));
+      expect(JSON.stringify(raw).length).toBeLessThanOrEqual(budgetBytes);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("bounds triage_events when it echoes an over-long startup agent", async () => {
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await createServer({ repo, agent: "c".repeat(20_000) }, runtime()).connect(serverSide);
+    const client = new Client({ name: "budget", version: "1.0.0" });
+    await client.connect(clientSide);
+    try {
+      const raw = await client.callTool({ name: "triage_events", arguments: {} });
+      expect(resultBytes(raw)).toBeLessThanOrEqual(budgetBytes);
+      const first = Array.isArray(raw.content) ? raw.content[0] : undefined;
+      expect(first && "text" in first ? String(first.text) : "").toMatch(/Startup agent longer/);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("checks nested shortened lists by path for CLI parity", () => {
+    expect(parsePath("role.sections[0].items")).toEqual(["role", "sections", 0, "items"]);
+    const cli = { queue: { total: 2, omitted: 0, items: ["A", "B"] }, note: "x" };
+    const prefix = { queue: { total: 2, omitted: 1, items: ["A"] }, note: "x" };
+    const wrong = { queue: { total: 2, omitted: 1, items: ["C"] }, note: "x" };
+    const drift = { queue: { total: 2, omitted: 1, items: ["A"] }, note: "y" };
+    const omitted = { "estimation.queue.items": 1 };
+    expect(parityDifference("estimation", prefix, cli, omitted)).toBeNull();
+    expect(parityDifference("estimation", wrong, cli, omitted)).toMatch(/not a prefix/);
+    expect(parityDifference("estimation", drift, cli, omitted)).toMatch(/differs/);
+    expect(parityDifference("estimation", prefix, cli, { "estimation.queue.items": 2 })).toMatch(
+      /omitted 2/,
+    );
+    const role = { next: ["n1", "n2"], sections: [{ total: 3, omitted: 1, items: ["s1", "s2"] }] };
+    const shortRole = { next: ["n1"], sections: [{ total: 3, omitted: 2, items: ["s1"] }] };
+    expect(
+      parityDifference("role", shortRole, role, { "role.next": 1, "role.sections[0].items": 1 }),
+    ).toBeNull();
   });
 
   it("keeps full intake available through the CLI", async () => {

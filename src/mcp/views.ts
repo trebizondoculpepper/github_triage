@@ -4,6 +4,7 @@
  * names its prunable lists in pruning order and renders minimal text from returned rows only.
  */
 import { catchUpLimits, catchUpText } from "../catchup.js";
+import { dependencyFacts } from "../github/dependencies.js";
 import type { CatchUpReport } from "../catchup.js";
 import type { BoundedView, Next, PrunableList, Selection } from "./bounded.js";
 
@@ -243,10 +244,23 @@ export function issueView(
       url: comment.url ?? null,
       body: str(comment.body),
     }));
+  // From the requested issue's own collected native fields, whether or not it is a shortlisted
+  // subject; dependencyFacts reports unknown evidence as known: false, never as none.
+  const nativeFacts = obj(
+    JSON.parse(
+      JSON.stringify(
+        dependencyFacts(
+          detail as unknown as Parameters<typeof dependencyFacts>[0],
+          base.repository,
+        ),
+      ),
+    ),
+  );
   // A page that GitHub reported as unfinished must never be counted as the whole history.
-  const unfinished = (["comments", "labels"] as const).filter(
+  const unfinished: string[] = (["comments", "labels"] as const).filter(
     (key) => obj(obj(detail[key]).pageInfo).hasNextPage === true,
   );
+  if (nativeFacts.known !== true) unfinished.push("native dependencies");
   const sourceCompleteness = completenessOf(report);
   if (unfinished.length) {
     sourceCompleteness.complete = false;
@@ -288,7 +302,7 @@ export function issueView(
   let next: BoundedView["next"];
   let rowsText: (d: Json) => string[] = () => [];
   if (section === "summary") {
-    const dependencies = subject ? obj(subject.dependencies) : null;
+    const dependencies = nativeFacts;
     data = {
       section,
       issue,
@@ -333,7 +347,7 @@ export function issueView(
       total: pageRows.total,
       rows: pageRows.rows,
     };
-    lists = [{ path: ["rows"], available: pageRows.available }];
+    lists = [{ path: ["rows"], available: pageRows.available, requireRow: true }];
     next = (returned) => pageRows.next(returned["rows"] ?? 0);
     rowsText = (d) =>
       list(d.rows).map((row) => {
@@ -481,7 +495,10 @@ export function dependenciesView(
       guidance: report.guidance,
     },
     protectedPaths: ["ticket.verdict"],
-    lists: () => [{ path: ["relationships"], available: rows.available }, { path: ["cycles"] }],
+    lists: () => [
+      { path: ["relationships"], available: rows.available, requireRow: true },
+      { path: ["cycles"] },
+    ],
     next: (returned) => rows.next(returned["relationships"] ?? 0),
     text: (d) => [
       `Dependencies of #${number}${d.tree ? " (tree)" : ""}: ${str(obj(d.ticket).verdict)}`,

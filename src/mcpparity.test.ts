@@ -14,6 +14,7 @@ import type { ConfigFileSystem, GitRunner } from "./config/config.js";
 import { collect } from "./github/github.js";
 import type { Query } from "./github/github.js";
 import { boundedEnvelope, createServer } from "./mcp.js";
+import { parityDifference } from "./mcp/parity.js";
 import type { McpRuntime } from "./mcp.js";
 import type { Issue, Page } from "./github/types.js";
 
@@ -151,36 +152,15 @@ async function mcpResult(
 
 const shared = ["actions", "role", "rankedActions", "estimation", "impactEstimation"] as const;
 
-type Listed = { total?: number; omitted?: number; items?: unknown[]; next?: unknown[] };
-/**
- * CLI parity under the MCP byte budget (#266): a field equals the CLI's, except that a list the
- * budget shortened is a prefix of the CLI list, with the same total and an exact omitted count
- * that the presentation also reports.
- */
+/** CLI parity under the MCP byte budget (#266): see src/mcp/parity.ts. */
 function expectParity(
   mcp: { result: Record<string, unknown>; omitted: Record<string, number> },
   cli: Record<string, unknown>,
 ): void {
-  for (const key of shared) {
-    const shortened = Object.keys(mcp.omitted).filter((path) => path.startsWith(`${key}.`));
-    if (!shortened.length) {
-      expect(mcp.result[key], key).toEqual(cli[key]);
-      continue;
-    }
-    const ours = mcp.result[key] as Listed;
-    const theirs = cli[key] as Listed;
-    for (const list of ["items", "next"] as const) {
-      if (!theirs[list]) continue;
-      const shown = ours[list] ?? [];
-      expect(shown, `${key}.${list}`).toEqual(theirs[list]?.slice(0, shown.length));
-      expect((theirs[list]?.length ?? 0) - shown.length).toBe(mcp.omitted[`${key}.${list}`] ?? 0);
-    }
-    if (typeof theirs.total === "number") {
-      expect(ours.total).toBe(theirs.total);
-      expect(ours.omitted).toBe(theirs.total - (ours.items?.length ?? 0));
-    }
-  }
+  for (const key of shared)
+    expect(parityDifference(key, mcp.result[key], cli[key], mcp.omitted), key).toBeNull();
 }
+
 const kinds = (result: Record<string, unknown>): string[] =>
   ((result.rankedActions as { items: { kind: string; target: string }[] } | null)?.items ?? []).map(
     (i) => `${i.kind}#${i.target.split("/").pop()}`,

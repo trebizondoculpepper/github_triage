@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { resolveEngineSetting, defaultEngine } from "../src/config/engine-setting.js";
+import { parityDifference } from "../src/mcp/parity.js";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
@@ -176,24 +177,13 @@ async function blendedParity(
   } finally {
     await client.close();
   }
+  // Shortened lists (by path, including role.next and role.sections[i].items) must be exact
+  // CLI prefixes; everything else must be equal (src/mcp/parity.ts).
   for (const key of parityFields) {
-    if (Object.keys(omitted).some((path) => path.startsWith(`${key}.`))) {
-      // A shortened list must be an exact prefix of the CLI's, with the same total.
-      const ours = mcp[key] as { total?: number; items?: unknown[] } | null;
-      const theirs = cli[key] as { total?: number; items?: unknown[] } | null;
-      const shown = ours?.items ?? [];
-      if (
-        ours?.total !== theirs?.total ||
-        JSON.stringify(shown) !== JSON.stringify(theirs?.items?.slice(0, shown.length))
-      )
-        throw new Error(
-          `Installed CLI and MCP disagree on shortened ${key} for ${role} (${order}).`,
-        );
-      continue;
-    }
-    if (JSON.stringify(cli[key]) !== JSON.stringify(mcp[key]))
+    const difference = parityDifference(key, mcp[key], cli[key], omitted);
+    if (difference)
       throw new Error(
-        `Installed CLI and MCP disagree on ${key} for ${role} (${order}): CLI ${JSON.stringify(cli[key])} MCP ${JSON.stringify(mcp[key])}.`,
+        `Installed CLI and MCP disagree on ${key} for ${role} (${order}): ${difference}. CLI ${JSON.stringify(cli[key])} MCP ${JSON.stringify(mcp[key])}.`,
       );
   }
   return rankedKinds(cli);

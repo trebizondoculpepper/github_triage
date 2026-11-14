@@ -38,7 +38,10 @@ import { resolveReadIdentity } from "./config/readidentity.js";
 import type { ReadIdentity } from "./config/readidentity.js";
 import {
   boundedEnvelope,
+  boundedError,
   boundedResult,
+  fieldLimit,
+  truncationMarker,
   budgetBytes,
   budgetErrorCode,
   resultBytes,
@@ -702,7 +705,19 @@ export function createServer(
     async (args, ctx) => {
       const watcher = runtime.watcher ?? null;
       const repository = watcher?.repository ?? null;
-      const selection = { repository, ...explicitSelection(undefined, options.agent) };
+      // The startup agent is echoed; an over-long one is shortened, and the text says so.
+      const echoed = explicitSelection(undefined, options.agent);
+      const shortenedAgent = echoed.agent !== null && echoed.agent.length > fieldLimit;
+      const selection = {
+        repository,
+        ...echoed,
+        agent: shortenedAgent
+          ? `${echoed.agent!.slice(0, fieldLimit - truncationMarker.length)}${truncationMarker}`
+          : echoed.agent,
+      };
+      const echoNotice = shortenedAgent
+        ? `Startup agent longer than ${fieldLimit} characters shortened (${truncationMarker}).\n`
+        : "";
       if (ctx.mcpReq.signal.aborted)
         return toolResult(
           {
@@ -732,7 +747,7 @@ export function createServer(
             result: redactPaths(plain(report), localPaths(options.project)),
             error: null,
           },
-          reduced + redactPaths(eventsText(report), localPaths(options.project)),
+          echoNotice + reduced + redactPaths(eventsText(report), localPaths(options.project)),
         );
         if (resultBytes(result) <= budgetBytes) return result;
         if (limit <= 1) {
@@ -756,7 +771,7 @@ export function createServer(
   return server;
 }
 
-/** Sanitized version-2 error result for a read tool. */
+/** Sanitized version-2 error result for a read tool, bounded like every other result. */
 function errorResult(
   tool: string,
   view: ReadView,
@@ -765,36 +780,17 @@ function errorResult(
   code: string,
   message: string,
 ): ToolResult {
-  const result: ToolResult = {
-    content: [{ type: "text", text: `Error (${code}): ${message}\n` }],
-    structuredContent: {
-      schemaVersion: 2,
-      kind: "mcp-read-result",
-      tool,
-      view,
-      status: "error",
-      repository: selection.repository,
-      subject: number === undefined ? null : { type: "issue", number },
-      selection,
-      freshness: null,
-      sourceCompleteness: null,
-      presentation: {
-        budgetBytes,
-        bytes: 0,
-        returned: {},
-        omitted: {},
-        truncatedFields: [],
-        next: null,
-      },
-      data: null,
-      error: { code, message },
-    },
-    isError: true,
-  };
-  const presentation = result.structuredContent.presentation;
-  for (let i = 0; i < 8 && presentation.bytes !== resultBytes(result); i++)
-    presentation.bytes = resultBytes(result);
-  return result;
+  return boundedError({
+    tool,
+    view,
+    repository: selection.repository,
+    subject: number === undefined ? null : { type: "issue", number },
+    selection,
+    freshness: null,
+    sourceCompleteness: null,
+    code,
+    message,
+  });
 }
 
 /** Production boundaries: authenticated gh through the existing argument-array runners. */
