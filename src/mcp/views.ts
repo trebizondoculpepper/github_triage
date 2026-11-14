@@ -6,6 +6,7 @@
 import { catchUpLimits, catchUpText } from "../catchup.js";
 import { dependencyFacts } from "../github/dependencies.js";
 import type { CatchUpReport } from "../catchup.js";
+import { warningsList } from "./bounded.js";
 import type { BoundedView, Next, PrunableList, Selection } from "./bounded.js";
 
 /** Text share of the byte budget for the repository briefing's rendered rows. */
@@ -67,7 +68,6 @@ const briefingFields = [
   "guidance",
   "process",
   "decisionEngine",
-  "completeness",
 ] as const;
 
 const itemsLine = (prefix: string, rows: unknown[]): string[] =>
@@ -100,12 +100,8 @@ export function briefingView(base: ViewBase, report: Json): BoundedView {
     freshness: obj(report.freshness),
     sourceCompleteness: completenessOf(report),
     data,
-    protectedPaths: [
-      "completeness",
-      "guidance",
-      "decisionEngine.denials",
-      "decisionEngine.diagnostics",
-    ],
+    // Completeness is carried once, in the envelope's bounded sourceCompleteness.
+    protectedPaths: ["guidance"],
     lists: (d) => {
       const role = obj(d.role);
       const lists: PrunableList[] = [{ path: ["subjects"] }];
@@ -115,8 +111,20 @@ export function briefingView(base: ViewBase, report: Json): BoundedView {
       lists.push({ path: ["changes", "items"] });
       for (const name of Object.keys(obj(d.sections)).reverse())
         lists.push({ path: ["sections", name, "items"] });
-      lists.push({ path: ["actions", "items"] }, { path: ["role", "next"] });
-      lists.push({ path: ["rankedActions", "items"] });
+      lists.push(
+        { path: ["impactEstimation", "conflicts", "items"] },
+        { path: ["impactEstimation", "queue", "items"] },
+        { path: ["estimation", "conflicts", "items"] },
+        { path: ["estimation", "queue", "items"] },
+        { path: ["actions", "items"] },
+        { path: ["role", "next"] },
+        { path: ["decisionEngine", "denials"] },
+        // Beyond the first few, warnings yield before the ranked shortlist; their count remains.
+        { path: [warningsList] },
+        { path: ["rankedActions", "items"] },
+        { path: ["estimation", "findings"] },
+        { path: ["decisionEngine", "diagnostics"] },
+      );
       return lists;
     },
     text: (d) => {
@@ -413,9 +421,11 @@ interface Relationship {
 }
 
 /**
- * Flatten native relationships in a stable order: upstream (blocked-by) breadth first, then
- * downstream (blocking). Each row keeps relation, depth and path, so a page or pruned list can
- * never look like a complete tree.
+ * Flatten native relationships in a stable breadth-first order from the requested ticket. With
+ * tree, every reached ticket contributes both its blocked-by and its blocking edges, so edges whose
+ * direction differs from the root's (a blocker that also blocks another ticket) are kept. Each
+ * edge appears once; `relation` is relative to the ticket at the end of `path` before this row.
+ * Rows keep relation, depth and path, so a page or pruned list can never look like a whole tree.
  */
 export function flattenRelationships(report: Json, number: number): Relationship[] {
   const nodes = list(report.nodes).map(obj);
@@ -424,17 +434,23 @@ export function flattenRelationships(report: Json, number: number): Relationship
   if (!root) return [];
   const tree = report.tree === true;
   const rows: Relationship[] = [];
-  for (const [relation, key] of [
-    ["blockedBy", "upstream"],
-    ["blocking", "downstream"],
-  ] as const) {
-    const seen = new Set<string>([str(root.url)]);
-    let frontier: { node: Json; path: number[] }[] = [{ node: root, path: [Number(root.number)] }];
-    for (let depth = 1; frontier.length; depth++) {
-      const following: typeof frontier = [];
-      for (const { node, path } of frontier)
+  const edges = new Set<string>();
+  const seen = new Set<string>([str(root.url)]);
+  let frontier: { node: Json; path: number[] }[] = [{ node: root, path: [Number(root.number)] }];
+  for (let depth = 1; frontier.length; depth++) {
+    const following: typeof frontier = [];
+    for (const { node, path } of frontier)
+      for (const [relation, key] of [
+        ["blockedBy", "upstream"],
+        ["blocking", "downstream"],
+      ] as const)
         for (const ref of list(node[key]).map(obj)) {
           const url = str(ref.url);
+          // One native edge, seen from either end: blocker → blocked.
+          const edge =
+            relation === "blockedBy" ? `${url}>${str(node.url)}` : `${str(node.url)}>${url}`;
+          if (edges.has(edge)) continue;
+          edges.add(edge);
           const known = byUrl.get(url);
           rows.push({
             relation,
@@ -452,8 +468,7 @@ export function flattenRelationships(report: Json, number: number): Relationship
             following.push({ node: known, path: [...path, Number(ref.number)] });
           }
         }
-      frontier = following;
-    }
+    frontier = following;
   }
   return rows;
 }

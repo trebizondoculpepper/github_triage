@@ -383,9 +383,10 @@ describe("bounded MCP results (#266)", () => {
         identityDiagnostic: null,
       },
       freshness: { fetchedAt: time },
-      sourceCompleteness: { complete: false, warnings: ["x".repeat(20_000)] },
-      data: { rows: [1, 2, 3] },
-      protectedPaths: [],
+      sourceCompleteness: { complete: false, warnings: ["w"] },
+      // An essential, unprunable field larger than the whole budget.
+      data: { rows: [1, 2, 3], essential: { note: "x ".repeat(10_000) } },
+      protectedPaths: ["essential"],
       lists: () => [{ path: ["rows"] }],
       text: () => [],
       notices: [],
@@ -557,6 +558,63 @@ describe("bounded MCP results (#266)", () => {
     expect(
       parityDifference("role", shortRole, role, { "role.next": 1, "role.sections[0].items": 1 }),
     ).toBeNull();
+  });
+
+  it("keeps mixed-direction edges of a dependency tree, once each", () => {
+    // 25 is blocked by 26; 26 also blocks 30, a sibling the root never reaches upstream-only.
+    const ref = (n: number) => ({ number: n, url: url(n), title: `T${n}`, state: "OPEN" });
+    const report = {
+      tree: true,
+      nodes: [
+        { number: 25, url: url(25), upstream: [ref(26)], downstream: [] },
+        { number: 26, url: url(26), upstream: [], downstream: [ref(25), ref(30)] },
+        { number: 30, url: url(30), upstream: [ref(26)], downstream: [] },
+      ],
+    };
+    const rows = flattenRelationships(report, 25);
+    expect(rows.map((r) => `${r.relation}:${r.path.join(">")}`)).toEqual([
+      "blockedBy:25>26",
+      "blocking:25>26>30",
+    ]);
+  });
+
+  it("budgets a live-shaped default briefing: many warnings, estimation queue and denials", async () => {
+    // Sanitised shape of the live repository where the default briefing failed (#266 retest):
+    // ~60 open issues, unestimated work filling the estimation queue, platform denials and a long
+    // list of collection warnings.
+    const rt = runtime();
+    rt.collect = (async () => ({
+      ...snapshot(),
+      issues: issues(60).map((item, i) => ({
+        ...item,
+        labels: page([
+          { name: i % 2 ? "status:ready" : "status:incomplete" },
+          ...(i % 3 === 0 ? [{ name: "platform:windows" }] : []),
+          ...(i % 4 === 0 ? [{ name: "complexity:S" }, { name: "complexity:L" }] : []),
+        ]),
+      })),
+      warnings: Array.from(
+        { length: 300 },
+        (_, i) => `Warning ${i}: comment history for #${i} was not fully collected; ${unicode}`,
+      ),
+    })) as unknown as McpRuntime["collect"];
+    const client = await connect(rt);
+    try {
+      for (const args of [{}, { role: "designer" }]) {
+        const { raw, bytes, structured } = await call(client, "triage_briefing", args);
+        expect(raw.isError, JSON.stringify(structured.error)).toBeFalsy();
+        expect(bytes).toBeLessThanOrEqual(budgetBytes);
+        expect(structured.status).toBe("incomplete");
+        expect(structured.sourceCompleteness?.complete).toBe(false);
+        const omitted = structured.presentation.omitted["sourceCompleteness.warnings"] ?? 0;
+        expect((structured.sourceCompleteness?.warnings.length ?? 0) + omitted).toBe(300);
+        if (omitted) expect(structured.sourceCompleteness?.warningsOmitted).toBe(omitted);
+        const ranked = (structured.data as { rankedActions: { items: unknown[] } }).rankedActions;
+        expect(ranked.items.length).toBeGreaterThan(0);
+      }
+    } finally {
+      await client.close();
+    }
   });
 
   it("keeps full intake available through the CLI", async () => {

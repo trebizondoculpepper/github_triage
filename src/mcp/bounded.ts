@@ -117,6 +117,13 @@ function at(root: unknown, path: Path): unknown {
 }
 
 /** A list in `data` whose trailing rows may be dropped, highest index first. */
+/**
+ * Pseudo-list naming the envelope's completeness warnings in a view's pruning order: there they
+ * are reduced to `keptWarnings`; any remaining warnings are pruned only after every list.
+ */
+export const warningsList = "$sourceCompleteness.warnings";
+export const keptWarnings = 5;
+
 export interface PrunableList {
   path: Path;
   /** Rows available in total (for a page, from the page start); defaults to the initial length. */
@@ -335,7 +342,8 @@ const presentationTruncated = (truncated: Path[], data: unknown): number =>
 /** Build the bounded result for one read; see the module comment for the pruning order. */
 export function boundedResult(view: BoundedView): ToolResult {
   const data = structuredClone(view.data);
-  const lists = view.lists(data).filter((list) => Array.isArray(at(data, list.path)));
+  const ordered = view.lists(data);
+  const lists = ordered.filter((list) => Array.isArray(at(data, list.path)));
   const available = new Map(
     lists.map((list) => [
       pathText(list.path),
@@ -343,6 +351,9 @@ export function boundedResult(view: BoundedView): ToolResult {
     ]),
   );
   const truncated: Path[] = [];
+  // Warnings are bounded like rows, pruned last: the verdict and the count always remain.
+  const completeness = structuredClone(view.sourceCompleteness);
+  const allWarnings = completeness.warnings.length;
 
   const build = (): ToolResult => {
     const returned: Record<string, number> = {};
@@ -354,6 +365,8 @@ export function boundedResult(view: BoundedView): ToolResult {
       const missing = (available.get(key) ?? rows) - rows;
       if (missing > 0) omitted[key] = missing;
     }
+    const warningsOmitted = allWarnings - completeness.warnings.length;
+    if (warningsOmitted > 0) omitted["sourceCompleteness.warnings"] = warningsOmitted;
     const shaped = structuredClone(data);
     // A list kept in a { total, omitted, items } container reports what is actually returned.
     for (const list of lists) {
@@ -417,7 +430,8 @@ export function boundedResult(view: BoundedView): ToolResult {
         subject: view.subject,
         selection: view.selection,
         freshness: view.freshness,
-        sourceCompleteness: view.sourceCompleteness,
+        sourceCompleteness:
+          warningsOmitted > 0 ? { ...completeness, warningsOmitted } : completeness,
         presentation,
         data: shaped,
         error: null,
@@ -450,13 +464,27 @@ export function boundedResult(view: BoundedView): ToolResult {
   result = build();
   if (fits(result)) return finish(result);
 
-  for (const list of lists) {
-    const rows = at(data, list.path) as unknown[];
+  for (const list of ordered) {
+    if (list.path[0] === warningsList) {
+      while (completeness.warnings.length > keptWarnings) {
+        completeness.warnings.pop();
+        result = build();
+        if (fits(result)) return finish(result);
+      }
+      continue;
+    }
+    const rows = at(data, list.path);
+    if (!Array.isArray(rows)) continue;
     while (rows.length > 0) {
       rows.pop();
       result = build();
       if (fits(result)) return finish(result);
     }
+  }
+  while (completeness.warnings.length > 0) {
+    completeness.warnings.pop();
+    result = build();
+    if (fits(result)) return finish(result);
   }
   return budgetExceeded(
     view,
