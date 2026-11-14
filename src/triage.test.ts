@@ -867,42 +867,48 @@ describe("native dependencies in the briefing", () => {
     const pickup = report.actions.items.filter((a) => a.rule === "ready-unclaimed");
     expect(pickup.map((a) => a.target)).toEqual([high.url, low.url]);
   });
-  it("marks a cache without native fields incomplete instead of treating tickets as unblocked", async () => {
-    const old = issue() as Partial<Issue>;
-    delete old.blockedBy;
-    delete old.blocking;
-    delete old.issueDependenciesSummary;
-    const report = brief(snapshot([old as Issue], []));
-    expect(report.completeness.complete).toBe(false);
-    expect(report.completeness.warnings[0]).toContain("native dependency evidence missing");
-    expect(report.ready.items).toEqual([]);
-    expect(report.actions.items.map((a) => a.rule)).toContain("native-evidence-unknown");
-    const dir = await mkdtemp(join(tmpdir(), "triage-old-cache-"));
-    try {
-      const cache = join(dir, "cache.json");
-      await atomicJson(cache, snapshot([old as Issue], []));
-      expect(await main(["--offline", "--cache", cache, "--json"], async () => {})).toBe(2);
-      // Many old tickets: compact text bounds the warnings; JSON keeps every one.
-      const many = Array.from({ length: 40 }, (_, i) => ({
-        ...old,
-        number: i + 1,
-        url: issue(i + 1).url,
-      }));
-      await atomicJson(cache, snapshot(many as Issue[], []));
-      let text = "";
-      let json = "";
-      await main(
-        ["--offline", "--cache", cache, "--max-chars", "2000"],
-        async (t) => void (text = t),
-      );
-      await main(["--offline", "--cache", cache, "--json"], async (t) => void (json = t));
-      expect(text.match(/^INCOMPLETE: /gm)).toHaveLength(6);
-      expect(text).toContain("35 more warning(s) omitted");
-      expect(JSON.parse(json).completeness.warnings).toHaveLength(40);
-    } finally {
-      await rm(dir, { recursive: true });
-    }
-  });
+  it(
+    "marks a cache without native fields incomplete instead of treating tickets as unblocked",
+    async () => {
+      const old = issue() as Partial<Issue>;
+      delete old.blockedBy;
+      delete old.blocking;
+      delete old.issueDependenciesSummary;
+      const report = brief(snapshot([old as Issue], []));
+      expect(report.completeness.complete).toBe(false);
+      expect(report.completeness.warnings[0]).toContain("native dependency evidence missing");
+      expect(report.ready.items).toEqual([]);
+      expect(report.actions.items.map((a) => a.rule)).toContain("native-evidence-unknown");
+      const dir = await mkdtemp(join(tmpdir(), "triage-old-cache-"));
+      try {
+        const cache = join(dir, "cache.json");
+        await atomicJson(cache, snapshot([old as Issue], []));
+        expect(await main(["--offline", "--cache", cache, "--json"], async () => {})).toBe(2);
+        // Many old tickets: compact text bounds the warnings; JSON keeps every one.
+        const many = Array.from({ length: 40 }, (_, i) => ({
+          ...old,
+          number: i + 1,
+          url: issue(i + 1).url,
+        }));
+        await atomicJson(cache, snapshot(many as Issue[], []));
+        let text = "";
+        let json = "";
+        await main(
+          ["--offline", "--cache", cache, "--max-chars", "2000"],
+          async (t) => void (text = t),
+        );
+        await main(["--offline", "--cache", cache, "--json"], async (t) => void (json = t));
+        expect(text.match(/^INCOMPLETE: /gm)).toHaveLength(6);
+        expect(text).toContain("35 more warning(s) omitted");
+        expect(JSON.parse(json).completeness.warnings).toHaveLength(40);
+      } finally {
+        await rm(dir, { recursive: true });
+      }
+    },
+    // Three full offline CLI runs, one over 40 tickets, each evaluated by the default Datalog
+    // engine: ~1.1s on a fast laptop but over the 5s default on Windows CI runners (#342).
+    20_000,
+  );
 });
 
 describe("deps command line", () => {
