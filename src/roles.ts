@@ -393,6 +393,25 @@ export const otherContext = { name: "other-context", title: "OTHER CONTEXT", bud
  * Foreground sections apply the shared next-step policy centrally; any subject the non-role
  * briefing would show that no section placed lands in the bounded OTHER CONTEXT section.
  */
+export function roleSectionRows(
+  name: string,
+  context: RoleContext,
+): { section: RoleSection; rows: RoleRow[] }[] {
+  const policy = roleRegistry.get(name);
+  if (!policy) throw new Error(`--role must be one of ${roleNames().join(", ")}.`);
+  const seen = new Set<string>();
+  return policy.sections.map((section) => {
+    const selector = sectionSelectors.get(section.section);
+    if (!selector) throw new Error(`Role ${name}: unregistered section ${section.section}.`);
+    const rows = selector(context).filter((row) => {
+      if (seen.has(row.url)) return false;
+      const item = context.byUrl.get(row.url);
+      return section.background || !item || nextStepAllowed(item, context);
+    });
+    for (const row of rows) seen.add(row.url);
+    return { section, rows };
+  });
+}
 export function roleView(name: string, context: RoleContext): RoleView {
   const policy = roleRegistry.get(name);
   if (!policy) throw new Error(`--role must be one of ${roleNames().join(", ")}.`);
@@ -402,15 +421,8 @@ export function roleView(name: string, context: RoleContext): RoleView {
     omitted: Math.max(0, rows.length - budget),
     items: rows.slice(0, budget),
   });
-  const sections = policy.sections.map(
-    ({ section, title, budget, background = false, unbounded = false }) => {
-      const selector = sectionSelectors.get(section);
-      if (!selector) throw new Error(`Role ${name}: unregistered section ${section}.`);
-      const rows = selector(context).filter((row) => {
-        if (seen.has(row.url)) return false;
-        const item = context.byUrl.get(row.url);
-        return background || !item || nextStepAllowed(item, context);
-      });
+  const sections = roleSectionRows(name, context).map(
+    ({ section: { section, title, budget, background = false, unbounded = false }, rows }) => {
       for (const row of rows) seen.add(row.url);
       return {
         name: section,

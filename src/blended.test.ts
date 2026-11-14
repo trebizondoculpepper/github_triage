@@ -1,0 +1,580 @@
+/**
+ * Shared blended-action policy (#248): the pure comparator over injected facts, and the additive
+ * `rankedActions` output through the real collector with a fake GraphQL boundary.
+ */
+import { join } from "node:path";
+import { describe, expect, it } from "vite-plus/test";
+import type { AssessmentState } from "./assessments.js";
+import {
+  classify,
+  compareActions,
+  designFollowUpSections,
+  rankActions,
+  roleCandidates,
+} from "./blended.js";
+import type { ActionFacts, ActionKind, CandidateSubject } from "./blended.js";
+import { briefing } from "./briefing.js";
+import { compactBriefing } from "./compact.js";
+import type { CompactBriefing } from "./compact.js";
+import type { ComplexitySize } from "./complexity.js";
+import { collectLabelEstimationInput } from "./complexitylabels.js";
+import { TOML_CONFIG_PATH } from "./config.js";
+import type { ConfigFileSystem, GitRunner } from "./config.js";
+import { collect } from "./github.js";
+import type { Query } from "./github.js";
+import { presentBriefing } from "./service.js";
+import type { Issue, Page } from "./types.js";
+
+const repo = "owner/name";
+const time = "2026-11-14T10:00:00.000Z";
+const url = (n: number) => `https://github.com/${repo}/issues/${n}`;
+type Pair = [AssessmentState, ComplexitySize | null];
+const unassessed: Pair = ["unassessed", null];
+
+function fact(
+  n: number,
+  kind: ActionKind,
+  impact: Pair = unassessed,
+  complexity: Pair = unassessed,
+  extra: Partial<ActionFacts> = {},
+): ActionFacts {
+  return {
+    repository: repo,
+    target: url(n),
+    number: n,
+    kind,
+    role: kind === "assess-impact" || kind === "design" ? "designer" : "implementer",
+    impact: { state: impact[0], size: impact[1] },
+    complexity: { state: complexity[0], size: complexity[1] },
+    urgency: 1,
+    unlocks: 0,
+    unlocksUnknown: [],
+    own: false,
+    incomplete: false,
+    createdAt: time,
+    evidence: [url(n)],
+    nextCommand: "cmd",
+    inspection: null,
+    ...extra,
+  };
+}
+const order = (facts: ActionFacts[], mode?: "impact" | "oldest" | "newest") =>
+  rankActions(facts, { limit: 100, ...(mode ? { order: mode } : {}) }).items.map(
+    (i) => `${i.kind}#${Number(i.target.split("/").pop())}`,
+  );
+
+describe("blended comparator bands (#248)", () => {
+  it("classifies easy wins, unfavorable and ordinary pairs only from current evidence", () => {
+    const band = (impact: Pair, complexity: Pair) =>
+      classify(fact(1, "implement", impact, complexity)).band;
+    expect(band(["current", "L"], ["current", "S"])).toBe(4);
+    expect(band(["current", "XXL"], ["current", "XS"])).toBe(4);
+    expect(band(["current", "S"], ["current", "L"])).toBe(7);
+    expect(band(["current", "XS"], ["current", "XXL"])).toBe(7);
+    // M on either scale, L/L and S/S tradeoffs are ordinary.
+    expect(band(["current", "M"], ["current", "S"])).toBe(6);
+    expect(band(["current", "L"], ["current", "M"])).toBe(6);
+    expect(band(["current", "L"], ["current", "L"])).toBe(6);
+    expect(band(["current", "S"], ["current", "S"])).toBe(6);
+    // Non-current states never qualify, even with a remembered size.
+    for (const state of ["stale", "conflict", "invalid", "unknown", "disabled", "unassessed"]) {
+      const size = state === "stale" ? "L" : null;
+      expect(band([state as AssessmentState, size], ["current", "S"])).toBe(6);
+      expect(band(["current", "S"], [state as AssessmentState, size && "XL"])).toBe(6);
+    }
+  });
+
+  it("gives easy wins to implementers only", () => {
+    const designer = fact(1, "implement", ["current", "L"], ["current", "S"], {
+      role: "designer",
+    });
+    expect(classify(designer).band).toBe(6);
+  });
+
+  it("keeps bands 1–3 in their selector order ahead of every discretionary band", () => {
+    expect(
+      order([
+        fact(9, "implement", ["current", "XL"], ["current", "XS"], { urgency: 0 }),
+        fact(5, "design-review", unassessed, unassessed, { sequence: 3 }),
+        fact(4, "decide", unassessed, unassessed, { sequence: 2 }),
+        fact(3, "pr-follow-up", unassessed, unassessed, { sequence: 1 }),
+        fact(2, "addressed-response", unassessed, unassessed, { sequence: 0, urgency: 2 }),
+      ]),
+    ).toEqual([
+      "addressed-response#2",
+      "pr-follow-up#3",
+      "decide#4",
+      "design-review#5",
+      "implement#9",
+    ]);
+  });
+
+  it("orders easy win, boosted then unboosted assessment, ordinary, unfavorable", () => {
+    expect(
+      order([
+        fact(1, "implement", ["current", "XS"], ["current", "XL"]),
+        fact(2, "implement", ["current", "M"], ["current", "M"]),
+        fact(3, "estimate-complexity", unassessed, unassessed),
+        fact(4, "estimate-complexity", ["current", "XL"], unassessed),
+        fact(5, "implement", ["current", "L"], ["current", "S"]),
+      ]),
+    ).toEqual([
+      "implement#5",
+      "estimate-complexity#4",
+      "estimate-complexity#3",
+      "implement#2",
+      "implement#1",
+    ]);
+  });
+
+  it("boosts complexity estimates on current high impact with absent or stale complexity", () => {
+    const boosted = (impact: Pair, complexity: Pair) =>
+      classify(fact(1, "estimate-complexity", impact, complexity));
+    expect(boosted(["current", "L"], unassessed)).toMatchObject({
+      band: 5,
+      boosted: true,
+      reasonCodes: expect.arrayContaining(["cross-role-boost"]),
+    });
+    expect(boosted(["current", "XXL"], ["stale", "S"]).boosted).toBe(true);
+    expect(boosted(["current", "M"], unassessed).boosted).toBe(false);
+    expect(boosted(["stale", "XL"], unassessed).boosted).toBe(false);
+    expect(boosted(["unknown", null], unassessed).boosted).toBe(false);
+  });
+
+  it("boosts impact assessment on current small complexity with absent or stale impact", () => {
+    const boosted = (impact: Pair, complexity: Pair) =>
+      classify(fact(1, "assess-impact", impact, complexity)).boosted;
+    expect(boosted(unassessed, ["current", "XS"])).toBe(true);
+    expect(boosted(["stale", "L"], ["current", "S"])).toBe(true);
+    expect(boosted(unassessed, ["current", "M"])).toBe(false);
+    expect(boosted(unassessed, ["conflict", null])).toBe(false);
+    expect(boosted(unassessed, ["stale", "XS"])).toBe(false);
+  });
+
+  it("puts inspection in band 5 without a speculative boost", () => {
+    const inspect = classify(
+      fact(1, "inspect-assessment", ["current", "XL"], ["conflict", null], { nextCommand: null }),
+    );
+    expect(inspect).toEqual({
+      band: 5,
+      boosted: false,
+      reasonCodes: ["assessment", "inspection", "impact-current", "complexity-conflict"],
+    });
+  });
+
+  it("gives assessment no immediate-unlock credit but keeps unlocks visible", () => {
+    const a = fact(1, "estimate-complexity", unassessed, unassessed, { unlocks: 5 });
+    const b = fact(2, "estimate-complexity", unassessed, unassessed);
+    expect(order([a, b])).toEqual(["estimate-complexity#1", "estimate-complexity#2"]);
+    expect(order([b, a])).toEqual(["estimate-complexity#1", "estimate-complexity#2"]);
+    // Equal except identity: the number decides, not the unlock count.
+    const c = fact(3, "estimate-complexity", unassessed, unassessed, { unlocks: 9 });
+    expect(order([c, b])).toEqual(["estimate-complexity#2", "estimate-complexity#3"]);
+    expect(rankActions([c], { limit: 1 }).items[0]?.unlocks).toBe(9);
+  });
+
+  it("applies urgency, unlocks, own continuation, incomplete and age within a band", () => {
+    const ordinary = (n: number, extra: Partial<ActionFacts>) =>
+      fact(n, n === 4 ? "continue-implementation" : "implement", unassessed, unassessed, extra);
+    expect(
+      order([
+        ordinary(1, { createdAt: "2026-01-01T00:00:00Z" }),
+        ordinary(2, { incomplete: true }),
+        ordinary(4, { own: true }),
+        ordinary(5, { unlocks: 2 }),
+        ordinary(6, { urgency: 0 }),
+        ordinary(7, { urgency: 2, unlocks: 9 }),
+      ]),
+    ).toEqual([
+      "implement#6",
+      "implement#5",
+      "continue-implementation#4",
+      "implement#2",
+      "implement#1",
+      "implement#7",
+    ]);
+  });
+
+  it("falls back to deterministic identity for equal and incomparable candidates", () => {
+    const facts = [
+      fact(3, "implement", ["current", "L"], ["current", "L"]),
+      fact(1, "implement", ["current", "S"], ["current", "XS"]),
+      fact(2, "implement", ["unknown", null], ["current", "S"]),
+    ];
+    const first = order(facts);
+    expect(first).toEqual(["implement#1", "implement#2", "implement#3"]);
+    expect(order([...facts].reverse())).toEqual(first);
+    const compare = compareActions();
+    expect(compare(facts[0]!, facts[0]!)).toBe(0);
+  });
+
+  it("coalesces unclaimed pickup into band 6 by age under explicit oldest/newest", () => {
+    const facts = [
+      fact(1, "implement", ["current", "XL"], ["current", "XS"], {
+        createdAt: "2026-06-01T00:00:00Z",
+      }),
+      fact(2, "implement", ["current", "XS"], ["current", "XL"], {
+        createdAt: "2026-01-01T00:00:00Z",
+        urgency: 2,
+      }),
+      fact(3, "estimate-complexity", ["current", "XL"], unassessed),
+    ];
+    expect(order(facts, "oldest")).toEqual(["estimate-complexity#3", "implement#2", "implement#1"]);
+    expect(order(facts, "newest")).toEqual(["estimate-complexity#3", "implement#1", "implement#2"]);
+    expect(order(facts)).toEqual(["implement#1", "estimate-complexity#3", "implement#2"]);
+    // Labels remain visible, and own claims keep their value band.
+    const ranked = rankActions(facts, { order: "oldest", limit: 5 });
+    expect(ranked.items[1]?.impact).toEqual({ state: "current", size: "XS" });
+    expect(classify({ ...facts[0]!, own: true }, "oldest").band).toBe(4);
+  });
+
+  it("keeps the normal keys for designer design actions under explicit oldest/newest", () => {
+    const older = fact(1, "design", unassessed, unassessed, {
+      createdAt: "2026-01-01T00:00:00Z",
+      urgency: 2,
+    });
+    const newer = fact(2, "design", unassessed, unassessed, {
+      createdAt: "2026-06-01T00:00:00Z",
+      urgency: 0,
+      unlocks: 4,
+    });
+    for (const mode of ["impact", "oldest", "newest"] as const)
+      expect(order([older, newer], mode)).toEqual(["design#2", "design#1"]);
+    // Own continuation also keeps urgency, and precedes the age-ordered pickup group.
+    const own = fact(3, "continue-implementation", unassessed, unassessed, {
+      own: true,
+      urgency: 2,
+      createdAt: "2026-09-01T00:00:00Z",
+    });
+    const pickup = fact(4, "implement", unassessed, unassessed, {
+      urgency: 0,
+      createdAt: "2026-01-01T00:00:00Z",
+    });
+    expect(order([pickup, own], "oldest")).toEqual(["continue-implementation#3", "implement#4"]);
+  });
+
+  it("ranks an owned design PR with a follow-up finding as band-2 PR follow-up", () => {
+    const pr = (n: number) => `https://github.com/${repo}/pull/${n}`;
+    const sections = [
+      { name: "addressed", background: false, rows: [] },
+      { name: "decision-needed", background: false, rows: [{ url: url(5) }] },
+      { name: "design-review", background: false, rows: [{ url: pr(10) }, { url: pr(11) }] },
+    ];
+    const moved = designFollowUpSections(sections, (u) => u === pr(11));
+    expect(moved.map((s) => [s.name, s.rows.map((r) => r.url)])).toEqual([
+      ["addressed", []],
+      ["design-follow-up", [pr(11)]],
+      ["decision-needed", [url(5)]],
+      ["design-review", [pr(10)]],
+    ]);
+    expect(designFollowUpSections(sections, () => false)).toBe(sections);
+    const subject = (n: number, u: string, isIssue: boolean) =>
+      [
+        u,
+        { url: u, number: n, state: "OPEN", createdAt: time, labels: [] as string[], isIssue },
+      ] as [string, CandidateSubject];
+    const ranked = rankActions(
+      roleCandidates({
+        repository: repo,
+        role: "designer",
+        agent: "me",
+        sections: moved,
+        subjects: new Map([
+          subject(5, url(5), true),
+          subject(10, pr(10), false),
+          subject(11, pr(11), false),
+        ]),
+        assessments: new Map(),
+        isAddressed: () => false,
+        isParked: () => false,
+        urgency: () => 1,
+        ownedByViewer: () => false,
+      }),
+      { limit: 10 },
+    ).items.map((i) => [i.kind, i.band, Number(i.target.split("/").pop())]);
+    expect(ranked).toEqual([
+      ["pr-follow-up", 2, 11],
+      ["decide", 3, 5],
+      ["design-review", 3, 10],
+    ]);
+  });
+
+  it("dedupes by stable ID and counts omissions after ranking", () => {
+    const facts = [
+      fact(1, "implement"),
+      fact(1, "implement"),
+      fact(1, "estimate-complexity"),
+      fact(2, "implement"),
+    ];
+    const ranked = rankActions(facts, { limit: 1 });
+    expect(ranked).toMatchObject({ policyVersion: 1, total: 3, omitted: 2 });
+    expect(ranked.items[0]).toMatchObject({
+      id: `${repo} ${url(1)} estimate-complexity`,
+      band: 5,
+    });
+    expect(
+      rankActions(
+        [
+          fact(1, "inspect-assessment", unassessed, unassessed, {
+            nextCommand: null,
+            inspection: "why",
+          }),
+        ],
+        { limit: 1 },
+      ).items[0],
+    ).toMatchObject({ nextCommand: null, inspection: "why" });
+  });
+});
+
+// ---- Integration through the real collector with a fake GraphQL boundary ----
+
+const page = <T>(nodes: T[], more = false): Page<T> => ({
+  nodes,
+  pageInfo: { hasNextPage: more, endCursor: more ? "next" : null },
+});
+const issue = (n: number, labels: string[], createdAt = time): Issue => ({
+  number: n,
+  title: `Ticket ${n}`,
+  body: "",
+  url: url(n),
+  state: "OPEN",
+  stateReason: null,
+  createdAt,
+  updatedAt: time,
+  issueDependenciesSummary: { blockedBy: 0, totalBlockedBy: 0, blocking: 0, totalBlocking: 0 },
+  blockedBy: page([]),
+  blocking: page([]),
+  labels: page(labels.map((name) => ({ name }))),
+  comments: page([]),
+});
+/** Hand-set labels (no provenance) read as `current` with "no recorded rationale". */
+const fixture = (): Issue[] => [
+  issue(1, ["status:ready", "impact:L", "complexity:S"], "2026-11-01T00:00:00Z"),
+  issue(2, ["status:ready", "impact:XS", "complexity:XL"], "2026-10-01T00:00:00Z"),
+  issue(3, ["status:ready", "impact:M", "complexity:M"], "2026-11-02T00:00:00Z"),
+  issue(4, ["status:ready", "impact:XL"], "2026-11-03T00:00:00Z"),
+  issue(5, ["status:needs-design", "complexity:XS"], "2026-11-04T00:00:00Z"),
+  issue(6, ["status:ready", "complexity:S", "complexity:L"], "2026-11-05T00:00:00Z"),
+  {
+    ...issue(7, ["status:ready", "impact:XL"], "2026-11-06T00:00:00Z"),
+    issueDependenciesSummary: { blockedBy: 1, totalBlockedBy: 1, blocking: 0, totalBlocking: 0 },
+    blockedBy: page([
+      {
+        number: 3,
+        title: "Ticket 3",
+        url: url(3),
+        state: "OPEN",
+        repository: { nameWithOwner: repo },
+        issueDependenciesSummary: {
+          blockedBy: 0,
+          totalBlockedBy: 0,
+          blocking: 1,
+          totalBlocking: 1,
+        },
+      },
+    ]),
+  },
+  issue(8, ["status:ready", "agent:other", "impact:S"], "2026-11-07T00:00:00Z"),
+  issue(9, ["status:parked", "impact:XL"], "2026-11-08T00:00:00Z"),
+];
+const query: Query = async (source) => ({
+  repository: {
+    issues: page(source.includes("issues(first") ? fixture() : []),
+    pullRequests: page([]),
+  },
+});
+const root = "/repo";
+const files = (config: string | null = null): ConfigFileSystem => ({
+  readText: async (file) => (config && file === join(root, TOML_CONFIG_PATH) ? config : null),
+  writeText: async () => undefined,
+  rename: async () => undefined,
+  remove: async () => undefined,
+  makeDirectory: async () => undefined,
+});
+const git: GitRunner = async (args) =>
+  args[0] === "rev-parse" ? `${root}\n` : `origin\thttps://github.com/${repo}.git (fetch)\n`;
+const estimation = (config: string | null = null) => ({ fs: files(config), git, cwd: root });
+
+async function present(
+  role: "implementer" | "designer" | undefined,
+  extra: { order?: "impact" | "oldest"; limit?: number; config?: string } = {},
+) {
+  const snapshot = await collect(repo, {}, query, () => new Date(time));
+  const options = {
+    limit: extra.limit ?? 20,
+    maxChars: 20000,
+    agent: "me",
+    ...(role ? { role } : {}),
+    ...(extra.order ? { order: extra.order } : {}),
+  };
+  const presented = await presentBriefing(
+    snapshot,
+    options,
+    estimation(extra.config ?? null),
+    new Date(time),
+  );
+  return { snapshot, options, report: presented.report as CompactBriefing };
+}
+const items = (report: CompactBriefing) =>
+  (report.rankedActions?.items ?? []).map((i) => `${i.kind}#${Number(i.target.split("/").pop())}`);
+
+describe("rankedActions through collect() (#248)", () => {
+  it("blends the implementer queue: easy win, boosted estimate, assessments, ordinary, unfavorable", async () => {
+    const { report } = await present("implementer");
+    expect(items(report)).toEqual([
+      "implement#1",
+      "estimate-complexity#4",
+      "estimate-complexity#7",
+      "inspect-assessment#6",
+      "estimate-complexity#8",
+      "implement#3",
+      "implement#4",
+      "implement#6",
+      "inspect#7",
+      "implement#2",
+    ]);
+    const ranked = report.rankedActions!;
+    expect(ranked.policyVersion).toBe(1);
+    expect(ranked.items[0]).toMatchObject({
+      band: 4,
+      reasonCodes: ["easy-win", "impact-current", "complexity-current"],
+      impact: { state: "current", size: "L" },
+      complexity: { state: "current", size: "S" },
+      nextCommand: `github-triage claim 1 --repo ${repo} --agent me`,
+    });
+    // A blocked ticket (#7) may be assessed but is never implementation pickup; another agent's
+    // claim (#8) can be estimated (no claim) but never picked up; parked work (#9) is absent; a
+    // current small complexity (#5) needs no estimate.
+    expect(items(report)).not.toContain("implement#7");
+    expect(items(report)).not.toContain("implement#8");
+    expect(items(report).some((i) => i.endsWith("#9") || i === "estimate-complexity#5")).toBe(
+      false,
+    );
+    const inspect = ranked.items.find((i) => i.kind === "inspect-assessment");
+    expect(inspect).toMatchObject({ band: 5, nextCommand: null });
+    expect(inspect?.inspection).toContain("complexity evidence is conflict");
+    expect(ranked.items.at(-1)).toMatchObject({
+      band: 7,
+      reasonCodes: expect.arrayContaining(["unfavorable"]),
+    });
+  });
+
+  it("blends the designer queue with boosted impact assessment above new design work", async () => {
+    const { report } = await present("designer");
+    const kinds = items(report);
+    expect(kinds[0]).toBe("assess-impact#5");
+    expect(report.rankedActions?.items[0]?.reasonCodes).toContain("cross-role-boost");
+    expect(kinds.indexOf("design#5")).toBeGreaterThan(kinds.indexOf("assess-impact#6"));
+    expect(kinds.some((k) => k.startsWith("estimate-complexity"))).toBe(false);
+  });
+
+  it("applies limits after ranking and keeps omitted assessments counted", async () => {
+    const { report } = await present("implementer", { limit: 2 });
+    expect(report.rankedActions).toMatchObject({ total: 10, omitted: 8 });
+    expect(items(report)).toEqual(["implement#1", "estimate-complexity#4"]);
+  });
+
+  it("coalesces pickup by age under explicit oldest", async () => {
+    const { report } = await present("implementer", { order: "oldest" });
+    const implement = items(report).filter((k) => k.startsWith("implement"));
+    expect(implement).toEqual([
+      "implement#2",
+      "implement#1",
+      "implement#3",
+      "implement#4",
+      "implement#6",
+    ]);
+  });
+
+  it("suppresses only the disabled metric's assessments and value bands", async () => {
+    const { report } = await present("implementer", {
+      config: "schemaVersion = 1\n[complexity]\nenabled = false\n",
+    });
+    expect(items(report).some((k) => k.startsWith("estimate-complexity"))).toBe(false);
+    expect(report.rankedActions?.items.every((i) => i.band === 6)).toBe(true);
+    expect(items(report)).toContain("implement#1");
+  });
+
+  it("is absent without a role", async () => {
+    const { report } = await present(undefined);
+    expect(report.rankedActions).toBeNull();
+  });
+});
+
+describe("legacy projections stay byte-compatible (#248 parity)", () => {
+  for (const role of ["implementer", "designer"] as const)
+    for (const order of ["impact", "oldest"] as const)
+      it(`keeps actions, role, ready and estimation unchanged for ${role} (${order})`, async () => {
+        const { snapshot, options, report } = await present(role, { order });
+        // The pre-#248 pipeline: no assessments, so no blended ranking at all.
+        const input = await collectLabelEstimationInput(repo, estimation());
+        const wide = { ...options, estimation: input, limit: 2000 };
+        const legacy = compactBriefing(snapshot, options, briefing(snapshot, wide, new Date(time)));
+        expect(legacy.rankedActions).toBeNull();
+        expect(report.rankedActions).not.toBeNull();
+        for (const key of ["actions", "role", "sections", "estimation", "ranking"] as const)
+          expect(JSON.stringify(report[key])).toBe(JSON.stringify(legacy[key]));
+        // The easy win and unfavorable pair do not move in the legacy pickup order.
+        expect(report.actions.items).toEqual(legacy.actions.items);
+      });
+});
+
+describe("generated commands are runnable for the viewer (#248 review)", () => {
+  const repo = "o/r";
+  const subject = (n: number, labels: string[] = []) => ({
+    url: `https://github.com/${repo}/issues/${n}`,
+    number: n,
+    state: "OPEN",
+    createdAt: "2026-01-01T00:00:00Z",
+    labels,
+    isIssue: true,
+  });
+  const input = (
+    subjects: ReturnType<typeof subject>[],
+    owned: number[],
+    extra: { platform?: string } = {},
+  ) => ({
+    repository: repo,
+    role: "implementer" as const,
+    agent: "me",
+    ...extra,
+    sections: [{ name: "pickup", background: false, rows: [{ url: subjects[0].url }] }],
+    subjects: new Map(subjects.map((s) => [s.url, s])),
+    assessments: new Map(),
+    isAddressed: () => false,
+    isParked: () => false,
+    urgency: () => 1 as const,
+    ownedByViewer: (url: string) => owned.some((n) => url.endsWith(`/issues/${n}`)),
+  });
+  const implement = (i: ReturnType<typeof input>) =>
+    rankActions(roleCandidates(i), { limit: 10 }).items.find((a) => a.kind === "implement")!;
+
+  it("carries --platform into a platform-restricted claim", () => {
+    const a = implement(
+      input([subject(7, ["platform:claude-code"])], [], { platform: "claude-code" }),
+    );
+    expect(a.nextCommand).toBe(
+      `github-triage claim 7 --repo ${repo} --agent me --platform claude-code`,
+    );
+  });
+
+  it("omits --platform for an unrestricted ticket", () => {
+    const a = implement(input([subject(7)], [], { platform: "claude-code" }));
+    expect(a.nextCommand).toBe(`github-triage claim 7 --repo ${repo} --agent me`);
+  });
+
+  it("shows the release handoff before claiming a second implementation", () => {
+    const a = implement(input([subject(7), subject(3)], [3]));
+    expect(a.nextCommand).toBe(
+      `github-triage release 3 --repo ${repo} --agent me --as incomplete --note TEXT`,
+    );
+    expect(a.thenCommand).toBe(`github-triage claim 7 --repo ${repo} --agent me`);
+    expect(a.reasonCodes).toContain("release-active-claim-first");
+  });
+
+  it("offers no command, only the restriction, with several active claims", () => {
+    const a = implement(input([subject(7), subject(3), subject(4)], [3, 4]));
+    expect(a.nextCommand).toBeNull();
+    expect(a.inspection).toContain("one active claim per agent");
+  });
+});

@@ -6,8 +6,11 @@ import { estimateLine } from "./estimation.js";
 import { assessmentsText, provenanceText } from "./assessments.js";
 import type { SubjectAssessments } from "./assessments.js";
 import type { EstimateEntry } from "./estimation.js";
-import { compareImpact, impactLookup } from "./ranking.js";
-import { roleView } from "./roles.js";
+import { compareImpact, impactLookup, urgencyBand } from "./ranking.js";
+import { followUpRules, roleSectionRows, roleView } from "./roles.js";
+import type { RoleContext } from "./roles.js";
+import { designFollowUpSections, rankActions, roleCandidates } from "./blended.js";
+import type { BlendedRole, RankedActions } from "./blended.js";
 import type { RoleView } from "./roles.js";
 import type { Action, Issue, PullRequest, Snapshot } from "./types.js";
 
@@ -253,8 +256,8 @@ export function compactBriefing(
               : (grouped.get(url) ?? []).map((f) => f.reason).join(" ") || name,
         );
   // A registered role (#1) reshapes presentation of the same facts; without one, unchanged.
-  const role: RoleView | null = options.role
-    ? roleView(options.role, {
+  const roleContext: RoleContext | null = options.role
+    ? {
         snapshot,
         facts,
         findings: grouped,
@@ -265,8 +268,62 @@ export function compactBriefing(
         isMine,
         linkedMine: (item) => linkedMine(item),
         baseline,
-      })
+      }
     : null;
+  const role: RoleView | null =
+    options.role && roleContext ? roleView(options.role, roleContext) : null;
+  const rowsBySection = new Map(
+    options.role && roleContext
+      ? roleSectionRows(options.role, roleContext).map(({ section, rows }) => [
+          section.section,
+          rows,
+        ])
+      : [],
+  );
+  // Additive blended ranking (#248); the legacy `actions` and `role.next` are unchanged.
+  const blendedRole: BlendedRole | null =
+    role && (role.name === "implementer" || role.name === "designer") ? role.name : null;
+  const rankedActions: RankedActions | null =
+    role && blendedRole && assessments
+      ? rankActions(
+          roleCandidates({
+            repository: snapshot.repository,
+            role: blendedRole,
+            ...(options.agent ? { agent: options.agent } : {}),
+            ...(facts.ranking.platform ? { platform: facts.ranking.platform } : {}),
+            sections: designFollowUpSections(
+              role.sections.map((section) => ({
+                name: section.name,
+                background: section.background,
+                // Ranking happens before limits: rank every row the selector placed.
+                rows: rowsBySection.get(section.name) ?? section.items,
+              })),
+              (url) =>
+                linkedMine(byUrl.get(url)) &&
+                (grouped.get(url) ?? []).some((f) => followUpRules.includes(f.rule)),
+            ),
+            subjects: new Map(
+              objects.map((item) => [
+                item.url,
+                {
+                  url: item.url,
+                  number: item.number,
+                  state: item.state,
+                  createdAt: item.createdAt,
+                  labels: labelNames(item),
+                  isIssue: !("headRefOid" in item),
+                },
+              ]),
+            ),
+            assessments,
+            isAddressed: (url) => isAddressed(byUrl.get(url)),
+            isParked: (url) => isParked(defined(byUrl.get(url))),
+            urgency: (url) => urgencyBand(defined(byUrl.get(url))),
+            ownedByViewer: (url) => isMine(defined(byUrl.get(url))),
+          }),
+          { order: facts.ranking.order, limit: options.limit },
+        )
+      : null;
   const ordered = role
     ? role.next.map(({ url }) => ({ target: url, findings: grouped.get(url) ?? [] }))
     : next;
@@ -344,6 +401,7 @@ export function compactBriefing(
     actions: { ...actions, items: actions.items.map(({ target }) => target) },
     sections,
     role,
+    rankedActions,
     estimation,
     subjects,
     changes: facts.changes,
