@@ -397,6 +397,24 @@ function deliveryFindings(
       [inspect],
       { facts: [...facts, ...e.because] },
     );
+  // Every recorded member merged but membership is still open: more deliverables may be expected,
+  // so delivery is not complete and `complete` is never offered. The responsible agent decides.
+  if (
+    e.delivery === "submitted" &&
+    e.perDeliverable.length > 0 &&
+    e.perDeliverable.every((m) => m.state === "merged") &&
+    !e.derived.membershipComplete
+  ) {
+    add(
+      issue,
+      "delivery-membership-open",
+      "candidate",
+      `Every recorded deliverable (${e.perDeliverable.length}) is merged into its target, but membership is still open, so delivery is not complete. ${responsible ?? "The responsible agent"} attaches the remaining deliverables or confirms the set is complete.`,
+      [inspect, ...(responsible ? [cmd.membershipComplete(n, responsible)] : [])],
+      { judgment: true, facts: [...facts, ...e.because, ...lines] },
+    );
+    return;
+  }
   // `submitted` with every member open or draft is waiting on review or CI: not a finding.
 }
 

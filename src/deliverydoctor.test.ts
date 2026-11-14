@@ -344,6 +344,22 @@ describe("delivery-aware Ticket Doctor (#192)", () => {
     expect(complete?.runBy).toContain("alice");
   });
 
+  it("reports open membership after every recorded member merged, never as verified or completable", async () => {
+    const submit = post(record(22, "submit", { deliverables: [pr(30)], membership: "open" }));
+    const r = await doctor(
+      [issue(22, ["bug"], [submit])],
+      { 30: { merged: "m30" } },
+      { m30: "behind" },
+    );
+    expect(kinds(r, 22)).toEqual(["delivery-membership-open"]);
+    const f = finding(r, 22, "delivery-membership-open");
+    expect(f.detail).toContain("membership is still open");
+    expect(f.plan.steps.some((s) => s.choice === "complete")).toBe(false);
+    expect(f.plan.steps.find((s) => s.choice === "membership-complete")?.command).toBe(
+      `pdb deliverables 22 membership complete --agent alice --reason '<REASON>' --repo ${repo}`,
+    );
+  });
+
   it("never treats unreadable evidence as undelivered: unknown, inspection only", async () => {
     const submit = post(record(9, "submit", { deliverables: [pr(13)], membership: "complete" }));
     const r = await doctor([issue(9, ["bug"], [submit])], {});

@@ -245,6 +245,29 @@ export function planCommands(repository: string) {
           ],
         },
       ),
+    /** #192: confirm an open required set is complete; delivery is then re-evaluated, not assumed. */
+    membershipComplete: (n: number, agent: string) =>
+      step(
+        "command",
+        `If no further deliverable is expected, ${agent} states the required set is complete.`,
+        triage(
+          "deliverables",
+          String(n),
+          "membership",
+          "complete",
+          "--agent",
+          agent,
+          "--reason",
+          "<REASON>",
+        ),
+        {
+          choice: "membership-complete",
+          runBy: `agent ${agent} only (ticket-responsible)`,
+          preconditions: [
+            "Membership completeness is not proof of delivery; re-run the dry run before completing.",
+          ],
+        },
+      ),
     /** #192 (S1): legacy attachment of a named candidate; membership stays open by default. */
     legacyAttach: (n: number, flag: "--pr" | "--commit", value: string, choice: string) =>
       step(
