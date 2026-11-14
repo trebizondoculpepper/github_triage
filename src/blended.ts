@@ -180,6 +180,13 @@ export function compareActions(order: PickupOrder = "impact") {
 
 /** One `rankedActions` item (doc/design/blended-action-queues.md "Output and compatibility"). */
 export interface RankedAction {
+  ruleIds?: string[];
+  why?: {
+    text: string;
+    ruleIds: string[];
+    facts: Record<string, string | number | boolean>;
+    overriddenRuleIds: string[];
+  };
   id: string;
   kind: ActionKind;
   target: string;

@@ -1,3 +1,5 @@
+import { BriefingEngineError, resolveEngineSetting } from "./engine-setting.js";
+import type { EngineSetting, DecisionEngineMetadata } from "./engine-setting.js";
 /**
  * Transport-neutral read service shared by the CLI and the MCP adapter (doc/design/mcp.md).
  *
@@ -27,6 +29,7 @@ import type { BriefingProcess, GuideRuntime } from "./process.js";
 export interface PresentOptions extends Omit<BriefingOptions, "estimation" | "assessments"> {
   /** Expanded version-1 report instead of the compact briefing. */
   full?: boolean;
+  engineSetting?: EngineSetting;
   /** Compact text budget. */
   maxChars: number;
   /** Registered role view (#1) shaping the compact briefing. */
@@ -37,7 +40,9 @@ export interface PresentOptions extends Omit<BriefingOptions, "estimation" | "as
 
 /** The versioned briefing report and its text rendering. */
 export interface PresentedBriefing {
-  report: ReturnType<typeof compactBriefing> | ReturnType<typeof briefing>;
+  report: (ReturnType<typeof compactBriefing> | ReturnType<typeof briefing>) & {
+    decisionEngine: DecisionEngineMetadata;
+  };
   text: string;
   complete: boolean;
 }
@@ -51,6 +56,8 @@ export async function presentBriefing(
   redactDiagnostic?: (text: string) => string,
   trust?: TrustDecision,
   signal?: AbortSignal,
+  loadEngine: () => Promise<Pick<typeof import("./datalog.js"), "evaluateDatalog">> = () =>
+    import("./datalog.js"),
 ): Promise<PresentedBriefing> {
   // Sizes come from the snapshot's labels (#152); only configuration is read here.
   const collected = await collectLabelEstimationInput(snapshot.repository, estimationRuntime);
@@ -76,6 +83,40 @@ export async function presentBriefing(
     platform: options.platform,
     signal,
   });
+  let experimental:
+    | Awaited<ReturnType<(typeof import("./datalog.js"))["evaluateDatalog"]>>
+    | undefined;
+  const selection = options.engineSetting ?? {
+    requested: "typescript" as const,
+    source: "default" as const,
+  };
+  // Full issue intake is outside the experimental next-action slice.
+  if (selection.requested === "datalog" && !options.full && !options.issue) {
+    if (options.role !== "implementer" && options.role !== "designer")
+      throw new BriefingEngineError(
+        "decision-engine-role",
+        "Datalog next actions require --role implementer or --role designer.",
+      );
+    try {
+      const { evaluateDatalog } = await loadEngine();
+      experimental = evaluateDatalog(snapshot, assessments, {
+        role: options.role,
+        agent: options.agent,
+        platform: options.platform,
+        order: options.order,
+        limit: Number.MAX_SAFE_INTEGER,
+        signal,
+      });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      throw new BriefingEngineError(
+        "decision-engine-failed",
+        error instanceof Error
+          ? error.message
+          : "Experimental evaluator failed; no fallback was run.",
+      );
+    }
+  }
   const expanded = briefing(
     snapshot,
     options.full
@@ -90,13 +131,31 @@ export async function presentBriefing(
   );
   const built = options.full
     ? null
-    : compactBriefing(snapshot, options, expanded, assessments, impactStatus);
+    : compactBriefing(snapshot, options, expanded, assessments, impactStatus, experimental);
   // Additive: the process object is only present when the front end resolved a guide setting.
   const compact = built && options.process ? { ...built, process: options.process } : built;
-  const report = compact ?? expanded;
+  const decisionEngine = experimental
+    ? { ...experimental.decisionEngine, source: selection.source }
+    : {
+        requested: selection.requested,
+        used: "typescript" as const,
+        source: selection.source,
+        policyVersion: null,
+        rulesHash: null,
+        coverage: { scope: options.full || options.issue ? "intake" : "next-actions" },
+        diagnostics: [],
+      };
+  const report = { ...(compact ?? expanded), decisionEngine };
+  const engineHeader = experimental
+    ? `Decision engine: Datalog (policy ${experimental.decisionEngine.policyVersion}; ${experimental.decisionEngine.rulesHash.slice(0, 12)})\n`
+    : "";
   return {
     report,
-    text: compact ? compactText(compact, options.maxChars) : textReport(expanded),
+    text:
+      engineHeader +
+      (compact
+        ? compactText(compact, Math.max(0, options.maxChars - engineHeader.length))
+        : textReport(expanded)),
     complete: report.completeness.complete,
   };
 }
@@ -165,6 +224,9 @@ export async function readBriefing(
       text: unavailableText(error.diagnosis),
     };
   }
+  const engineSetting = request.issue
+    ? undefined
+    : await resolveEngineSetting(request.repository, runtime.guide);
   const setting = await resolveGuideSetting(request.repository, undefined, runtime.guide);
   const redact = runtime.redactDiagnostic;
   const process = briefingProcess(
@@ -180,6 +242,7 @@ export async function readBriefing(
       ...(request.role ? { role: request.role } : {}),
       ...(request.order ? { order: request.order } : {}),
       process,
+      engineSetting,
     },
     runtime.estimation,
     runtime.now?.(),

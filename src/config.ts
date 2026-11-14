@@ -62,6 +62,7 @@ export type ConfigValue = boolean | string | null;
 export interface ConfigKey {
   readonly key: string;
   readonly type: "boolean" | "string";
+  readonly choices?: readonly string[];
   /** Whether an explicit `null` is a valid stored value. */
   readonly nullable: boolean;
   /** Effective value when nothing is stored; `null` means unset. */
@@ -71,6 +72,15 @@ export interface ConfigKey {
 
 /** The single registry of supported keys. Extend here, never with special cases elsewhere. */
 export const CONFIG_KEYS: readonly ConfigKey[] = [
+  {
+    key: "briefing.engine",
+    type: "string",
+    nullable: false,
+    defaultValue: "typescript",
+    choices: ["typescript", "datalog"],
+    description:
+      "Next-action decision engine: typescript (default) or opt-in datalog. Datalog requires --role implementer or designer; rollback: github-triage config set briefing.engine typescript.",
+  },
   {
     key: "complexity.enabled",
     type: "boolean",
@@ -315,7 +325,13 @@ export function validateValue(schema: ConfigSchema, key: string, value: unknown)
   const entry = findKey(schema, key);
   if (value === null && entry.nullable) return null;
   if (entry.type === "boolean" && typeof value === "boolean") return value;
-  if (entry.type === "string" && typeof value === "string" && value.trim() !== "") return value;
+  if (
+    entry.type === "string" &&
+    typeof value === "string" &&
+    value.trim() !== "" &&
+    (!entry.choices || entry.choices.includes(value))
+  )
+    return value;
   throw new ConfigError(
     "invalid-value",
     `Invalid value for "${key}": expected ${entry.type}${entry.nullable ? " or null" : ""}, got ${describe(value)}.`,

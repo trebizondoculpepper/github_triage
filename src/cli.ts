@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { resolveEngineSetting } from "./engine-setting.js";
 /** One read-only intake command. Contract: doc/github-triage-cli.md. */
 import { realpathSync } from "node:fs";
 import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
@@ -1041,7 +1042,14 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
     : briefingProcess(await resolveGuideSetting(snapshot.repository, options.guide, runtime.guide));
   const { report, text } = await presentBriefing(
     snapshot,
-    { ...options, process: guideProcess },
+    {
+      ...options,
+      process: guideProcess,
+      engineSetting:
+        options.full || options.issue
+          ? undefined
+          : await resolveEngineSetting(snapshot.repository, runtime.guide ?? {}),
+    },
     runtime.estimation,
     runtime.now?.(),
     undefined,

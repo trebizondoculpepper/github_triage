@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { BriefingEngineError } from "./engine-setting.js";
 /**
  * Read-only stdio MCP adapter (doc/design/mcp.md, #25). Three tools over the shared read
  * service; no mutation, shell, file-path, cache or checkpoint routes are registered.
@@ -263,6 +264,12 @@ const annotations = {
 
 /** Stable, sanitized failures: no stack traces, subprocess stderr or configuration. */
 const failures = {
+  "decision-engine-config":
+    "Selected repository configuration could not be validated. Use the local CLI diagnostic for the configuration service's repair guidance, repair or restore the configuration, then retry.",
+  "decision-engine-role":
+    "Datalog next actions require role implementer or designer. Rollback: github-triage config set briefing.engine typescript.",
+  "decision-engine-failed":
+    "Experimental Datalog evaluation failed; no fallback result was returned. Inspect the local CLI diagnostic or roll back: github-triage config set briefing.engine typescript.",
   "repository-unresolved":
     "No repository selected. Pass repo as owner/name on this call, or restart the server with --repo owner/name or --project /absolute/project/path, for example: github-triage-mcp --project /absolute/project/path",
   "collection-failed":
@@ -492,7 +499,11 @@ export function createServer(
       );
     } catch (error) {
       const code: FailureCode =
-        error instanceof Failure ? error.code : signal.aborted ? "cancelled" : "collection-failed";
+        error instanceof Failure || error instanceof BriefingEngineError
+          ? error.code
+          : signal.aborted
+            ? "cancelled"
+            : "collection-failed";
       return toolResult(
         {
           schemaVersion: 1,

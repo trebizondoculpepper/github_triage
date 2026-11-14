@@ -149,6 +149,7 @@ export function compactBriefing(
   expanded: Briefing,
   assessments?: ReadonlyMap<string, SubjectAssessments>,
   impactStatus: MetricAvailability = "available",
+  experimental?: RankedActions,
 ) {
   const bound = <T>(items: T[], size = 3): Bounded<T> => ({
     total: items.length,
@@ -305,9 +306,41 @@ export function compactBriefing(
       }
     : null;
   const role: RoleView | null =
-    options.role && roleContext ? roleView(options.role, roleContext) : null;
+    experimental && options.role
+      ? {
+          name: options.role,
+          question: "Datalog-derived next actions",
+          sections: (() => {
+            const nextTargets = new Set(experimental.items.map((i) => i.target));
+            const context = objects
+              .filter((item) => item.state === "OPEN" && !nextTargets.has(item.url))
+              .map((item) => ({
+                url: item.url,
+                reason: isParked(item)
+                  ? "Parked; not a next step."
+                  : "Background context; not a Datalog next action.",
+              }));
+            return [
+              {
+                name: "other-context",
+                title: "OTHER CONTEXT",
+                background: true,
+                total: context.length,
+                omitted: Math.max(0, context.length - 5),
+                items: context.slice(0, 5),
+              },
+            ];
+          })(),
+          next: experimental.items.map((i) => ({
+            url: i.target,
+            reason: i.why?.text ?? "Missing experimental explanation",
+          })),
+        }
+      : options.role && roleContext
+        ? roleView(options.role, roleContext)
+        : null;
   const rowsBySection = new Map(
-    options.role && roleContext
+    !experimental && options.role && roleContext
       ? roleSectionRows(options.role, roleContext).map(({ section, rows }) => [
           section.section,
           rows,
@@ -320,7 +353,8 @@ export function compactBriefing(
   const blendedRole: BlendedRole | null =
     role && (role.name === "implementer" || role.name === "designer") ? role.name : null;
   const fullRanking: RankedActions | null =
-    role && blendedRole && assessments
+    experimental ??
+    (role && blendedRole && assessments
       ? rankActions(
           roleCandidates({
             repository: snapshot.repository,
@@ -360,7 +394,7 @@ export function compactBriefing(
           // Rank everything once; the display limit is applied below, so counts see it all.
           { order: facts.ranking.order, limit: Number.MAX_SAFE_INTEGER },
         )
-      : null;
+      : null);
   const shownRanked = fullRanking?.items.slice(0, Math.max(0, options.limit)) ?? [];
   const rankedActions: RankedActions | null = fullRanking && {
     ...fullRanking,
@@ -393,7 +427,9 @@ export function compactBriefing(
             return {
               url: target,
               reason:
-                roleReason.get(target) ?? `Ranked ${first.kind} (${first.reasonCodes.join(", ")}).`,
+                first.why?.text ??
+                roleReason.get(target) ??
+                `Ranked ${first.kind} (${first.reasonCodes.join(", ")}).`,
             };
           }),
         }
@@ -599,7 +635,7 @@ export function compactText(
       );
     for (const item of ranked.items) {
       const s = defined(subjects.get(item.target));
-      const why = roleReasons.get(item.target);
+      const why = item.why?.text ?? roleReasons.get(item.target);
       rows.push(
         `- #${s.number} ${s.title} — ${item.kind} (${item.reasonCodes.join(", ")})${s.assessments ? `\n  ${assessmentsText(s.assessments)}` : ""}${why ? `\n  Why: ${why}` : ""}${item.nextCommand ? `\n  Next: ${item.nextCommand}${item.thenCommand ? `\n  Then: ${item.thenCommand}` : ""}` : `\n  Inspect: ${item.inspection ?? s.detailCommand}`}\n  ${item.target}`,
       );
