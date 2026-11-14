@@ -2,6 +2,10 @@
 
 Owner-confirmed contract for #1/#40/#43/#45. Use shared normalized facts and declarative tier/key policies, not separate collectors or opaque weighted scores. The research in ../reports/next-action-ranking.md is evidence, not authority over later owner decisions.
 
+## Opt-in Datalog experiment
+
+[datalog-live-experiment.md](datalog-live-experiment.md) (#302–#306) proposes a separate read-only experimental engine for both role queues: Datalog derives decisions, policy sort keys and the matched-rule narration together. The normal engine remains TypeScript by default. Existing rules below remain the normative behavior to translate; the older prototype is not automatically current policy.
+
 ## Identity, relevance and eligibility
 
 `--agent NAME` and `--agent=NAME` select the same explicit persistent identity. Role chooses presentation, not authority. Without resolved identity, say that addressed/owned filtering is unavailable; do not attribute via the shared GitHub login. Still return useful generic review/pickup context.
