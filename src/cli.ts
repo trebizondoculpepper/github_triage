@@ -67,6 +67,13 @@ import {
   planDeliverables,
 } from "./deliverables.js";
 import { markerTrust } from "./delivery.js";
+import {
+  applyComplete,
+  completeArguments,
+  completeHelp,
+  completeText,
+  planComplete,
+} from "./completion.js";
 import type { LabelEstimationRuntime } from "./complexitylabels.js";
 import { metricStatus } from "./complexitylabels.js";
 import { impactMetric } from "./metrics.js";
@@ -148,6 +155,9 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   deliverables N attach|detach|retarget|handoff|membership|attest|reassign|reset|void
                         --agent NAME ... [--dry-run]  Record required deliverables and
                         responsibility on the issue (deliverables --help)
+  complete N --agent NAME [--dry-run]  Verify delivery from fresh evidence (every required PR
+                        merged into its live target) and only then record completion and close
+                        the issue as completed; never reopens or merges (complete --help)
   needs-human N --agent NAME --designer NAME --why TEXT --question TEXT... [--dry-run]
                         Record questions for a designer and mark the ticket decision-needed
   team [--stale-hours N]  Read-only: each agent's claims, linked PRs, activity and warnings
@@ -692,6 +702,34 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
       json
         ? JSON.stringify({ schemaVersion: 1, ...result }, null, 2) + "\n"
         : deliverablesText(result, dryRun),
+    );
+    return result.exitCode;
+  }
+  if (args[0] === "complete") {
+    if (args.length === 1 || args.slice(1).some((a) => a === "--help" || a === "-h")) {
+      await output(completeHelp);
+      return 0;
+    }
+    const { request, repo, json, dryRun } = completeArguments(args.slice(1));
+    const repository = repo ?? (await runtime.currentRepository());
+    // Per run: a permission learned now is never reused by a later invocation.
+    const permission = permissionLookup(repository, runtime.rest ?? ghRest);
+    const rt = {
+      query: runtime.query ?? ghQuery,
+      run: runtime.ghRun ?? ghRun,
+      rest: runtime.rest ?? ghRest,
+      trust: markerTrust(permission),
+      now: runtime.now ?? (() => new Date()),
+    };
+    const plan = await planComplete(repository, request, rt);
+    const result =
+      dryRun || !plan.ok || plan.noop
+        ? { ...plan, exitCode: plan.ok ? 0 : 1 }
+        : await applyComplete(repository, request, rt, plan);
+    await output(
+      json
+        ? JSON.stringify({ schemaVersion: 1, ...result }, null, 2) + "\n"
+        : completeText(result, dryRun),
     );
     return result.exitCode;
   }
