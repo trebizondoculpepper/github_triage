@@ -68,7 +68,6 @@ import {
 import { markerTrust } from "./delivery.js";
 import type { LabelEstimationRuntime } from "./complexitylabels.js";
 import { metricStatus } from "./complexitylabels.js";
-import { markerTrust } from "./delivery.js";
 import { impactMetric } from "./metrics.js";
 import type { EstimateRuntime } from "./estimate.js";
 import { localDoctor, localDoctorExitCode, localDoctorText } from "./localdoctor.js";
