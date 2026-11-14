@@ -249,7 +249,7 @@ const annotations = {
 /** Stable, sanitized failures: no stack traces, subprocess stderr or configuration. */
 const failures = {
   "repository-unresolved":
-    "No repository selected. Pass repo as owner/name, or start the server with --repo or --project.",
+    "No repository selected. Pass repo as owner/name on this call, or restart the server with --repo owner/name or --project /absolute/project/path, for example: github-triage-mcp --project /absolute/project/path",
   "collection-failed":
     "GitHub evidence could not be collected. Check gh authentication and repository access, then retry.",
   "invalid-window":
@@ -397,6 +397,10 @@ export function createServer(
   ): Promise<Selection & { repository: string }> => {
     let repository = args.repo ?? options.repo;
     if (!repository) {
+      // Only a configured project is trustworthy evidence of the default repository. The
+      // server's own working directory belongs to whatever launched it (an Ori daemon, say),
+      // not to the client's checkout, so never resolve from it (#271, doc/design/mcp.md).
+      if (!options.project) throw new Failure("repository-unresolved");
       try {
         repository = await runtime.currentRepository(options.project, signal);
       } catch {
@@ -693,6 +697,9 @@ if (isEntryPoint(process.argv[1])) {
       const runtime = defaultRuntime(options);
       if (options.poll) {
         // Polling watches exactly one explicitly resolved repository, never arbitrary targets.
+        // As for tool calls, never watch whatever repository the launch directory holds (#271).
+        if (!options.repo && !options.project)
+          throw new Error("--poll needs --repo owner/name or --project /absolute/project/path.");
         const repository = options.repo ?? (await runtime.currentRepository(options.project));
         if (!repoPattern.test(repository)) throw new Error("--poll needs a resolvable --repo.");
         runtime.collect = sharedCollect(runtime.collect);
