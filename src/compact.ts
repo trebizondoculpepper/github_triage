@@ -290,6 +290,7 @@ export function compactBriefing(
             repository: snapshot.repository,
             role: blendedRole,
             ...(options.agent ? { agent: options.agent } : {}),
+            ...(facts.ranking.platform ? { platform: facts.ranking.platform } : {}),
             sections: role.sections.map((section) => ({
               name: section.name,
               background: section.background,

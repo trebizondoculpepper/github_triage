@@ -64,6 +64,13 @@ export interface ActionFacts {
   createdAt: string;
   evidence: string[];
   nextCommand: string | null;
+  /**
+   * The command to run once `nextCommand` (a prerequisite such as releasing the viewer's other
+   * active claim) has succeeded; null when `nextCommand` is the action itself.
+   */
+  thenCommand?: string | null;
+  /** Extra reason codes the candidate builder attaches (for example a prerequisite). */
+  extraReasonCodes?: string[];
   /** Why there is no command (inspection only); null when `nextCommand` is set. */
   inspection: string | null;
 }
@@ -171,6 +178,8 @@ export interface RankedAction {
   reasonCodes: string[];
   evidence: string[];
   nextCommand: string | null;
+  /** Run after `nextCommand` succeeds (one-active-claim handoff); null otherwise. */
+  thenCommand: string | null;
   inspection: string | null;
   complexity: { state: AssessmentState; size: ComplexitySize | null };
   impact: { state: AssessmentState; size: ComplexitySize | null };
@@ -202,9 +211,10 @@ export function rankActions(
         target: a.target,
         role: a.role,
         band,
-        reasonCodes,
+        reasonCodes: [...reasonCodes, ...(a.extraReasonCodes ?? [])],
         evidence: a.evidence,
         nextCommand: a.nextCommand,
+        thenCommand: a.nextCommand ? (a.thenCommand ?? null) : null,
         inspection: a.nextCommand ? null : a.inspection,
         complexity: { state: a.complexity.state, size: a.complexity.size },
         impact: { state: a.impact.state, size: a.impact.size },
@@ -257,6 +267,8 @@ export interface CandidateInput {
   repository: string;
   role: BlendedRole;
   agent?: string;
+  /** The viewer's explicit platform (`--platform`); carried into platform-restricted claims. */
+  platform?: string;
   /** Foreground role rows in role order, by registered section name. */
   sections: { name: string; background: boolean; rows: { url: string }[] }[];
   subjects: ReadonlyMap<string, CandidateSubject>;
@@ -277,6 +289,10 @@ export interface CandidateInput {
 export function roleCandidates(input: CandidateInput): ActionFacts[] {
   const metric = input.role === "implementer" ? "complexity" : "impact";
   const agent = input.agent ?? "NAME";
+  // The viewer's active claims: open issues carrying the viewer's agent label.
+  const ownActive = [...input.subjects.values()]
+    .filter((s) => s.isIssue && s.state === "OPEN" && input.ownedByViewer(s.url))
+    .map((s) => s.number);
   const facts = (url: string, kind: ActionKind, sequence?: number): ActionFacts | null => {
     const s = input.subjects.get(url);
     if (!s) return null;
@@ -286,8 +302,20 @@ export function roleCandidates(input: CandidateInput): ActionFacts[] {
       : `gh pr view ${s.number} --repo ${input.repository}`;
     const estimate = (m: string) =>
       `github-triage estimate ${s.number} --metric ${m} --size SIZE --rationale TEXT --repo ${input.repository}`;
+    const restricted = s.labels.some((l) => l.startsWith("platform:"));
+    const claim = `github-triage claim ${s.number} --repo ${input.repository} --agent ${agent}${
+      restricted && input.platform ? ` --platform ${input.platform}` : ""
+    }`;
+    // One active claim per agent (src/claims.ts OTHER_ACTIVE_CLAIM): a claim on another ticket is
+    // refused until the viewer's current claim is released, so show that handoff first
+    // (doc/design/blended-action-queues.md "existing own implementation claim").
+    const otherClaims = kind === "implement" ? ownActive.filter((n) => n !== s.number) : [];
+    const handoff =
+      otherClaims.length === 1
+        ? `github-triage release ${otherClaims[0]} --repo ${input.repository} --agent ${agent} --as incomplete --note TEXT`
+        : null;
     const command: Partial<Record<ActionKind, string | null>> = {
-      implement: `github-triage claim ${s.number} --repo ${input.repository} --agent ${agent}`,
+      implement: otherClaims.length ? handoff : claim,
       "estimate-complexity": estimate("complexity"),
       "assess-impact": estimate("impact"),
       "inspect-assessment": null,
@@ -314,11 +342,19 @@ export function roleCandidates(input: CandidateInput): ActionFacts[] {
         ...[a.impact.provenance, a.complexity.provenance].filter((p): p is string => !!p),
       ],
       nextCommand: next,
+      ...(otherClaims.length
+        ? {
+            thenCommand: handoff ? claim : null,
+            extraReasonCodes: ["release-active-claim-first"],
+          }
+        : {}),
       inspection: next
         ? null
-        : kind === "inspect-assessment"
-          ? `${metric} evidence is ${a[metric].state}; inspect labels and provenance (${detail})`
-          : `inspect before acting (${detail})`,
+        : otherClaims.length
+          ? `one active claim per agent: release #${otherClaims.join(", #")} first (github-triage release N --repo ${input.repository} --agent ${agent} --as incomplete --note TEXT), then ${claim}`
+          : kind === "inspect-assessment"
+            ? `${metric} evidence is ${a[metric].state}; inspect labels and provenance (${detail})`
+            : `inspect before acting (${detail})`,
     };
   };
   const out: ActionFacts[] = [];

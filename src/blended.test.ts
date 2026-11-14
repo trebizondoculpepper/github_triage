@@ -5,7 +5,7 @@
 import { join } from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 import type { AssessmentState } from "./assessments.js";
-import { classify, compareActions, rankActions } from "./blended.js";
+import { classify, compareActions, rankActions, roleCandidates } from "./blended.js";
 import type { ActionFacts, ActionKind } from "./blended.js";
 import { briefing } from "./briefing.js";
 import { compactBriefing } from "./compact.js";
@@ -440,4 +440,64 @@ describe("legacy projections stay byte-compatible (#248 parity)", () => {
         // The easy win and unfavorable pair do not move in the legacy pickup order.
         expect(report.actions.items).toEqual(legacy.actions.items);
       });
+});
+
+describe("generated commands are runnable for the viewer (#248 review)", () => {
+  const repo = "o/r";
+  const subject = (n: number, labels: string[] = []) => ({
+    url: `https://github.com/${repo}/issues/${n}`,
+    number: n,
+    state: "OPEN",
+    createdAt: "2026-01-01T00:00:00Z",
+    labels,
+    isIssue: true,
+  });
+  const input = (
+    subjects: ReturnType<typeof subject>[],
+    owned: number[],
+    extra: { platform?: string } = {},
+  ) => ({
+    repository: repo,
+    role: "implementer" as const,
+    agent: "me",
+    ...extra,
+    sections: [{ name: "pickup", background: false, rows: [{ url: subjects[0].url }] }],
+    subjects: new Map(subjects.map((s) => [s.url, s])),
+    assessments: new Map(),
+    isAddressed: () => false,
+    isParked: () => false,
+    urgency: () => 1 as const,
+    ownedByViewer: (url: string) => owned.some((n) => url.endsWith(`/issues/${n}`)),
+  });
+  const implement = (i: ReturnType<typeof input>) =>
+    rankActions(roleCandidates(i), { limit: 10 }).items.find((a) => a.kind === "implement")!;
+
+  it("carries --platform into a platform-restricted claim", () => {
+    const a = implement(
+      input([subject(7, ["platform:claude-code"])], [], { platform: "claude-code" }),
+    );
+    expect(a.nextCommand).toBe(
+      `github-triage claim 7 --repo ${repo} --agent me --platform claude-code`,
+    );
+  });
+
+  it("omits --platform for an unrestricted ticket", () => {
+    const a = implement(input([subject(7)], [], { platform: "claude-code" }));
+    expect(a.nextCommand).toBe(`github-triage claim 7 --repo ${repo} --agent me`);
+  });
+
+  it("shows the release handoff before claiming a second implementation", () => {
+    const a = implement(input([subject(7), subject(3)], [3]));
+    expect(a.nextCommand).toBe(
+      `github-triage release 3 --repo ${repo} --agent me --as incomplete --note TEXT`,
+    );
+    expect(a.thenCommand).toBe(`github-triage claim 7 --repo ${repo} --agent me`);
+    expect(a.reasonCodes).toContain("release-active-claim-first");
+  });
+
+  it("offers no command, only the restriction, with several active claims", () => {
+    const a = implement(input([subject(7), subject(3), subject(4)], [3, 4]));
+    expect(a.nextCommand).toBeNull();
+    expect(a.inspection).toContain("one active claim per agent");
+  });
 });
