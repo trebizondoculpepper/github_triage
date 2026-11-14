@@ -9,7 +9,8 @@
 import { owners, workflow } from "./briefing.js";
 import { dependencyDrift, nativeKnown } from "./dependencies.js";
 import { teamView } from "./team.js";
-import { complexityLabelFindings } from "./complexitylabels.js";
+import { complexityLabelFindings, metricLabelFindings } from "./complexitylabels.js";
+import { impactMetric } from "./metrics.js";
 import { closingPrEvidence } from "./ranking.js";
 import type { Issue, PullRequest, Snapshot } from "./types.js";
 
@@ -64,6 +65,11 @@ export interface TicketDoctorOptions {
   staleHours?: number;
   limit?: number;
   offline?: boolean;
+  /**
+   * `impact.enabled` (#245): false suppresses impact findings; labels are never touched. Default
+   * true, including when configuration could not be read (findings only suggest, never apply).
+   */
+  impactEnabled?: boolean;
 }
 export interface TicketDoctorReport {
   schemaVersion: 1;
@@ -156,6 +162,7 @@ export function ticketDoctor(
     staleHours = doctorStaleHours,
     limit = 30,
     offline = false,
+    impactEnabled = true,
   }: TicketDoctorOptions = {},
 ): TicketDoctorReport {
   const open = snapshot.issues.filter((i) => i.state === "OPEN");
@@ -251,6 +258,42 @@ export function ticketDoctor(
             ),
           },
         );
+    // #245: the same descriptor-parameterised findings for impact labels. Suggestions only
+    // (including impact's low -> S and high -> L); unassessed tickets are never findings.
+    if (impactEnabled)
+      for (const finding of metricLabelFindings(impactMetric, issue))
+        if (finding.kind === "impact-label-conflict")
+          add(
+            issue,
+            finding.kind,
+            finding.certainty,
+            `Conflicting impact: ${finding.detail}.`,
+            [cmd.inspectIssue(issue.number), cmd.estimate(issue.number, "impact")],
+            { judgment: true },
+          );
+        else if (finding.kind === "impact-label-invalid")
+          add(
+            issue,
+            finding.kind,
+            finding.certainty,
+            `Invalid impact label: ${finding.detail}.`,
+            [
+              cmd.inspectIssue(issue.number),
+              cmd.estimateReplaceInvalid(issue.number, finding.invalid ?? [], "impact"),
+            ],
+            {
+              judgment: true,
+              facts: (finding.suggestions ?? []).map((s) =>
+                s.size
+                  ? `Suggestion only (never applied): ${s.label} probably means ${s.size}; confirm against the ticket.`
+                  : `No suggestion for ${s.label}: read the ticket and choose a size.`,
+              ),
+            },
+          );
+        else
+          add(issue, finding.kind, finding.certainty, `Impact labels: ${finding.detail}.`, [
+            cmd.inspectIssue(issue.number),
+          ]);
     const classes = doctorPolicy.classification.filter((l) => labels.includes(l));
     if (!classes.length)
       add(

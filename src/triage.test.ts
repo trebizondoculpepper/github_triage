@@ -3427,6 +3427,8 @@ describe("Ticket Doctor review fixes", () => {
     expect(k(32)).toEqual(["candidate:awaiting-review-without-pr"]);
     expect(k(33)).toEqual([
       "unknown:labels-incomplete",
+      // #245: impact label evidence is incomplete too (inspection only).
+      "unknown:impact-labels-incomplete",
       "unknown:classification-missing",
       "unknown:blocked-without-reason",
     ]);
@@ -4644,6 +4646,7 @@ describe("repository configuration service (#116, doc/design/repository-configur
     expect(config.storedVersion).toBeNull();
     expect(config.settings).toEqual([
       { key: "complexity.enabled", value: true, source: "default" },
+      { key: "impact.enabled", value: true, source: "default" },
       { key: "processGuide", value: true, source: "default" },
     ]);
     expect(config.retired).toEqual([]);
@@ -5537,6 +5540,7 @@ describe("config get/set/list/help commands (#117)", () => {
     expect(await t.call("list", "--json")).toBe(0);
     expect(t.json().settings).toEqual([
       expect.objectContaining({ key: "complexity.enabled", value: false, source: "explicit" }),
+      expect.objectContaining({ key: "impact.enabled", value: true, source: "default" }),
       expect.objectContaining({ key: "processGuide", value: false, source: "explicit" }),
     ]);
     expect(await t.call("list")).toBe(0);

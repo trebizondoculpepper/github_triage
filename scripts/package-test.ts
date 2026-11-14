@@ -115,6 +115,13 @@ try {
     // Labels-only complexity (#153): the installed artifact names label storage and no field setup.
     if (!guidance.stdout.includes("complexity:XS"))
       throw new Error(`Installed complexity guidance does not describe size labels in ${cwd}.`);
+    // Impact estimates (#245): the installed help documents --metric impact and its marker.
+    if (
+      !help.stdout.includes("--metric impact") ||
+      !guidance.stdout.includes("--metric METRIC") ||
+      !guidance.stdout.includes("github-triage:impact-estimate v1")
+    )
+      throw new Error(`Installed bin does not document impact estimates in ${cwd}.`);
     if (/setup complexity|issue field|fieldId/.test(help.stdout + guidance.stdout))
       throw new Error(`Installed bin still advertises retired native-field setup in ${cwd}.`);
     // Repository briefing mode (#170): the installed help documents the mode and its windows.
