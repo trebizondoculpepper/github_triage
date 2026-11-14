@@ -877,3 +877,42 @@ describe("omissions persist and errors are not swallowed", () => {
     expect(existsSync(file(root, old))).toBe(true);
   });
 });
+
+describe("an unreadable previous snapshot is never replaced", () => {
+  for (const code of ["EIO", "EACCES"])
+    it(`stops with not-written when the previous read fails with ${code}`, async () => {
+      const root = newRoot();
+      await write(root, 300); // holds evictions in its omissions
+      const before = readFileSync(file(root), "utf8");
+      const failing: StorageFs = {
+        ...realFs,
+        readFile: async (p, enc) => {
+          if (p.endsWith(SNAPSHOT_FILE)) throw Object.assign(new Error("injected"), { code });
+          return realFs.readFile(p, enc);
+        },
+      };
+      let updateCalled = false;
+      const r = await storeSnapshot(
+        root,
+        ctx,
+        () => ((updateCalled = true), syntheticObservation(1, at())),
+        { fs: failing, now: () => T0 },
+      );
+      expect(r).toMatchObject({
+        status: "not-written",
+        reason: "previous-unreadable",
+        step: "read-previous",
+      });
+      expect(r.status === "not-written" && r.detail).toMatch(code);
+      expect(updateCalled).toBe(false);
+      expect(readFileSync(file(root), "utf8")).toBe(before);
+      expect(readdirSync(join(file(root), ".."))).toEqual([SNAPSHOT_FILE]);
+    });
+
+  it("a classified damaged previous snapshot is still replaced", async () => {
+    const root = newRoot();
+    await write(root, 2);
+    writeFileSync(file(root), "{");
+    expect(await write(root, 3)).toMatchObject({ status: "written", previous: "truncated" });
+  });
+});

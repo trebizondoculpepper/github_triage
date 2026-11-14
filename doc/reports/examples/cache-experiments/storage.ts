@@ -551,7 +551,13 @@ export type WriteResult =
     }
   | {
       status: "not-written";
-      reason: "unknown-context" | "lock-timeout" | "lock-error" | "failed" | "declined";
+      reason:
+        | "unknown-context"
+        | "lock-timeout"
+        | "lock-error"
+        | "failed"
+        | "declined"
+        | "previous-unreadable";
       step?: WriteStep;
       detail: string;
       cleanupErrors?: string[];
@@ -647,6 +653,17 @@ export async function storeSnapshot(
     const previous = await run("read-previous", () =>
       loadSnapshot(root, context, { fs, now, access: "confirmed" }),
     );
+    // An existing snapshot that could not be read (EIO, EACCES...) is not replaced: it may hold
+    // records and omissions this write would silently lose. Classified misses (no cache,
+    // corrupt, truncated, schema, expired, future timestamp) are safe to replace.
+    if (previous.status === "miss" && previous.reason === "unreadable")
+      return {
+        status: "not-written",
+        reason: "previous-unreadable",
+        step: "read-previous",
+        detail: previous.detail,
+        cleanupErrors,
+      };
     const obs = update(previous);
     if (!obs)
       return {
