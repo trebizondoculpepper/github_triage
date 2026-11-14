@@ -1,0 +1,3 @@
+# Opt-in live Datalog experiment
+
+Owner requested both choices and why narration from the same Datalog inference, with compact queues. Audited #74: DataScript currently matches hits but TypeScript decide/order still chooses effective results, and #154 is estimation-last. Wrote the reviewed-contract proposal covering real Datalog eligibility/conflict/band/key derivation, same-rule narrative bindings, repo engine selection, truthful errors, compact defaults and installed local acceptance. Default TypeScript/mutation enforcement stays separate; no live opt-in, runtime code or paid trials. Tracking #302–#306 reuses #72/#75 history without blocking on a general rules platform.
