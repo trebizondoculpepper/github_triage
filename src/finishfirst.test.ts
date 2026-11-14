@@ -18,7 +18,7 @@ import { deliveryMarker } from "./delivery.js";
 import type { DeliveryRecord } from "./delivery.js";
 import { collect } from "./github/github.js";
 import type { Query, Rest } from "./github/github.js";
-import { createServer, envelope } from "./mcp.js";
+import { boundedEnvelope, createServer } from "./mcp.js";
 import type { McpRuntime } from "./mcp.js";
 import type { Issue, Page, PullRequest } from "./github/types.js";
 
@@ -410,9 +410,11 @@ describe("CLI and MCP agree on finish-first ranking (#182)", () => {
         name: "triage_briefing",
         arguments: { agent: "me", role: "implementer", limit: 20 },
       });
-      const parsed = envelope.parse(raw.structuredContent);
+      const parsed = boundedEnvelope.parse(raw.structuredContent);
       expect(parsed.status).toBe("complete");
-      const result = parsed.result as Record<string, unknown>;
+      // Nothing was shortened for the response budget (#266), so the CLI fields match exactly.
+      expect(parsed.presentation.omitted).toEqual({});
+      const result = parsed.data as Record<string, unknown>;
       for (const key of ["rankedActions", "actions", "role"] as const)
         expect(result[key], key).toEqual(fromCli[key]);
       expect(ranked(fromCli)).toEqual(["pr-follow-up#20", "pr-follow-up#19", "pr-follow-up#23"]);

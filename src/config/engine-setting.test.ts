@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/client";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
-import { createServer, envelope } from "../mcp.js";
+import { boundedEnvelope, createServer } from "../mcp.js";
 import { describe, it, expect } from "vite-plus/test";
 import { parseConfig, settingFor } from "./config.js";
 import { resolveEngineSetting } from "./engine-setting.js";
@@ -218,10 +218,10 @@ it("returns sanitized MCP configuration repair guidance without an unusable roll
       name: "triage_briefing",
       arguments: { agent: "tester", role: "implementer" },
     });
-    const result = envelope.parse(raw.structuredContent);
+    const result = boundedEnvelope.parse(raw.structuredContent);
     expect(raw.isError).toBe(true);
     expect(result.status).toBe("error");
-    expect(result.result).toBeNull();
+    expect(result.data).toBeNull();
     expect(result.error?.code).toBe("decision-engine-config");
     const rendered = JSON.stringify(raw);
     expect(rendered).toContain("repair guidance");

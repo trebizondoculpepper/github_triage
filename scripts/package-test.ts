@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { resolveEngineSetting, defaultEngine } from "../src/config/engine-setting.js";
+import { parityDifference } from "../src/mcp/parity.js";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
@@ -158,23 +159,33 @@ async function blendedParity(
   const client = new Client({ name: "package-test", version: "1.0.0" });
   await client.connect(transport);
   let mcp: Report;
+  let omitted: Record<string, number> = {};
   try {
     const result = await client.callTool({
       name: "triage_briefing",
       arguments: { role, order, limit: 10 },
     });
-    const structured = result.structuredContent as { status?: string; result?: Report } | undefined;
-    if (!structured?.result)
+    // Bounded version-2 envelope (#266): `data` carries the CLI fields; `presentation.omitted`
+    // names any list the response budget shortened.
+    const structured = result.structuredContent as
+      | { status?: string; data?: Report; presentation?: { omitted?: Record<string, number> } }
+      | undefined;
+    if (!structured?.data)
       throw new Error(`Installed MCP returned no ${role} briefing (${structured?.status}).`);
-    mcp = structured.result;
+    mcp = structured.data;
+    omitted = structured.presentation?.omitted ?? {};
   } finally {
     await client.close();
   }
-  for (const key of parityFields)
-    if (JSON.stringify(cli[key]) !== JSON.stringify(mcp[key]))
+  // Shortened lists (by path, including role.next and role.sections[i].items) must be exact
+  // CLI prefixes; everything else must be equal (src/mcp/parity.ts).
+  for (const key of parityFields) {
+    const difference = parityDifference(key, mcp[key], cli[key], omitted);
+    if (difference)
       throw new Error(
-        `Installed CLI and MCP disagree on ${key} for ${role} (${order}): CLI ${JSON.stringify(cli[key])} MCP ${JSON.stringify(mcp[key])}.`,
+        `Installed CLI and MCP disagree on ${key} for ${role} (${order}): ${difference}. CLI ${JSON.stringify(cli[key])} MCP ${JSON.stringify(mcp[key])}.`,
       );
+  }
   return rankedKinds(cli);
 }
 

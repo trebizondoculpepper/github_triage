@@ -16,7 +16,7 @@ import { collect, currentRepository, ghQueryWith, ghRest } from "./github/github
 import { dependencyReport } from "./github/dependencies.js";
 import { impactGuidanceSummary } from "./estimation/impact.js";
 import { readBriefing, readDependencies } from "./service.js";
-import { catchUp, catchUpLimits, catchUpText } from "./catchup.js";
+import { catchUp, catchUpLimits } from "./catchup.js";
 import { collectBriefing, WindowRefusal } from "./catchupcli.js";
 import { parseDuration } from "./github/changes.js";
 import {
@@ -36,6 +36,27 @@ import type { Environment } from "./config/harness.js";
 import { validateEntryKey } from "./config/identity.js";
 import { resolveReadIdentity } from "./config/readidentity.js";
 import type { ReadIdentity } from "./config/readidentity.js";
+import {
+  boundedEnvelope,
+  boundedError,
+  boundedResult,
+  fieldLimit,
+  truncationMarker,
+  budgetBytes,
+  budgetErrorCode,
+  resultBytes,
+  selectionSchema,
+} from "./mcp/bounded.js";
+import type { BoundedView, ToolResult } from "./mcp/bounded.js";
+import {
+  briefingView,
+  dependenciesView,
+  issueSections,
+  issueView,
+  repositoryBriefingView,
+  unavailableIssueView,
+} from "./mcp/views.js";
+import type { ViewBase } from "./mcp/views.js";
 import { installedVersion } from "./updates/updates.js";
 import { pickupOrders } from "./ranking.js";
 import { roleNames } from "./roles.js";
@@ -216,7 +237,18 @@ export const mcpCheckpointPolicy = {
     "Read-only MCP briefing: no checkpoint is read or advanced. Use the CLI with --checkpoint PATH to keep a cursor.",
   candidate: null,
 } as const;
-export const issueInput = z.strictObject({ number, repo, agent, maxChars });
+const offset = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).default(0);
+const pageLimit = z.number().int().min(1).max(100).default(10);
+/** Bounded issue detail (#266): summary by default; other sections are paged. */
+export const issueInput = z.strictObject({
+  number,
+  repo,
+  agent,
+  maxChars,
+  section: z.enum(issueSections).default("summary"),
+  offset,
+  limit: pageLimit,
+});
 export const eventsInput = z.strictObject({
   cursor: z.string().min(1).max(200).optional(),
   limit: z.number().int().min(1).max(100).default(20),
@@ -225,36 +257,26 @@ export const dependenciesInput = z.strictObject({
   number,
   repo,
   tree: z.boolean().default(false),
+  /** Page of the stable flattened relationship list (#266). */
+  offset,
+  limit: pageLimit,
 });
 
-const identitySource = z.enum([
-  "tool",
-  "startup",
-  "entry",
-  "harness",
-  "client",
-  "environment",
-  "unresolved",
-]);
-/** Versioned MCP envelope; `result` is the unchanged versioned CLI JSON. */
+/**
+ * Version-1 envelope, kept by triage_events (polling contract); `result` is its report. The read
+ * tools return the bounded version-2 envelope instead (doc/design/mcp-bounded-results.md).
+ */
 export const envelope = z.object({
   schemaVersion: z.literal(1),
-  kind: z.enum(["briefing", "repository-briefing", "issue", "dependencies", "events"]),
+  kind: z.enum(["events"]),
   status: z.enum(["complete", "incomplete", "error"]),
-  selection: z.object({
-    repository: z.string().nullable(),
-    agent: z.string().nullable(),
-    identitySource,
-    /** `[agents.KEY]` consulted for a persisted identity, if any. */
-    entry: z.string().nullable(),
-    triageRole: z.string().nullable(),
-    /** Why identity is unresolved (the read is unfocused), with recovery. */
-    identityDiagnostic: z.string().nullable(),
-  }),
+  selection: selectionSchema,
   result: z.record(z.string(), z.unknown()).nullable(),
   error: z.object({ code: z.string(), message: z.string() }).nullable(),
 });
 export type Envelope = z.infer<typeof envelope>;
+export { boundedEnvelope };
+export type { BoundedEnvelope } from "./mcp/bounded.js";
 
 const annotations = {
   readOnlyHint: true,
@@ -287,8 +309,8 @@ class Failure extends Error {
   }
 }
 
-type Kind = Envelope["kind"];
 type Selection = Envelope["selection"];
+type ReadView = BoundedView["view"];
 
 function toolResult(structured: Envelope, text: string) {
   return {
@@ -456,19 +478,22 @@ export function createServer(
         ? `Identity: ${selection.agent} from agent-inbox.toml [agents.${selection.entry}] (${selection.identitySource}).\n`
         : "";
 
-  /** Run one call with per-call selection, mapping failures to a sanitized error envelope. */
+  /**
+   * Run one read with per-call selection, then bound the whole result to the response budget
+   * (doc/design/mcp-bounded-results.md). Failures map to a sanitized version-2 error envelope.
+   */
   const call = async (
-    kind: Kind,
-    args: { repo?: string; agent?: string },
+    tool: string,
+    view: ReadView,
+    args: { repo?: string; agent?: string; number?: number },
     signal: AbortSignal,
+    maxChars: number,
     read: (selection: Selection & { repository: string }) => Promise<{
       status: "complete" | "incomplete";
-      result: Record<string, unknown>;
-      text: string;
-      /** Bound the rendered text (issue intake); structuredContent stays complete. */
-      maxChars?: number;
+      /** Build the view from redacted base inputs. */
+      build: (base: ViewBase, redact: <T>(value: T) => T) => BoundedView;
     }>,
-  ) => {
+  ): Promise<ToolResult> => {
     let selection: Selection = {
       repository: args.repo ?? options.repo ?? null,
       ...explicitSelection(args.agent, options.agent),
@@ -478,25 +503,18 @@ export function createServer(
       selection = selected;
       const outcome = await read(selected);
       if (signal.aborted) throw new Failure("cancelled");
-      const notice =
-        outcome.status === "incomplete"
-          ? "INCOMPLETE evidence: do not treat missing findings as clean or eligible.\n"
-          : "";
       // Diagnostics (e.g. config errors) can name local directories; never return them.
       const known = localPaths(options.project);
-      const body = redactPaths(outcome.text, known);
-      return toolResult(
-        {
-          schemaVersion: 1,
-          kind,
-          status: outcome.status,
-          selection,
-          result: redactPaths(outcome.result, known),
-          error: null,
-        },
-        outcome.maxChars === undefined
-          ? notice + identityNotice(selection) + body
-          : boundedIssueText(notice + identityNotice(selection) + body, outcome.maxChars),
+      const redact = <T>(value: T): T => redactPaths(value, known);
+      // The INCOMPLETE notice is added by boundedResult from the view's final status.
+      const notices = identityNotice(selection)
+        ? [redact(identityNotice(selection).trimEnd())]
+        : [];
+      return boundedResult(
+        outcome.build(
+          { repository: selected.repository, selection, status: outcome.status, notices, maxChars },
+          redact,
+        ),
       );
     } catch (error) {
       const code: FailureCode =
@@ -505,17 +523,7 @@ export function createServer(
           : signal.aborted
             ? "cancelled"
             : "collection-failed";
-      return toolResult(
-        {
-          schemaVersion: 1,
-          kind,
-          status: "error",
-          selection,
-          result: null,
-          error: { code, message: failures[code] },
-        },
-        `Error (${code}): ${failures[code]}\n`,
-      );
+      return errorResult(tool, view, selection, args.number, code, failures[code]);
     }
   };
 
@@ -526,58 +534,70 @@ export function createServer(
       description:
         'Datalog next actions by default (implementer view unless role is supplied). Explicit TypeScript rollback: pdb config set briefing.engine typescript. Evidence-linked action briefing for a GitHub repository: what needs attention and what to pick up next. Call at the start of work or with since to catch up. mode "briefing" returns the repository-wide what-changed report for a window (since, or last such as 24h; default last 24h); it never reads or advances a checkpoint. Actions default to ten next steps; catch-up defaults to five rows per section. In actions mode, role (implementer or designer) returns the blended queue for that role (rankedActions, role.next, estimation, impactEstimation) exactly as the CLI --role, and order (impact, oldest, newest) matches CLI --order.',
       inputSchema: briefingInput,
-      outputSchema: envelope,
+      outputSchema: boundedEnvelope,
       annotations,
     },
     async (args, ctx) =>
       args.mode === "briefing"
-        ? call("repository-briefing", args, ctx.mcpReq.signal, async (selection) => {
-            const now = runtime.now ?? (() => new Date());
-            let snapshot;
-            try {
-              ({ snapshot } = await collectBriefing(
-                runtime.collect,
-                selection.repository,
-                { since: args.since, last: args.last },
+        ? call(
+            "triage_briefing",
+            "repository-briefing",
+            args,
+            ctx.mcpReq.signal,
+            args.maxChars,
+            async (selection) => {
+              const now = runtime.now ?? (() => new Date());
+              let snapshot;
+              try {
+                ({ snapshot } = await collectBriefing(
+                  runtime.collect,
+                  selection.repository,
+                  { since: args.since, last: args.last },
+                  now,
+                  ctx.mcpReq.signal,
+                ));
+              } catch (error) {
+                if (error instanceof WindowRefusal) throw new Failure("invalid-window");
+                throw error;
+              }
+              const built = catchUp(snapshot, {
+                agent: selection.agent ?? undefined,
+                limit: args.limit ?? (args.mode === "briefing" ? catchUpLimits.limit.default : 10),
                 now,
-                ctx.mcpReq.signal,
-              ));
-            } catch (error) {
-              if (error instanceof WindowRefusal) throw new Failure("invalid-window");
-              throw error;
-            }
-            const built = catchUp(snapshot, {
-              agent: selection.agent ?? undefined,
-              limit: args.limit ?? (args.mode === "briefing" ? catchUpLimits.limit.default : 10),
-              now,
-            });
-            // Completeness as the CLI judges it, before the checkpoint candidate is withheld.
-            const complete = built.checkpoint.candidate !== null;
-            const report = { ...built, offline: null, checkpoint: mcpCheckpointPolicy };
-            return {
-              status: complete ? "complete" : "incomplete",
-              result: plain(report),
-              text: catchUpText(report, args.maxChars),
-            };
-          })
-        : call("briefing", args, ctx.mcpReq.signal, async (selection) => {
-            const read = await readBriefing(reader, {
-              repository: selection.repository,
-              agent: selection.agent ?? undefined,
-              since: args.since ? new Date(args.since).toISOString() : undefined,
-              limit: args.limit ?? (args.mode === "briefing" ? catchUpLimits.limit.default : 10),
-              maxChars: args.maxChars,
-              role: args.role,
-              order: args.order ?? "impact",
-              signal: ctx.mcpReq.signal,
-            });
-            if (read.kind === "unavailable") throw new Failure("collection-failed");
-            return {
-              status: read.complete ? "complete" : "incomplete",
-              result: plain(read.report),
-              text: read.text,
-            };
-          }),
+              });
+              // Completeness as the CLI judges it, before the checkpoint candidate is withheld.
+              const complete = built.checkpoint.candidate !== null;
+              const report = { ...built, offline: null, checkpoint: mcpCheckpointPolicy };
+              return {
+                status: complete ? "complete" : "incomplete",
+                build: (base, redact) => repositoryBriefingView(base, redact(plain(report))),
+              };
+            },
+          )
+        : call(
+            "triage_briefing",
+            "briefing",
+            args,
+            ctx.mcpReq.signal,
+            args.maxChars,
+            async (selection) => {
+              const read = await readBriefing(reader, {
+                repository: selection.repository,
+                agent: selection.agent ?? undefined,
+                since: args.since ? new Date(args.since).toISOString() : undefined,
+                limit: args.limit ?? (args.mode === "briefing" ? catchUpLimits.limit.default : 10),
+                maxChars: args.maxChars,
+                role: args.role,
+                order: args.order ?? "impact",
+                signal: ctx.mcpReq.signal,
+              });
+              if (read.kind === "unavailable") throw new Failure("collection-failed");
+              return {
+                status: read.complete ? "complete" : "incomplete",
+                build: (base, redact) => briefingView(base, redact(plain(read.report))),
+              };
+            },
+          ),
   );
 
   server.registerTool(
@@ -585,13 +605,13 @@ export function createServer(
     {
       title: "Triage issue intake",
       description:
-        "Full intake for one issue: body, history, dependencies and ownership evidence, even if closed. Diagnoses transferred, missing or inaccessible issues. Call before working on a ticket.",
+        "Bounded intake for one issue, even if closed: section summary (default: state, labels, ownership, assessments, findings, dependencies and counts), or a page (offset, limit) of body lines, discussion comments or related pull requests. Diagnoses transferred, missing or inaccessible issues. Call before working on a ticket.",
       inputSchema: issueInput,
-      outputSchema: envelope,
+      outputSchema: boundedEnvelope,
       annotations,
     },
     async (args, ctx) =>
-      call("issue", args, ctx.mcpReq.signal, async (selection) => {
+      call("triage_issue", "issue", args, ctx.mcpReq.signal, args.maxChars, async (selection) => {
         const read = await readBriefing(reader, {
           repository: selection.repository,
           agent: selection.agent ?? undefined,
@@ -603,15 +623,30 @@ export function createServer(
         if (read.kind === "unavailable")
           return {
             status: "incomplete",
-            result: plain({ schemaVersion: 1, kind: "issue-unavailable", ...read.diagnosis }),
-            text: read.text,
-            maxChars: args.maxChars,
+            build: (base, redact) =>
+              unavailableIssueView(
+                base,
+                args.number,
+                redact(plain(read.diagnosis)),
+                redact(read.text),
+              ),
           };
+        const page = { offset: args.offset, limit: args.limit };
+        const navigation = {
+          ...(args.repo ? { repo: args.repo } : {}),
+          ...(args.agent ? { agent: args.agent } : {}),
+        };
         return {
           status: read.complete ? "complete" : "incomplete",
-          result: plain(read.report),
-          text: read.text,
-          maxChars: args.maxChars,
+          build: (base, redact) =>
+            issueView(
+              base,
+              redact(plain(read.report)),
+              args.number,
+              args.section,
+              page,
+              navigation,
+            ),
         };
       }),
   );
@@ -621,22 +656,40 @@ export function createServer(
     {
       title: "Native issue dependencies",
       description:
-        "Native GitHub blocked-by/blocking relationships for one issue; with tree, the transitive graph and cycles. Call before claiming or ordering work.",
+        "Native GitHub blocked-by/blocking relationships for one issue as a paged (offset, limit) list with relation, depth and path; with tree, the transitive graph and cycles. Call before claiming or ordering work.",
       inputSchema: dependenciesInput,
-      outputSchema: envelope,
+      outputSchema: boundedEnvelope,
       annotations,
     },
     async (args, ctx) =>
-      call("dependencies", { repo: args.repo }, ctx.mcpReq.signal, async (selection) => {
-        const read = await readDependencies(
-          runtime,
-          selection.repository,
-          args.number,
-          args.tree,
-          ctx.mcpReq.signal,
-        );
-        return { status: "complete", result: plain(read.report), text: read.text };
-      }),
+      call(
+        "triage_dependencies",
+        "dependencies",
+        { repo: args.repo, number: args.number },
+        ctx.mcpReq.signal,
+        10000,
+        async (selection) => {
+          const read = await readDependencies(
+            runtime,
+            selection.repository,
+            args.number,
+            args.tree,
+            ctx.mcpReq.signal,
+          );
+          const navigation = { ...(args.repo ? { repo: args.repo } : {}), tree: args.tree };
+          return {
+            status: "complete",
+            build: (base, redact) =>
+              dependenciesView(
+                base,
+                redact(plain(read.report)),
+                args.number,
+                { offset: args.offset, limit: args.limit },
+                navigation,
+              ),
+          };
+        },
+      ),
   );
 
   server.registerTool(
@@ -651,49 +704,93 @@ export function createServer(
     },
     async (args, ctx) => {
       const watcher = runtime.watcher ?? null;
-      const report = eventsReport(watcher, args.cursor, args.limit);
       const repository = watcher?.repository ?? null;
-      const structured: Envelope = {
-        schemaVersion: 1,
-        kind: "events",
-        status: ctx.mcpReq.signal.aborted ? "error" : report.complete ? "complete" : "incomplete",
-        selection: { repository, ...explicitSelection(undefined, options.agent) },
-        result: ctx.mcpReq.signal.aborted
-          ? null
-          : redactPaths(plain(report), localPaths(options.project)),
-        error: ctx.mcpReq.signal.aborted
-          ? { code: "cancelled", message: failures.cancelled }
-          : null,
+      // The startup agent is echoed; an over-long one is shortened, and the text says so.
+      const echoed = explicitSelection(undefined, options.agent);
+      const shortenedAgent = echoed.agent !== null && echoed.agent.length > fieldLimit;
+      const selection = {
+        repository,
+        ...echoed,
+        agent: shortenedAgent
+          ? `${echoed.agent!.slice(0, fieldLimit - truncationMarker.length)}${truncationMarker}`
+          : echoed.agent,
       };
-      return toolResult(
-        structured,
-        structured.error
-          ? `Error (cancelled): ${failures.cancelled}\n`
-          : redactPaths(eventsText(report), localPaths(options.project)),
-      );
+      const echoNotice = shortenedAgent
+        ? `Startup agent longer than ${fieldLimit} characters shortened (${truncationMarker}).\n`
+        : "";
+      if (ctx.mcpReq.signal.aborted)
+        return toolResult(
+          {
+            schemaVersion: 1,
+            kind: "events",
+            status: "error",
+            selection,
+            result: null,
+            error: { code: "cancelled", message: failures.cancelled },
+          },
+          `Error (cancelled): ${failures.cancelled}\n`,
+        );
+      // The same whole-result budget as the read tools (#266). A smaller page is re-read from
+      // the log, so nextCursor and more stay exact and no event is skipped.
+      for (let limit = args.limit; ; limit = Math.floor(limit / 2)) {
+        const report = eventsReport(watcher, args.cursor, limit);
+        const reduced =
+          limit < args.limit
+            ? `Page reduced from ${args.limit} to ${limit} event(s) to fit the ${budgetBytes}-byte response budget; continue from nextCursor.\n`
+            : "";
+        const result = toolResult(
+          {
+            schemaVersion: 1,
+            kind: "events",
+            status: report.complete ? "complete" : "incomplete",
+            selection,
+            result: redactPaths(plain(report), localPaths(options.project)),
+            error: null,
+          },
+          echoNotice + reduced + redactPaths(eventsText(report), localPaths(options.project)),
+        );
+        if (resultBytes(result) <= budgetBytes) return result;
+        if (limit <= 1) {
+          const message = `One event exceeds the ${budgetBytes}-byte response budget. Recovery: call triage_briefing for current evidence.`;
+          return toolResult(
+            {
+              schemaVersion: 1,
+              kind: "events",
+              status: "error",
+              selection,
+              result: null,
+              error: { code: budgetErrorCode, message },
+            },
+            `Error (${budgetErrorCode}): ${message}\n`,
+          );
+        }
+      }
     },
   );
 
   return server;
 }
 
-const detailMarker = "\nFULL ISSUE DETAIL\n";
-const detailNotice =
-  "\nFull issue intake (body, history, dependencies, ownership) omitted from text; it is in structuredContent.result.detail.\n";
-const truncatedNotice =
-  "\nText truncated at maxChars; the complete intake is in structuredContent.result.\n";
-
-/**
- * MCP text for an issue intake, bounded by maxChars (doc/design/mcp.md: concise text with a
- * detail/omission notice). The CLI appends the full serialized detail after its budget checks;
- * here that detail stays only in structuredContent, so text never duplicates it unbounded.
- */
-export function boundedIssueText(text: string, maxChars: number): string {
-  const at = text.indexOf(detailMarker);
-  const head = at === -1 ? text : `${text.slice(0, at).trimEnd()}\n`;
-  const tail = at === -1 ? "" : detailNotice;
-  if (head.length + tail.length <= maxChars) return head + tail;
-  return `${head.slice(0, maxChars - tail.length - truncatedNotice.length)}${truncatedNotice}${tail}`;
+/** Sanitized version-2 error result for a read tool, bounded like every other result. */
+function errorResult(
+  tool: string,
+  view: ReadView,
+  selection: Selection,
+  number: number | undefined,
+  code: string,
+  message: string,
+): ToolResult {
+  return boundedError({
+    tool,
+    view,
+    repository: selection.repository,
+    subject: number === undefined ? null : { type: "issue", number },
+    selection,
+    freshness: null,
+    sourceCompleteness: null,
+    code,
+    message,
+  });
 }
 
 /** Production boundaries: authenticated gh through the existing argument-array runners. */
