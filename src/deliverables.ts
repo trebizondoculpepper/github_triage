@@ -123,7 +123,8 @@ export type DeliverablesResult = DeliverablesPlan & {
 /** Comment pages read at most (100 each), so a long discussion costs a bounded number of requests. */
 export const deliveryCommentPages = 10;
 
-const commentFields =
+/** Comment fields the delivery fold needs: ids and creation times order it, author/edit decide trust. */
+export const deliveryCommentFields =
   "databaseId url body createdAt author{__typename login} lastEditedAt includesCreatedEdit editor{__typename login}";
 interface CommentPage {
   nodes: DeliveryComment[];
@@ -171,7 +172,7 @@ export async function readDeliveryComments(
     if (await enough(comments)) return { comments, complete: true, pages };
     if (!info.startCursor || pages >= bound) return { comments, complete: false, pages };
     const data = (await query(
-      `query($owner:String!,$name:String!,$number:Int!,$before:String!){repository(owner:$owner,name:$name){issue(number:$number){comments(last:100,before:$before){nodes{${commentFields}} pageInfo{hasPreviousPage startCursor}}}}}`,
+      `query($owner:String!,$name:String!,$number:Int!,$before:String!){repository(owner:$owner,name:$name){issue(number:$number){comments(last:100,before:$before){nodes{${deliveryCommentFields}} pageInfo{hasPreviousPage startCursor}}}}}`,
       { owner, name, number, before: info.startCursor },
     )) as { repository: { issue: { comments: CommentPage } | null } | null };
     const older = data.repository?.issue?.comments;
@@ -187,22 +188,23 @@ export async function readDeliveryComments(
 async function readIssue(repository: string, number: number, query: GraphQuery) {
   const [owner, name] = repository.split("/");
   const data = (await query(
-    `query($owner:String!,$name:String!,$number:Int!){viewer{__typename login} repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on PullRequest{url} ... on Issue{number title url state labels(first:100){nodes{name} pageInfo{hasNextPage}} closedByPullRequestsReferences(first:20,includeClosedPrs:false){nodes{number url state} pageInfo{hasNextPage}} comments(last:100){nodes{${commentFields}} pageInfo{hasPreviousPage startCursor}}}}}}`,
+    `query($owner:String!,$name:String!,$number:Int!){viewer{__typename login} repository(owner:$owner,name:$name){issueOrPullRequest(number:$number){__typename ... on PullRequest{url} ... on Issue{number title url state labels(first:100){nodes{name} pageInfo{hasNextPage}} closedByPullRequestsReferences(first:20,includeClosedPrs:false){nodes{number url state} pageInfo{hasNextPage}} comments(last:100){nodes{${deliveryCommentFields}} pageInfo{hasPreviousPage startCursor}}}}}}`,
     { owner, name, number },
   )) as IssueResponse;
   if (!data.repository) throw new Error(`Repository unavailable: ${repository}`);
   return { viewer: data.viewer ?? null, item: data.repository.issueOrPullRequest };
 }
 
-const prUrl = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)\/?$/;
+export const prUrl = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)\/?$/;
 const commitRef = /^([\w.-]+\/[\w.-]+)@([0-9a-f]{7,40})$/i;
 const sameRepo = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 
-interface LivePr {
+export interface LivePr {
   id: string;
   number: number;
   url: string;
   state: string;
+  isDraft?: boolean;
   merged: boolean;
   mergeCommit: { oid: string } | null;
   headRefOid: string;
@@ -212,10 +214,10 @@ interface LivePr {
     nodes: { number: number; repository: { nameWithOwner: string } }[];
   };
 }
-async function readPr(url: string, query: GraphQuery): Promise<LivePr | null> {
+export async function readPr(url: string, query: GraphQuery): Promise<LivePr | null> {
   try {
     const data = (await query(
-      `query($url:URI!){resource(url:$url){__typename ... on PullRequest{id number url state merged mergeCommit{oid} headRefOid baseRefName baseRepository{nameWithOwner defaultBranchRef{name}} closingIssuesReferences(first:50){nodes{number repository{nameWithOwner}}}}}}`,
+      `query($url:URI!){resource(url:$url){__typename ... on PullRequest{id number url state isDraft merged mergeCommit{oid} headRefOid baseRefName baseRepository{nameWithOwner defaultBranchRef{name}} closingIssuesReferences(first:50){nodes{number repository{nameWithOwner}}}}}}`,
       { url },
     )) as { resource: ({ __typename: string } & Partial<LivePr>) | null };
     const r = data.resource;
@@ -226,7 +228,7 @@ async function readPr(url: string, query: GraphQuery): Promise<LivePr | null> {
     return null;
   }
 }
-async function defaultBranch(repository: string, query: GraphQuery): Promise<string | null> {
+export async function defaultBranch(repository: string, query: GraphQuery): Promise<string | null> {
   const [owner, name] = repository.split("/");
   try {
     const data = (await query(
@@ -256,17 +258,38 @@ async function readCommit(repository: string, oid: string, query: GraphQuery) {
   }
 }
 
+/** One live containment compare of a commit against a target branch head. */
+export interface Containment {
+  /** `contained` and `absent` are positive evidence; anything inconclusive is `unknown`. */
+  state: "contained" | "absent" | "unknown";
+  /** The branch compared against (the live default branch when the target names none). */
+  branch: string | null;
+  /** The compare API's status, when one was returned. */
+  status: string | null;
+  why: string;
+}
+
 /**
- * Live containment of a commit in the target branch head (the compare API): contained is
- * `merged`; positively not contained is `outstanding`; anything else is `unknown`.
+ * Live containment of a commit in the target branch head (the compare API, base = the branch,
+ * head = the commit): `identical` or `behind` is contained, `ahead` or `diverged` is positively
+ * absent, and an error, a missing or unreadable branch or an unexpected status is unknown. The
+ * default branch is read live unless `branchOf` supplies this read's own live answer; a branch
+ * recorded or cached elsewhere is never substituted.
  */
-async function contained(
+export async function targetContainment(
   target: DeliveryTarget,
   oid: string,
-  rt: DeliverablesRuntime,
-): Promise<MemberObservation> {
-  const branch = target.branch ?? (await defaultBranch(target.repository, rt.query));
-  if (!branch) return "unknown";
+  rt: Pick<DeliverablesRuntime, "query" | "rest">,
+  branchOf: (repository: string) => Promise<string | null> = (r) => defaultBranch(r, rt.query),
+): Promise<Containment> {
+  const branch = target.branch ?? (await branchOf(target.repository));
+  if (!branch)
+    return {
+      state: "unknown",
+      branch: null,
+      status: null,
+      why: `the default branch of ${target.repository} could not be read`,
+    };
   try {
     const answer = await rt.rest(
       `repos/${target.repository}/compare/${encodeURIComponent(branch)}...${oid}`,
@@ -275,13 +298,34 @@ async function contained(
       answer.status === 200 && typeof answer.body === "object" && answer.body !== null
         ? (answer.body as { status?: unknown }).status
         : undefined;
-    if (status === "identical" || status === "behind") return "merged";
-    if (status === "ahead" || status === "diverged") return "outstanding";
-    return "unknown";
-  } catch {
-    return "unknown";
+    const text = typeof status === "string" ? status : null;
+    if (status === "identical" || status === "behind")
+      return { state: "contained", branch, status: text, why: `contained in ${branch}` };
+    if (status === "ahead" || status === "diverged")
+      return { state: "absent", branch, status: text, why: `not contained in ${branch} (${text})` };
+    return {
+      state: "unknown",
+      branch,
+      status: text,
+      why: `the compare against ${target.repository}:${branch} was inconclusive (${answer.status === 200 ? `status ${text ?? "missing"}` : `HTTP ${answer.status ?? "error"}`})`,
+    };
+  } catch (error) {
+    return {
+      state: "unknown",
+      branch,
+      status: null,
+      why: `the compare against ${target.repository}:${branch} failed (${error instanceof Error ? error.message : "unknown error"})`,
+    };
   }
 }
+const contained = async (
+  target: DeliveryTarget,
+  oid: string,
+  rt: DeliverablesRuntime,
+): Promise<MemberObservation> => {
+  const c = await targetContainment(target, oid, rt);
+  return c.state === "contained" ? "merged" : c.state === "absent" ? "outstanding" : "unknown";
+};
 /** Live state of one member for attestation applicability; only positive evidence decides. */
 async function observe(d: Deliverable, rt: DeliverablesRuntime): Promise<MemberObservation> {
   if (d.kind === "commit") return contained(d.target, d.oid, rt);
@@ -295,7 +339,7 @@ async function observe(d: Deliverable, rt: DeliverablesRuntime): Promise<MemberO
 }
 
 /** A trusted v1 `done` release record on the issue (doc "Legacy attachment", eligibility). */
-async function legacyRelease(
+export async function legacyRelease(
   comments: DeliveryComment[],
   trust: TrustDecision,
 ): Promise<{ trusted: DeliveryComment | null; unverified: string[] }> {

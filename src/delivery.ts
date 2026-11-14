@@ -74,7 +74,21 @@ export interface DeliveryRecord {
   observedLabels?: string[];
   evaluationRevision?: string;
   evaluatedAt?: string;
+  /** complete: the verdict and per-member evidence the decision was made on (audit only). */
+  verdict?: "delivered" | "attested";
+  snapshot?: EvidenceSnapshot[];
   issuedAt: string;
+}
+
+/** One member's live evidence as `complete` saw it; history for audit, never evidence later. */
+export interface EvidenceSnapshot {
+  deliverable: string;
+  state: string;
+  target: string;
+  /** The branch the containment compare ran against, when one ran. */
+  branch?: string | null;
+  mergeCommit?: string | null;
+  compare?: string | null;
 }
 
 /**
@@ -226,8 +240,20 @@ export function deliveryRecordProblem(v: unknown): string | null {
       if (!isString(v.voids)) return "void names no comment";
       break;
     case "complete":
-      if (!isString(v.evaluationRevision) || !isString(v.evaluatedAt))
+      if (
+        !isString(v.evaluationRevision) ||
+        !isString(v.evaluatedAt) ||
+        Number.isNaN(Date.parse(v.evaluatedAt))
+      )
         return "complete has no evaluation revision or time";
+      if (v.verdict !== undefined && v.verdict !== "delivered" && v.verdict !== "attested")
+        return "complete verdict is neither delivered nor attested";
+      if (
+        v.snapshot !== undefined &&
+        (!Array.isArray(v.snapshot) ||
+          !v.snapshot.every((e) => isObject(e) && isString(e.deliverable) && isString(e.state)))
+      )
+        return "complete snapshot is not a list of member evidence";
       break;
     default:
       break;
