@@ -12,7 +12,10 @@ import type { EngineSetting, DecisionEngineMetadata } from "./config/engine-sett
  * in their own modules and are never reachable through this service.
  */
 import { collect, IssueUnavailable, permissionLookup } from "./github/github.js";
-import type { IssueDiagnosis, Rest } from "./github/github.js";
+import type { IssueDiagnosis, Query, Rest } from "./github/github.js";
+import { diagnoseDelivery } from "./deliverydoctor.js";
+import { deliveryRead } from "./deliveryread.js";
+import type { DeliveryRead } from "./deliveryread.js";
 import { markerTrust } from "./delivery.js";
 import { readSnapshotResponsibility } from "./responsibility.js";
 import type { TrustDecision } from "./delivery.js";
@@ -47,6 +50,11 @@ export interface PresentOptions extends Omit<BriefingOptions, "estimation" | "as
 export interface PresentedBriefing {
   report: (ReturnType<typeof compactBriefing> | ReturnType<typeof briefing>) & {
     decisionEngine: DecisionEngineMetadata;
+    /**
+     * #192: delivery, responsibility and closure, present only when a collected ticket carries a
+     * delivery or v1 release record (or its history is truncated). Absent means none in scope.
+     */
+    delivery?: DeliveryRead;
   };
   text: string;
   complete: boolean;
@@ -64,6 +72,8 @@ export async function presentBriefing(
   loadEngine: () => Promise<
     Pick<typeof import("./rules/datalog/datalog.js"), "evaluateDatalog">
   > = () => import("./rules/datalog/datalog.js"),
+  /** #192: live PR and compare reads for delivery; absent (offline) means not evaluated. */
+  live?: { query: Query; rest: Rest },
 ): Promise<PresentedBriefing> {
   // Sizes come from the snapshot's labels (#152); only configuration is read here.
   const collected = await collectLabelEstimationInput(snapshot.repository, estimationRuntime);
@@ -162,17 +172,42 @@ export async function presentBriefing(
         coverage: { scope: options.full || options.issue ? "intake" : "next-actions" },
         diagnostics: [],
       };
-  const report = { ...(compact ?? expanded), decisionEngine };
+  // #192: one shared fold/evaluator read for CLI and MCP; an issue intake shows its own ticket.
+  // An explicit intake evaluates only its own ticket, so the evaluation cap never skips it.
+  const scoped = options.issue
+    ? { ...snapshot, issues: snapshot.issues.filter((i) => i.number === options.issue) }
+    : snapshot;
+  const delivery = deliveryRead(scoped, await diagnoseDelivery(scoped, { trust, live, signal }));
+  const base = compact ?? expanded;
+  const report = {
+    ...base,
+    // Delivery omissions (the evaluation cap) make the briefing incomplete, never silently clean.
+    completeness: delivery.complete
+      ? base.completeness
+      : {
+          ...base.completeness,
+          complete: false,
+          warnings: [...base.completeness.warnings, ...delivery.omissions],
+        },
+    decisionEngine,
+    ...(delivery.tickets.length || !delivery.complete ? { delivery } : {}),
+  };
   const engineHeader = experimental
     ? `Decision engine: Datalog (policy ${experimental.decisionEngine.policyVersion}; ${experimental.decisionEngine.rulesHash.slice(0, 12)})\n`
     : "";
+  // Delivery omissions reach the text through the renderers' own bounded INCOMPLETE warnings
+  // (a few lines plus "N more warning(s) omitted; use --json"), inside the same budget as the
+  // ranked steps. The JSON keeps every warning.
   return {
     report,
     text:
       engineHeader +
       (compact
-        ? compactText(compact, Math.max(0, options.maxChars - engineHeader.length))
-        : textReport(expanded)),
+        ? compactText(
+            { ...compact, completeness: report.completeness },
+            Math.max(0, options.maxChars - engineHeader.length),
+          )
+        : textReport({ ...expanded, completeness: report.completeness })),
     complete: report.completeness.complete,
   };
 }
@@ -187,6 +222,10 @@ export interface ReadRuntime {
    * Absent means no permission requests: trusted provenance is then reported as unknown.
    */
   rest?: Rest;
+  /** #192: live GraphQL reads for delivery evidence; absent means delivery is not evaluated. */
+  query?: Query;
+  /** #192: GraphQL bound to a request's cancellation signal (production: `ghQueryWith`). */
+  queryWith?: (signal?: AbortSignal) => Query;
   /** Clock for freshness ages; defaults to the system clock. */
   now?: () => Date;
   /** Rewrites locally generated diagnostics (not GitHub evidence) for remote consumers. */
@@ -268,6 +307,15 @@ export async function readBriefing(
       ? markerTrust(permissionLookup(request.repository, runtime.rest, request.signal))
       : undefined,
     request.signal,
+    undefined,
+    // Delivery requests are bound to the request's cancellation signal, like collection.
+    runtime.rest && (runtime.queryWith || runtime.query)
+      ? {
+          query: runtime.queryWith ? runtime.queryWith(request.signal) : runtime.query!,
+          rest: (path, options) =>
+            runtime.rest!(path, { ...options, signal: options?.signal ?? request.signal }),
+        }
+      : undefined,
   );
   return { kind: "report", ...presented };
 }

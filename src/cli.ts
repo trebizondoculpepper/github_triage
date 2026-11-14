@@ -28,6 +28,19 @@ import { pullRequestReviewHistory, reviewHistoryText } from "./reviewhistory.js"
 import { doctorStaleHours, ticketDoctor, ticketDoctorText } from "./ticketdoctor.js";
 import { diagnoseClosedDrift, diagnoseDelivery } from "./deliverydoctor.js";
 import {
+  deliveryFields,
+  deliveryLines,
+  deliveryRead,
+  prDelivery,
+  prDeliveryLines,
+  omissionLines,
+  readIssuesDelivery,
+  reportFollowUpFacts,
+  withDeliveryCompleteness,
+  teamResponsibilities,
+  teamResponsibilityLines,
+} from "./deliveryread.js";
+import {
   applyPlan,
   claimPolicy,
   claimText,
@@ -568,13 +581,26 @@ export async function checkpointSince(
     throw error;
   }
 }
+/** #192: per-run delivery boundaries; offline, or without injected ones, nothing is read. */
+const deliveryBoundaries = (runtime: Runtime, repository: string, offline: boolean) =>
+  !offline && runtime.rest && runtime.query
+    ? {
+        trust: markerTrust(permissionLookup(repository, runtime.rest)),
+        live: { query: runtime.query, rest: runtime.rest },
+      }
+    : {};
+
+/** Appends lines to a text report that ends with a newline (unchanged when there are none). */
+const appendLines = (text: string, lines: string[]): string =>
+  lines.length ? `${text.replace(/\n$/, "")}\n${lines.join("\n")}\n` : text;
+
 export async function main(
   args: string[],
   output: Output = (text) =>
     new Promise<void>((resolve, reject) =>
       process.stdout.write(text, (error) => (error ? reject(error) : resolve())),
     ),
-  runtime: Runtime = { collect, currentRepository, dependencyReport, rest: ghRest },
+  runtime: Runtime = { collect, currentRepository, dependencyReport, rest: ghRest, query: ghQuery },
 ): Promise<number> {
   // Version check (#51, cached daily per user by #65): runs alongside the command, bounded by a short timeout, and reports
   // only on stderr so JSON on stdout stays valid. --offline and opt-outs mean no network.
@@ -717,8 +743,17 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
       offline: !!values.offline,
       impactEnabled: impact !== "disabled",
     });
-    await output(values.json ? JSON.stringify(report, null, 2) + "\n" : ticketDoctorText(report));
-    return report.completeness.complete ? 0 : 2;
+    // #192: the same delivery block as the briefing, for tickets with delivery evidence.
+    const read = deliveryRead(snapshot, delivery);
+    // Per-ticket coverage gaps join the scan's completeness, as on every read surface.
+    const coverage = read.omissions.filter((o) => !delivery.warnings.includes(o));
+    const doctor = withDeliveryCompleteness(report, {
+      complete: !coverage.length,
+      omissions: coverage,
+    });
+    const json = read.tickets.length ? { ...doctor, delivery: read } : doctor;
+    await output(values.json ? JSON.stringify(json, null, 2) + "\n" : ticketDoctorText(doctor));
+    return doctor.completeness.complete ? 0 : 2;
   }
   if (args[0] === "submit" || args[0] === "deliverables") {
     const submit = args[0] === "submit";
@@ -869,8 +904,31 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
       now: runtime.now?.() ?? new Date(),
       offline: !!values.offline,
     });
-    await output(values.json ? JSON.stringify(view, null, 2) + "\n" : teamText(view));
-    return view.completeness.complete ? 0 : 2;
+    // #192: responsibilities per agent (S18 inventory), including agents with no claim.
+    const read = deliveryRead(
+      snapshot,
+      await diagnoseDelivery(
+        snapshot,
+        deliveryBoundaries(runtime, snapshot.repository, !!values.offline),
+      ),
+    );
+    const report = withDeliveryCompleteness(
+      read.tickets.length || !read.complete
+        ? { ...view, agents: teamResponsibilities(view.agents, read), delivery: read }
+        : view,
+      read,
+    );
+    await output(
+      values.json
+        ? JSON.stringify(report, null, 2) + "\n"
+        : appendLines(teamText(view), [
+            ...(read.tickets.length
+              ? teamResponsibilityLines(report.agents, read, runtime.now?.() ?? new Date())
+              : []),
+            ...omissionLines(read),
+          ]),
+    );
+    return report.completeness.complete ? 0 : 2;
   }
   if (args[0] === "who") {
     const { values, positionals } = parseArgs({
@@ -900,13 +958,34 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
           issue: number,
         });
     if (!values.offline && values.cache) await atomicJson(values.cache, snapshot);
-    const report = ticketOwnership(snapshot, number, {
+    const ownership = ticketOwnership(snapshot, number, {
       staleHours,
       now: runtime.now?.() ?? new Date(),
       offline: !!values.offline,
     });
+    // #192: delivery, responsibility and closure from the shared fold and evaluator.
+    // Only the requested issue is evaluated, so the evaluation cap can never skip it.
+    const scoped = { ...snapshot, issues: snapshot.issues.filter((i) => i.number === number) };
+    const read = deliveryRead(
+      scoped,
+      await diagnoseDelivery(
+        scoped,
+        deliveryBoundaries(runtime, snapshot.repository, !!values.offline),
+      ),
+    );
+    const view = read.tickets.find((t) => t.number === number) ?? null;
+    const issue = scoped.issues[0];
+    const report = withDeliveryCompleteness(
+      issue ? { ...ownership, ...deliveryFields(issue, view) } : ownership,
+      read,
+    );
     await output(
-      values.json ? JSON.stringify(report, null, 2) + "\n" : ticketOwnershipText(report),
+      values.json
+        ? JSON.stringify(report, null, 2) + "\n"
+        : appendLines(ticketOwnershipText(ownership), [
+            ...deliveryLines(view),
+            ...omissionLines(read),
+          ]),
     );
     return report.completeness.complete ? 0 : 2;
   }
@@ -968,12 +1047,41 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
       );
       return history.completeness.complete ? 0 : 2;
     }
-    const report = await pullRequestStatus(
+    const status = await pullRequestStatus(
       repository,
       Number(positionals[0]),
       runtime.query ?? ghQuery,
     );
-    await output(values.json ? JSON.stringify(report, null, 2) + "\n" : prStatusText(report));
+    // #192: delivery and responsibility for the issues this PR is linked to close.
+    const live = deliveryBoundaries(runtime, repository, false);
+    // Keep each linked issue's repository: a PR may close an issue elsewhere.
+    const linked = status.linkedIssues.map((i) => {
+      const m = i.url.match(/^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/issues\/\d+/);
+      return { number: i.number, repository: m ? m[1] : "(unknown repository)" };
+    });
+    const local = linked.filter((i) => i.repository.toLowerCase() === repository.toLowerCase());
+    const foreign = linked.filter((i) => i.repository.toLowerCase() !== repository.toLowerCase());
+    const delivery =
+      live.trust && live.live
+        ? prDelivery(
+            status.pullRequest.url,
+            reportFollowUpFacts(status),
+            status.pullRequest.state === "OPEN",
+            await readIssuesDelivery(
+              repository,
+              local.map((i) => i.number),
+              { ...live.live, trust: live.trust },
+            ),
+            repository,
+            foreign,
+          )
+        : null;
+    const report = withDeliveryCompleteness(delivery ? { ...status, delivery } : status, delivery);
+    await output(
+      values.json
+        ? JSON.stringify(report, null, 2) + "\n"
+        : appendLines(prStatusText(status), delivery ? prDeliveryLines(delivery) : []),
+    );
     return report.completeness.complete ? 0 : 2;
   }
   if (args[0] === "deps") {
@@ -1088,6 +1196,12 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
     // request, so trusted provenance is then unknown. Without an injected boundary, likewise.
     !options.offline && runtime.rest
       ? markerTrust(permissionLookup(snapshot.repository, runtime.rest))
+      : undefined,
+    undefined,
+    undefined,
+    // #192: delivery evidence is read live only on a live read with both boundaries.
+    !options.offline && runtime.rest && runtime.query
+      ? { query: runtime.query, rest: runtime.rest }
       : undefined,
   );
   const checkpoint = options.checkpoint

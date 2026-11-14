@@ -70,6 +70,8 @@ export interface IssueDeliveryDiagnosis {
   /** A trusted, bound delivery record exists (only meaningful when the fold is known). */
   trustedRecord: boolean;
   ticketResponsible: string | null;
+  /** Creation time of the record that established ticket responsibility (inventory age). */
+  responsibilitySince: string | null;
   /** Comment ids of `complete` records in the fold (pending or effective). */
   completions: string[];
   members: { deliverable: string; responsible: string | null }[];
@@ -79,6 +81,8 @@ export interface IssueDeliveryDiagnosis {
   staleTransfers: StaleTransfer[];
   unverifiableTransfers: { comment: string; url: string | null }[];
   /** A legacy v1 `done` release: trusted, unverifiable, or absent (null). */
+  /** Coverage gaps (truncated history, member cap): read surfaces report them as omissions. */
+  coverageOmissions: string[];
   legacy: {
     status: "trusted" | "unknown";
     release: string | null;
@@ -143,8 +147,9 @@ function legacyCandidates(
 }
 
 /**
- * Folds, replays and (within the cap) evaluates delivery for every open snapshot ticket that has
- * a delivery or v1 release record. Tickets with neither are absent from the result.
+ * Folds, replays and (within the cap) evaluates delivery for every snapshot ticket that has a
+ * delivery or v1 release record (open tickets in a briefing; a closed one only when an issue
+ * intake collected it). Tickets with neither are absent from the result.
  */
 export async function diagnoseDelivery(
   snapshot: Snapshot,
@@ -155,26 +160,38 @@ export async function diagnoseDelivery(
   let skipped = 0;
   for (const issue of snapshot.issues) {
     rt.signal?.throwIfAborted();
-    if (issue.state !== "OPEN") continue;
+    const issueOpen = issue.state === "OPEN";
     const comments = issue.comments.nodes as DeliveryComment[];
     const records = comments.some((c) => parseDeliveryComment(c.body).kind !== "none");
     const releases = comments.some((c) => releaseDone.test(c.body));
-    if (!records && !releases) continue;
+    // Unseen comment pages may hold a record: that is unknown, never "no record".
+    const truncated = !!issue.comments.pageInfo?.hasNextPage;
+    if (!records && !releases && !truncated) continue;
     const d: IssueDeliveryDiagnosis = {
       number: issue.number,
       fold: "unread",
       unknownBecause: [],
       trustedRecord: false,
       ticketResponsible: null,
+      responsibilitySince: null,
       completions: [],
       members: [],
       evaluation: null,
       notEvaluated: null,
       staleTransfers: [],
       unverifiableTransfers: [],
+      coverageOmissions: [],
       legacy: null,
     };
     result.issues.set(issue.number, d);
+    if (!records && !releases) {
+      d.fold = "unknown";
+      d.unknownBecause.push(
+        "the comment history was truncated, so delivery records may be on unseen pages",
+      );
+      d.coverageOmissions.push("comment history truncated; delivery records may be unseen");
+      continue;
+    }
     if (!rt.trust) {
       d.unknownBecause.push(
         "record authors' permissions were not read (offline or no permission lookup), so no record is trusted or excluded",
@@ -182,6 +199,8 @@ export async function diagnoseDelivery(
       continue;
     }
     const historyComplete = !issue.comments.pageInfo.hasNextPage;
+    if (!historyComplete)
+      d.coverageOmissions.push("comment history truncated; delivery records may be unseen");
     const { records: classified, fold } = await readDeliveryFold(
       comments,
       historyComplete,
@@ -194,12 +213,18 @@ export async function diagnoseDelivery(
     d.fold = fold.recordsUnknown ? "unknown" : "known";
     d.unknownBecause = [...fold.unknownBecause];
     d.trustedRecord = fold.hasTrustedRecord;
-    d.ticketResponsible = fold.ticketResponsible;
+    // An effective `complete` (issue closed, evaluation unchanged) ends all responsibility.
+    const ended = effectiveResponsibility(
+      fold,
+      issueOpen ? [] : completionEffects(classified, fold, true),
+    );
+    d.ticketResponsible = ended.ticketResponsible;
     d.completions = [...fold.completions];
-    d.members = fold.members.map((m) => ({
-      deliverable: deliverableLabel(m.deliverable),
-      responsible: m.responsible,
-    }));
+    d.responsibilitySince = fold.ticketResponsibilityRecord
+      ? (classified.find((r) => String(r.comment.databaseId) === fold.ticketResponsibilityRecord)
+          ?.comment.createdAt ?? null)
+      : null;
+    d.members = ended.members;
     for (const r of fold.rejected)
       if (r.error === "HANDOFF_STALE" && r.transfer)
         d.staleTransfers.push({
@@ -250,13 +275,14 @@ export async function diagnoseDelivery(
       {
         repository: snapshot.repository,
         issue: issue.number,
-        issueOpen: true,
+        issueOpen,
         fold,
         legacyHandoff,
       },
       rt.live,
     );
     d.evaluation = evaluateDelivery(facts);
+    d.coverageOmissions.push(...facts.coverage.omissions);
   }
   if (skipped)
     result.warnings.push(

@@ -14,10 +14,25 @@ import {
   diagnoseDelivery,
 } from "./deliverydoctor.js";
 import type { RepositoryPermission, RestAnswer } from "./github/github.js";
-import { evaluationRevision } from "./completion.js";
+import { deliveryMemberCap, evaluationRevision } from "./completion.js";
 import { ticketDoctor } from "./ticketdoctor.js";
 import type { TicketDoctorReport } from "./ticketdoctor.js";
-import type { Issue, Snapshot } from "./github/types.js";
+import type { Issue, PullRequest, Snapshot } from "./github/types.js";
+import {
+  classifyFollowUp,
+  deliveryFields,
+  deliveryRead,
+  prDelivery,
+  prDeliveryLines,
+  readIssuesDelivery,
+  reportFollowUpFacts,
+  teamResponsibilities,
+  teamResponsibilityLines,
+  withDeliveryCompleteness,
+} from "./deliveryread.js";
+import { readBriefing } from "./service.js";
+import type { PrStatusReport } from "./prstatus.js";
+import type { TeamAgent } from "./team.js";
 
 const repo = "owner/name";
 const time = "2026-11-14T10:00:00.000Z";
@@ -806,5 +821,757 @@ describe("stale claims beside delivery responsibility (#192)", () => {
       false,
     );
     expect(f.plan.facts.join(" ")).toContain("Delivery responsibility is unknown");
+  });
+});
+
+describe("delivery, responsibility and closure on read surfaces (#192)", () => {
+  /** A snapshot PR with the evidence the briefing collects. */
+  /** A snapshot PR with the evidence the briefing collects (verify check, head, reviews). */
+  const snapPr = (
+    n: number,
+    verify: string | null,
+    {
+      decision = null as string | null,
+      mergeState = "BLOCKED",
+      mergeable = "MERGEABLE",
+      approvedOn = null as string | null,
+      codexClean = false,
+      unresolved = false,
+    } = {},
+  ) =>
+    ({
+      number: n,
+      url: prLink(n),
+      state: "OPEN",
+      isDraft: false,
+      headRefOid: `head${n}`,
+      mergeable,
+      mergeStateStatus: mergeState,
+      reviewDecision: decision,
+      reviewThreads: page(unresolved ? [{ isResolved: false }] : []),
+      reviews: page(approvedOn ? [{ state: "APPROVED", commit: { oid: approvedOn } }] : []),
+      comments: page(
+        codexClean
+          ? [
+              {
+                author: { login: "chatgpt-codex-connector" },
+                body: `<!-- codex-review-state:v1 ${JSON.stringify({ code_review: { status: "completed", commit_sha: `head${n}`, has_unresolved_findings: false } })} -->`,
+              },
+            ]
+          : [],
+      ),
+      commits: {
+        nodes: [
+          {
+            commit: {
+              statusCheckRollup: verify
+                ? { state: verify, contexts: page([{ name: "verify", conclusion: verify }]) }
+                : null,
+            },
+          },
+        ],
+      },
+    }) as unknown as PullRequest;
+  const read = async (
+    issues: Issue[],
+    prs: PullRequest[],
+    livePrs: Record<number, LivePr>,
+    compare = {},
+    withTrust = true,
+  ) => {
+    const snap = { ...snapshot(issues), pullRequests: prs } as Snapshot;
+    return deliveryRead(
+      snap,
+      await diagnoseDelivery(snap, {
+        trust: withTrust ? trust : undefined,
+        live: withTrust ? live(livePrs, compare).rt : undefined,
+      }),
+    );
+  };
+  const submitted = (n: number, prs: number[], membership: "open" | "complete" = "complete") =>
+    post(record(n, "submit", { deliverables: prs.map(pr), membership }));
+
+  it("classifies follow-up from current-head evidence, as the briefing's PR rules do", async () => {
+    const prs = [
+      snapPr(80, "PENDING"),
+      snapPr(81, "FAILURE"),
+      snapPr(82, "SUCCESS", { approvedOn: "head82", mergeState: "CLEAN" }),
+      snapPr(83, "SUCCESS", { decision: "REVIEW_REQUIRED" }),
+      // GitHub kept an approval from an older head: not acceptance (#341 headReviewed).
+      snapPr(84, "SUCCESS", { decision: "APPROVED", approvedOn: "old" }),
+      snapPr(85, "SUCCESS", { mergeState: "BEHIND" }),
+      snapPr(86, "SUCCESS", { codexClean: true, mergeState: "UNKNOWN" }),
+      snapPr(87, "SUCCESS", { approvedOn: "head87", mergeState: "BEHIND" }),
+      snapPr(88, "SUCCESS", { mergeState: "CLEAN" }),
+      snapPr(89, "SUCCESS", { unresolved: true }),
+      snapPr(90, "SUCCESS", { mergeable: "CONFLICTING" }),
+    ];
+    const nums = prs.map((p) => p.number);
+    const r = await read(
+      [issue(60, ["bug"], [submitted(60, nums)])],
+      prs,
+      Object.fromEntries(nums.map((n) => [n, "open" as const])),
+    );
+    const [t] = r.tickets;
+    expect(t.delivery).toBe("submitted");
+    expect(t.closure).toBe("open");
+    expect(t.responsibility?.ticket).toBe("alice");
+    expect(t.deliverables.map((m) => [m.followUp, m.followUpWhy])).toEqual([
+      ["waiting", "awaiting checks"],
+      ["actionable", "failing checks on the current head"],
+      ["actionable", "accepted on the current head but not merged: inspect, then consider merge"],
+      ["waiting", "awaiting current-head review"],
+      ["waiting", "awaiting current-head review"],
+      ["actionable", "behind its base: update the branch"],
+      ["actionable", "accepted on the current head: refresh mergeability (integrate)"],
+      [
+        "actionable",
+        "accepted on the current head but behind its base: update the branch (integrate)",
+      ],
+      ["actionable", "clean merge state: inspect the current head, then consider merge"],
+      ["actionable", "unresolved review threads"],
+      ["actionable", "merge conflict"],
+    ]);
+    expect(t.deliverables.every((m) => m.responsible === "alice")).toBe(true);
+  });
+
+  it("unknown delivery evidence keeps the evaluator's reasons", async () => {
+    const r = await read([issue(75, ["bug"], [submitted(75, [94])])], [], {});
+    expect(r.tickets[0].delivery).toBe("unknown");
+    expect(r.tickets[0].because.join(" ")).toContain("could not be read");
+    expect(r.tickets[0].because.join(" ")).not.toContain("legacy");
+    const c = await read(
+      [issue(76, ["bug"], [submitted(76, [95])])],
+      [],
+      { 95: { merged: "m95" } },
+      {},
+    );
+    expect(c.tickets[0].because.join(" ")).toContain("inconclusive");
+  });
+
+  it("a completed Codex receipt with findings on the head is actionable without threads", async () => {
+    const pull = snapPr(96, "SUCCESS", { mergeState: "CLEAN" }) as unknown as {
+      comments: { nodes: unknown[] };
+    };
+    pull.comments.nodes.push({
+      author: { login: "chatgpt-codex-connector" },
+      body: `<!-- codex-review-state:v1 ${JSON.stringify({ code_review: { status: "completed", commit_sha: "head96", has_unresolved_findings: true } })} -->`,
+    });
+    const r = await read(
+      [issue(77, ["bug"], [submitted(77, [96])])],
+      [pull as unknown as PullRequest],
+      { 96: "open" },
+    );
+    expect(r.tickets[0].deliverables[0]).toMatchObject({
+      followUp: "actionable",
+      followUpWhy: "Codex reports unresolved findings on the current head",
+    });
+  });
+
+  it("S5: an open required PR on a not-planned or duplicate issue is closure cleanup", async () => {
+    for (const reason of ["NOT_PLANNED", "DUPLICATE"]) {
+      const closed = {
+        ...issue(78, ["bug"], [submitted(78, [97])]),
+        state: "CLOSED",
+        stateReason: reason,
+      } as Issue;
+      const r = await read([closed], [snapPr(97, "PENDING")], { 97: "open" });
+      expect(r.tickets[0].deliverables[0].followUp).toBe("actionable");
+      expect(r.tickets[0].deliverables[0].followUpWhy).toContain("closure cleanup");
+    }
+    // A completed closure with an open PR is S16 drift, classified as ordinary follow-up.
+    const completed = {
+      ...issue(79, ["bug"], [submitted(79, [98])]),
+      state: "CLOSED",
+      stateReason: "COMPLETED",
+    } as Issue;
+    const c = await read([completed], [snapPr(98, "PENDING")], { 98: "open" });
+    expect(c.tickets[0].deliverables[0].followUpWhy).toBe("awaiting checks");
+  });
+
+  it("pr N keeps closure cleanup on a not-planned issue and reads head findings from the report", () => {
+    const member = {
+      deliverable: `${repo}#99`,
+      url: prLink(99),
+      target: `${repo}:(default branch)`,
+      state: "open" as const,
+      why: "open",
+      responsible: "alice",
+      followUp: "actionable" as const,
+      followUpWhy:
+        "closure cleanup: the issue is closed-not-planned; close this PR or explain why it stays open (the closure stands)",
+    };
+    const read = {
+      tickets: [
+        {
+          number: 80,
+          url: "",
+          closure: "closed-not-planned" as const,
+          records: "known" as const,
+          delivery: "submitted" as const,
+          because: [],
+          responsibility: { ticket: "alice", since: null, members: [] },
+          deliverables: [member],
+          next: [],
+        },
+      ],
+      closures: [{ number: 80, closure: "closed-not-planned" as const }],
+      complete: true,
+      omissions: [],
+      guidance: "",
+    };
+    const facts = {
+      draft: false,
+      complete: true,
+      failing: false,
+      pending: true,
+      unknownChecks: false,
+      verified: false,
+      changesRequested: false,
+      unresolvedThreads: false,
+      mergeable: "MERGEABLE",
+      mergeState: "BLOCKED",
+      headReviewed: false,
+      headFindings: false,
+    };
+    expect(prDelivery(prLink(99), facts, true, read, repo).issues[0].followUpWhy).toContain(
+      "closure cleanup",
+    );
+    expect(
+      classifyFollowUp({ ...facts, pending: false, verified: true, headFindings: true }),
+    ).toEqual(["actionable", "Codex reports unresolved findings on the current head"]);
+  });
+
+  it("per-ticket coverage gaps (member cap, truncated history) make the report incomplete", async () => {
+    const many = Array.from({ length: deliveryMemberCap + 1 }, (_, i) => 700 + i);
+    const capped = await read([issue(81, ["bug"], [submitted(81, many)])], [], {});
+    expect(capped.tickets[0].delivery).toBe("unknown");
+    expect(capped.complete).toBe(false);
+    expect(capped.omissions.join(" ")).toContain(
+      `#81: ${deliveryMemberCap + 1} required members exceed the cap`,
+    );
+    const long = { ...issue(82, ["bug"]), comments: page([], true) } as Issue;
+    const truncated = await read([long], [], {});
+    expect(truncated.complete).toBe(false);
+    expect(truncated.omissions).toEqual([
+      "#82: comment history truncated; delivery records may be unseen",
+    ]);
+    const withRecord = {
+      ...issue(83, ["bug"], [submitted(83, [99])]),
+      comments: page([submitted(83, [99])], true),
+    } as Issue;
+    const partial = await read([withRecord], [], { 99: "open" });
+    expect(partial.complete).toBe(false);
+    expect(partial.omissions.join(" ")).toContain("#83: comment history truncated");
+  });
+
+  it("an unverifiable legacy release is unknown delivery, with its diagnostics", async () => {
+    const legacy = await release("alice", { pr: prLink(9) });
+    const r = await read(
+      [issue(74, ["bug"], [{ ...legacy, author: { __typename: "User", login: "flaky" } }])],
+      [],
+      {},
+    );
+    expect(r.tickets[0]).toMatchObject({ delivery: "unknown" });
+    expect(r.tickets[0].because.join(" ")).toContain("could not be verified");
+  });
+
+  it("partial delivery shows the merged member as done and the rest outstanding", async () => {
+    const r = await read(
+      [issue(61, ["bug"], [submitted(61, [84, 85])])],
+      [snapPr(85, "PENDING")],
+      { 84: { merged: "m84" }, 85: "open" },
+      { m84: "behind" },
+    );
+    expect(r.tickets[0].delivery).toBe("partial");
+    expect(r.tickets[0].deliverables.map((m) => m.followUp)).toEqual(["none", "waiting"]);
+  });
+
+  it("a ticket whose only markers are ignored is out of the delivery block", async () => {
+    const r = await read(
+      [
+        issue(
+          73,
+          ["bug"],
+          [
+            post(record(73, "submit", { deliverables: [pr(93)] }), "reader"),
+            post(record(98, "submit", { deliverables: [pr(93)] })),
+          ],
+        ),
+      ],
+      [],
+      { 93: "open" },
+    );
+    expect(r.tickets).toEqual([]);
+  });
+
+  it("offline, responsibility is unknown (null), never nobody, and delivery is unknown", async () => {
+    const r = await read([issue(62, ["bug"], [submitted(62, [86])])], [], {}, {}, false);
+    expect(r.tickets[0]).toMatchObject({
+      records: "unread",
+      delivery: "unknown",
+      responsibility: null,
+    });
+    expect(deliveryFields(issue(62, []), r.tickets[0]).responsibility).toBeNull();
+  });
+
+  it("no record in a complete history means nobody responsible; truncated history is unknown", async () => {
+    const none = await read([issue(63, ["bug"])], [], {});
+    expect(none.tickets).toEqual([]);
+    expect(deliveryFields(issue(63, []), null)).toEqual({
+      closure: "open",
+      delivery: null,
+      responsibility: { ticket: null, since: null, members: [] },
+    });
+    const long = { ...issue(64, ["bug"]), comments: page([], true) } as Issue;
+    const truncated = await read([long], [], {});
+    expect(truncated.tickets[0]).toMatchObject({
+      records: "unknown",
+      delivery: "unknown",
+      responsibility: null,
+    });
+  });
+
+  it("an effective completion on a closed issue ends responsibility; closure is reported beside delivery", async () => {
+    const submit = submitted(65, [87]);
+    const snap0 = snapshot([issue(65, ["bug"], [submit])]);
+    const { fold } = await readDeliveryFold([submit], true, { repository: repo, issue: 65 }, trust);
+    const done = post(
+      record(65, "complete", {
+        verdict: "delivered",
+        evaluatedAt: "2026-11-13T09:59:00Z",
+        evaluationRevision: evaluationRevision(fold),
+      }),
+    );
+    const closed = {
+      ...issue(65, ["bug"], [submit, done]),
+      state: "CLOSED",
+      stateReason: "COMPLETED",
+    } as Issue;
+    expect(snap0.issues).toHaveLength(1);
+    const r = await read([closed], [], { 87: { merged: "m87" } }, { m87: "behind" });
+    expect(r.tickets[0]).toMatchObject({ closure: "closed-completed", delivery: "delivered" });
+    expect(r.tickets[0].responsibility).toMatchObject({
+      ticket: null,
+      members: [{ responsible: null }],
+    });
+  });
+
+  it("team lists responsibilities after the claim is gone, with count, and no limit", async () => {
+    const r = await read(
+      [issue(66, ["bug"], [submitted(66, [88])]), issue(67, ["bug"], [submitted(67, [89])])],
+      [snapPr(88, "PENDING"), snapPr(89, "FAILURE")],
+      { 88: "open", 89: "open" },
+    );
+    const agents = teamResponsibilities([] as TeamAgent[], r);
+    expect(agents).toHaveLength(1);
+    expect(agents[0].agent).toBe("alice");
+    expect(agents[0].claims).toEqual([]);
+    expect(agents[0].responsibilities?.map((x) => [x.number, x.scope, x.followUp])).toEqual([
+      [66, "ticket", null],
+      [66, "deliverable", "waiting"],
+      [67, "ticket", null],
+      [67, "deliverable", "actionable"],
+    ]);
+    const text = teamResponsibilityLines(agents, r, new Date(time)).join("\n");
+    expect(text).toContain("alice: responsible for 4 item(s) (no limit)");
+  });
+
+  it("pr N names the issues requiring it, the responsible agent and its follow-up from fresh blockers", async () => {
+    const fake = live({ 90: "open" });
+    const issueNode = (n: number, comments: DeliveryComment[]) => ({
+      number: n,
+      title: "T",
+      url: `https://github.com/${repo}/issues/${n}`,
+      state: "OPEN",
+      stateReason: null,
+      closedByPullRequestsReferences: page([]),
+      comments: { nodes: comments, pageInfo: { hasPreviousPage: false, startCursor: null } },
+    });
+    const nodes: Record<number, ReturnType<typeof issueNode>> = {
+      68: issueNode(68, [submitted(68, [90])]),
+      69: issueNode(69, []),
+      70: issueNode(70, [post(record(70, "submit", { deliverables: [pr(90)] }), "flaky")]),
+    };
+    const query = async (q: string, v: Record<string, unknown>) =>
+      q.includes("issue(number:$number){number title")
+        ? { repository: { issue: nodes[Number(v.number)] } }
+        : fake.rt.query(q, v);
+    // A history cut at the page limit is an omission, never "no record".
+    const cut = {
+      ...issueNode(71, []),
+      comments: { nodes: [], pageInfo: { hasPreviousPage: true, startCursor: null } },
+    };
+    const truncated = await readIssuesDelivery(repo, [71], {
+      query: (async (q: string, v: Record<string, unknown>) =>
+        q.includes("issue(number:$number){number title")
+          ? { repository: { issue: cut } }
+          : fake.rt.query(q, v)) as never,
+      rest: fake.rt.rest,
+      trust,
+    });
+    expect(truncated.complete).toBe(false);
+    expect(truncated.omissions.join(" ")).toContain("#71: comment history truncated");
+    const issuesRead = await readIssuesDelivery(repo, [68, 69, 70], {
+      query: query as never,
+      rest: fake.rt.rest,
+      trust,
+    });
+    const facts = {
+      draft: false,
+      complete: true,
+      failing: false,
+      pending: false,
+      unknownChecks: false,
+      verified: true,
+      changesRequested: false,
+      unresolvedThreads: false,
+      mergeable: "MERGEABLE",
+      mergeState: "BLOCKED",
+      headReviewed: false,
+      headFindings: false,
+    };
+    const waiting = prDelivery(prLink(90), { ...facts, pending: true }, true, issuesRead, repo);
+    expect(waiting.issues).toEqual([
+      expect.objectContaining({
+        number: 68,
+        required: true,
+        responsible: "alice",
+        followUp: "waiting",
+        delivery: "submitted",
+      }),
+      expect.objectContaining({ number: 69, required: false, delivery: null }),
+      expect.objectContaining({ number: 70, required: null, delivery: "unknown" }),
+    ]);
+    // A missing required approval (verified, merge BLOCKED, no head review) is waiting.
+    expect(prDelivery(prLink(90), facts, true, issuesRead, repo).issues[0]).toMatchObject({
+      followUp: "waiting",
+      followUpWhy: "awaiting current-head review",
+    });
+    expect(
+      prDelivery(
+        prLink(90),
+        { ...facts, headReviewed: true, mergeState: "CLEAN" },
+        true,
+        issuesRead,
+        repo,
+      ).issues[0],
+    ).toMatchObject({
+      followUp: "actionable",
+      followUpWhy: "accepted on the current head but not merged: inspect, then consider merge",
+    });
+    expect(
+      prDelivery(prLink(90), { ...facts, changesRequested: true }, true, issuesRead, repo).issues[0]
+        .followUp,
+    ).toBe("actionable");
+    expect(prDeliveryLines(waiting).join("\n")).toContain(
+      `${repo}#70 open: delivery unknown; required unknown`,
+    );
+    expect(waiting.complete).toBe(true);
+    // An issue in another repository keeps its identity, is unknown (never this repository's
+    // same-numbered #68), and makes the result incomplete so pr N exits 2.
+    const crossed = prDelivery(prLink(90), facts, true, issuesRead, repo, [
+      { repository: "other/lib", number: 68 },
+    ]);
+    expect(crossed.issues.at(-1)).toMatchObject({
+      repository: "other/lib",
+      number: 68,
+      required: null,
+      delivery: "unknown",
+      closure: null,
+    });
+    expect(crossed.omissions.join(" ")).toContain("pdb who 68 --repo other/lib");
+    expect(crossed.complete).toBe(false);
+    expect(
+      withDeliveryCompleteness({ completeness: { complete: true, warnings: [] } }, crossed)
+        .completeness.complete,
+    ).toBe(false);
+  });
+
+  it("the briefing JSON carries the same delivery block through the CLI and the shared MCP read service", async () => {
+    const snap = snapshot([issue(71, ["bug", "status:awaiting-review"], [submitted(71, [91])])]);
+    const fake = live({ 91: { merged: "m91" } }, { m91: "behind" });
+    const rest = async (path: string) =>
+      path.includes("/collaborators/")
+        ? { status: 200, body: { user: { login: "writer" }, role_name: "write" } }
+        : fake.rt.rest(path);
+    let text = "";
+    await main(
+      ["--repo", repo, "--json"],
+      async (t) => {
+        text += t;
+      },
+      {
+        collect: async () => snap,
+        currentRepository: async () => repo,
+        dependencyReport: async () => ({}) as never,
+        now: () => new Date(time),
+        query: fake.rt.query as never,
+        rest,
+        updateCheck: async () => ({ status: "skipped" }) as never,
+      },
+    );
+    const cli = JSON.parse(text) as { delivery: unknown };
+    const mcp = await readBriefing(
+      {
+        collect: async () => snap,
+        dependencyReport: async () => ({}) as never,
+        now: () => new Date(time),
+        query: fake.rt.query as never,
+        rest,
+      },
+      { repository: repo, limit: 10, maxChars: 4000 },
+    );
+    if (mcp.kind !== "report") throw new Error("unavailable");
+    expect(mcp.report.delivery).toEqual(cli.delivery);
+    expect(cli.delivery).toMatchObject({
+      tickets: [
+        { number: 71, delivery: "delivered", closure: "open", responsibility: { ticket: "alice" } },
+      ],
+    });
+  });
+
+  it("who and team add delivery, responsibility and closure through the CLI", async () => {
+    const snap = snapshot([issue(72, ["bug"], [submitted(72, [92])])]);
+    const fake = live({ 92: "open" });
+    const runtime = {
+      collect: async () => snap,
+      currentRepository: async () => repo,
+      now: () => new Date(time),
+      query: fake.rt.query as never,
+      rest: async (path: string) =>
+        path.includes("/collaborators/")
+          ? { status: 200, body: { user: { login: "writer" }, role_name: "write" } }
+          : fake.rt.rest(path),
+      updateCheck: async () => ({ status: "skipped" }) as never,
+    };
+    const run = async (args: string[]) => {
+      let out = "";
+      await main(
+        args,
+        async (t) => {
+          out += t;
+        },
+        runtime,
+      );
+      return out;
+    };
+    const who = JSON.parse(await run(["who", "72", "--repo", repo, "--json"]));
+    expect(who).toMatchObject({
+      closure: "open",
+      delivery: { delivery: "submitted", records: "known" },
+      responsibility: { ticket: "alice" },
+    });
+    expect(await run(["who", "72", "--repo", repo])).toContain(
+      "Delivery: submitted (records known)",
+    );
+    const team = JSON.parse(await run(["team", "--repo", repo, "--json"]));
+    expect(team.agents).toEqual([
+      expect.objectContaining({ agent: "alice", claims: [], responsibilities: expect.any(Array) }),
+    ]);
+    expect(await run(["team", "--repo", repo])).toContain("alice: responsible for 2 item(s)");
+  });
+
+  it("pr N facts come from the status report's structured fields and #341 head acceptance", () => {
+    const report = {
+      pullRequest: {
+        draft: false,
+        head: "h1",
+        mergeable: "MERGEABLE",
+        mergeState: "BLOCKED",
+        reviewDecision: "REVIEW_REQUIRED",
+      },
+      checks: {
+        required: { class: "passed", outcome: "SUCCESS" },
+        counts: { passed: 1, pending: 0, cancelled: 0, failed: 0, unknown: 0 },
+      },
+      threads: { unresolved: [], omitted: 0 },
+      reviews: [{ state: "APPROVED", reviewedCommit: "old" }],
+      receipts: [],
+      headReviewed: false,
+      headFindings: false,
+      completeness: { complete: true, warnings: [] },
+    } as unknown as PrStatusReport;
+    expect(classifyFollowUp(reportFollowUpFacts(report))).toEqual([
+      "waiting",
+      "awaiting current-head review",
+    ]);
+    // A SKIPPED or NEUTRAL verify is "passed" by class but is not a successful verify.
+    for (const outcome of ["SKIPPED", "NEUTRAL"]) {
+      const skipped = {
+        ...report,
+        checks: { ...report.checks, required: { class: "passed", outcome } },
+        receipts: [],
+        headReviewed: true,
+        reviews: [{ state: "APPROVED", reviewedCommit: "h1" }],
+        pullRequest: { ...report.pullRequest, mergeState: "CLEAN" },
+      } as unknown as PrStatusReport;
+      expect(classifyFollowUp(reportFollowUpFacts(skipped))[0]).toBe("unknown");
+    }
+    const codex = {
+      ...report,
+      headReviewed: true,
+      receipts: [
+        {
+          by: "chatgpt-codex-connector",
+          codexState: {
+            code_review: { status: "completed", commit_sha: "h1", has_unresolved_findings: false },
+          },
+        },
+      ],
+      pullRequest: { ...report.pullRequest, mergeState: "BEHIND" },
+    } as unknown as PrStatusReport;
+    expect(classifyFollowUp(reportFollowUpFacts(codex))[1]).toBe(
+      "accepted on the current head but behind its base: update the branch (integrate)",
+    );
+  });
+
+  describe("briefing completeness, intake scope and cancellation", () => {
+    const many = (count: number) =>
+      Array.from({ length: count }, (_, i) =>
+        issue(200 + i, ["bug"], [submitted(200 + i, [600 + i])]),
+      );
+    const fakeFor = (count: number) =>
+      live(Object.fromEntries(Array.from({ length: count }, (_, i) => [600 + i, "open" as const])));
+    const permission = async (_path: string) => ({
+      status: 200,
+      body: { user: { login: "writer" }, role_name: "write" },
+    });
+    const runtime = (snap: Snapshot, fake: ReturnType<typeof live>, extra = {}) => ({
+      collect: async () => snap,
+      dependencyReport: async () => ({}) as never,
+      now: () => new Date(time),
+      query: fake.rt.query as never,
+      rest: async (path: string) =>
+        path.includes("/collaborators/") ? permission(path) : fake.rt.rest(path),
+      ...extra,
+    });
+
+    it("the evaluation cap makes the briefing incomplete", async () => {
+      const count = deliveryDoctorTicketCap + 1;
+      const read = await readBriefing(runtime(snapshot(many(count)), fakeFor(count)), {
+        repository: repo,
+        limit: 10,
+        maxChars: 4000,
+      });
+      if (read.kind !== "report") throw new Error("unavailable");
+      expect(read.complete).toBe(false);
+      expect(read.report.completeness.warnings.join(" ")).toContain("1 more with delivery records");
+      expect(read.text).toContain("INCOMPLETE: ");
+      expect(read.text.length).toBeLessThanOrEqual(4000);
+    });
+
+    it("bounds delivery warnings in text and keeps every warning in JSON", async () => {
+      const long = Array.from(
+        { length: 30 },
+        (_, i) => ({ ...issue(300 + i, ["bug"]), comments: page([], true) }) as Issue,
+      );
+      const read = await readBriefing(runtime(snapshot(long), fakeFor(0)), {
+        repository: repo,
+        limit: 10,
+        maxChars: 1500,
+      });
+      if (read.kind !== "report") throw new Error("unavailable");
+      expect(read.report.delivery?.omissions).toHaveLength(30);
+      expect(read.report.completeness.warnings).toHaveLength(30);
+      expect(read.text.length).toBeLessThanOrEqual(1500);
+      const shown = read.text.split("\n").filter((l) => l.startsWith("INCOMPLETE"));
+      expect(shown).toHaveLength(6);
+      expect(shown.at(-1)).toContain("25 more warning(s) omitted; use --json");
+    });
+
+    it("an explicit intake evaluates its own ticket even past the cap", async () => {
+      const count = deliveryDoctorTicketCap + 5;
+      const last = 200 + count - 1;
+      const read = await readBriefing(runtime(snapshot(many(count)), fakeFor(count)), {
+        repository: repo,
+        issue: last,
+        limit: 10,
+        maxChars: 4000,
+      });
+      if (read.kind !== "report") throw new Error("unavailable");
+      expect(read.report.delivery?.tickets).toEqual([
+        expect.objectContaining({ number: last, delivery: "submitted" }),
+      ]);
+    });
+
+    const cli = async (snap: Snapshot, fake: ReturnType<typeof live>, args: string[]) => {
+      let out = "";
+      const code = await main(
+        args,
+        async (t) => {
+          out += t;
+        },
+        {
+          ...runtime(snap, fake),
+          currentRepository: async () => repo,
+          updateCheck: async () => ({ status: "skipped" }) as never,
+        },
+      );
+      return { code, out };
+    };
+
+    it("who N evaluates the requested issue even past the cap", async () => {
+      const count = deliveryDoctorTicketCap + 5;
+      const last = 200 + count - 1;
+      const { code, out } = await cli(snapshot(many(count)), fakeFor(count), [
+        "who",
+        String(last),
+        "--repo",
+        repo,
+        "--json",
+      ]);
+      const who = JSON.parse(out);
+      expect(who.delivery).toMatchObject({ number: last, delivery: "submitted" });
+      expect(who.completeness.complete).toBe(true);
+      expect(code).toBe(0);
+    });
+
+    it("team carries the evaluation cap into its completeness and exit code", async () => {
+      const count = deliveryDoctorTicketCap + 1;
+      const { code, out } = await cli(snapshot(many(count)), fakeFor(count), [
+        "team",
+        "--repo",
+        repo,
+        "--json",
+      ]);
+      const team = JSON.parse(out);
+      expect(team.completeness.complete).toBe(false);
+      expect(team.completeness.warnings.join(" ")).toContain("1 more with delivery records");
+      expect(code).toBe(2);
+      const text = await cli(snapshot(many(count)), fakeFor(count), ["team", "--repo", repo]);
+      expect(text.out).toContain("INCOMPLETE (delivery):");
+    });
+
+    it("pr N carries unreadable linked issues into its completeness", () => {
+      const status = { completeness: { complete: true, warnings: [] } };
+      expect(
+        withDeliveryCompleteness(status, { complete: false, omissions: ["#9: unreadable"] }),
+      ).toEqual({ completeness: { complete: false, warnings: ["#9: unreadable"] } });
+      expect(withDeliveryCompleteness(status, { complete: true, omissions: [] })).toBe(status);
+    });
+
+    it("binds delivery requests to the request's cancellation signal", async () => {
+      const fake = fakeFor(1);
+      const seen: (AbortSignal | undefined)[] = [];
+      const controller = new AbortController();
+      await readBriefing(
+        {
+          ...runtime(snapshot(many(1)), fake),
+          query: undefined,
+          queryWith: (signal?: AbortSignal) => {
+            seen.push(signal);
+            return fake.rt.query as never;
+          },
+          rest: async (path: string, options?: { signal?: AbortSignal }) => {
+            seen.push(options?.signal);
+            return path.includes("/collaborators/") ? permission(path) : fake.rt.rest(path);
+          },
+        },
+        { repository: repo, limit: 10, maxChars: 4000, signal: controller.signal },
+      );
+      expect(seen.length).toBeGreaterThan(1);
+      expect(seen.every((x) => x === controller.signal)).toBe(true);
+    });
   });
 });
