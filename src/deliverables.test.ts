@@ -6,6 +6,8 @@ import {
   planDeliverables,
   readDeliveryComments,
   resetPlanPending,
+  reworkAuthority,
+  reworkMembershipRequest,
   submitArguments,
 } from "./deliverables.js";
 import type { DeliverablesPlan, DeliverablesRequest, DeliverablesRuntime } from "./deliverables.js";
@@ -1514,5 +1516,89 @@ describe("submit (#190)", () => {
       /pull request URL/,
     );
     expect(() => submitArguments(["--agent", "alice"])).toThrow(/Usage/);
+  });
+});
+
+describe("claim --rework authority and membership record (#190)", () => {
+  const handoffTo = (from: string, to: string, expected: string) =>
+    rec("handoff", { agent: from, to, scope: "ticket", expectedResponsibilityRecord: expected });
+  const authority = async (comments: DeliveryComment[], agent: string) =>
+    reworkAuthority(repo, N, agent, github({ comments }).rt);
+  it("S21: the submitter is authorised on the delivery path; no records means legacy", async () => {
+    expect(await authority([submitted()], "alice")).toEqual({ path: "delivery" });
+    expect(await authority([v1Done()], "alice")).toEqual({ path: "legacy" });
+  });
+  it("S29/S30: only the current ticket-responsible agent after handoffs is authorised", async () => {
+    const s = submitted();
+    const ab = post(handoffTo("alice", "bob", String(s.databaseId)));
+    expect(await authority([s, ab], "bob")).toEqual({ path: "delivery" });
+    expect(await authority([s, ab], "alice")).toMatchObject({
+      refusal: { error: "NOT_RESPONSIBLE" },
+    });
+    const bc = post(handoffTo("bob", "carol", String(ab.databaseId)));
+    for (const who of ["alice", "bob"])
+      expect(await authority([s, ab, bc], who)).toMatchObject({
+        refusal: { error: "NOT_RESPONSIBLE" },
+      });
+    expect(await authority([s, ab, bc], "carol")).toEqual({ path: "delivery" });
+  });
+  it("S31: a handoff whose author permission is unknown refuses MARKER_UNVERIFIED", async () => {
+    const s = submitted();
+    const ab = post(handoffTo("alice", "bob", String(s.databaseId)), "flaky");
+    for (const who of ["alice", "bob"])
+      expect(await authority([s, ab], who)).toMatchObject({
+        refusal: { error: "MARKER_UNVERIFIED" },
+      });
+  });
+  it("S65: after attach --legacy and a handoff, the v1 author is refused; unknown records never fall back", async () => {
+    const v1 = v1Done();
+    const la = post(
+      rec("legacy-attach", {
+        deliverables: [member(5)],
+        login: "writer",
+        legacyRelease: String(v1.databaseId),
+      }),
+    );
+    const hb = post(handoffTo("alice", "bob", String(la.databaseId)));
+    expect(await authority([v1, la, hb], "alice")).toMatchObject({
+      refusal: { error: "NOT_RESPONSIBLE" },
+    });
+    expect(await authority([v1, la, hb], "bob")).toEqual({ path: "delivery" });
+    const unknown = post(rec("attach", { deliverables: [member(6)] }), "flaky");
+    expect(await authority([v1, unknown], "alice")).toMatchObject({
+      refusal: { error: "MARKER_UNVERIFIED" },
+    });
+  });
+  it("S21/S58/S59: the rework record is written once after the claim, and submit without --pr finishes it", async () => {
+    const { rt, state } = github({ labels: ["agent:alice"], comments: [submitted()] });
+    const first = await applyDeliverables(repo, reworkMembershipRequest(N, "alice"), rt);
+    expect(first.exitCode).toBe(0);
+    expect(posted(state)[0]).toMatchObject({
+      op: "membership",
+      membership: "open",
+      reason: "rework claim",
+    });
+    const retry = await applyDeliverables(repo, reworkMembershipRequest(N, "alice"), rt);
+    expect(retry.ok && retry.noop).toBe(true);
+    expect(posted(state)).toHaveLength(1);
+    const submit = await applyDeliverables(repo, request("submit", { reason: null }), rt);
+    expect(submit.exitCode).toBe(0);
+    expect(posted(state)[1]).toMatchObject({
+      op: "submit",
+      deliverables: [],
+      membership: "complete",
+    });
+    expect(state.labels).toEqual(["status:awaiting-review"]);
+  });
+  it("a legacy rework writes no delivery record; a non-responsible claimant is refused", async () => {
+    const legacy = github({ labels: ["agent:alice"], comments: [v1Done()] });
+    const l = await applyDeliverables(repo, reworkMembershipRequest(N, "alice"), legacy.rt);
+    expect(l.ok && l.noop).toBe(true);
+    expect(legacy.state.writes).toEqual([]);
+    const other = github({ labels: ["agent:bob"], comments: [submitted()] });
+    refused(
+      await planDeliverables(repo, reworkMembershipRequest(N, "bob"), other.rt),
+      "NOT_RESPONSIBLE",
+    );
   });
 });

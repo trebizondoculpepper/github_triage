@@ -66,6 +66,8 @@ import {
   deliverablesText,
   submitArguments,
   submitHelp,
+  reworkAuthority,
+  reworkMembershipRequest,
   planDeliverables,
 } from "./deliverables.js";
 import { markerTrust } from "./delivery.js";
@@ -148,7 +150,9 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   pr N                  Why is pull request N not progressing? Every blocker at once
   pr N --history        Why does PR N keep failing review? Rounds, findings, recurring files
   claim N --agent NAME [--branch B] [--platform P] [--rework] [--dry-run]  Claim an eligible ticket;
-                        --rework reclaims your own awaiting-review issue to fix review feedback
+                        --rework reclaims your own awaiting-review issue to fix review feedback;
+                        with delivery records only the ticket-responsible agent may, and the
+                        claim is followed by a membership-open record (finish with submit)
   release N --agent NAME --as ready|incomplete|parked|done [--note TEXT] [--pr URL|--change URL]
                         [--dry-run]  Hand over your claim in one operation: record the outcome,
                         release agent:NAME and set readiness (ready; incomplete=parked, still
@@ -751,23 +755,58 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
     const query = runtime.query ?? ghQuery;
     // Per run: a permission learned now is never reused by a later invocation.
     const permission = permissionLookup(repository, runtime.rest ?? ghRest);
+    const rt = {
+      query,
+      run: runtime.ghRun ?? ghRun,
+      rest: runtime.rest ?? ghRest,
+      trust: markerTrust(permission),
+      now: runtime.now ?? (() => new Date()),
+    };
     // Read live immediately before changing; never act on a cached snapshot.
     const plan =
       "questions" in values
         ? await planNeedsHuman(repository, values, query, permission)
         : "outcome" in values
           ? await planRelease(repository, values, query, permission)
-          : await planClaim(repository, values, query, permission);
+          : await planClaim(
+              repository,
+              values,
+              query,
+              permission,
+              values.rework
+                ? () => reworkAuthority(repository, values.number, values.agent, rt)
+                : undefined,
+            );
     const result =
       values.dryRun || !plan.ok
         ? { ...plan, exitCode: plan.ok ? 0 : 1 }
         : await applyPlan(repository, plan, { run: runtime.ghRun ?? ghRun, query });
+    // Rework on the delivery-record path: after the claim, one `membership open` record
+    // (doc "Rework authority"). A legacy rework writes nothing more; a failed or conflicting
+    // claim writes nothing more. A retry of the same claim completes a missing record.
+    const membership =
+      "rework" in values && values.rework && !values.dryRun && plan.ok && result.exitCode === 0
+        ? await applyDeliverables(
+            repository,
+            reworkMembershipRequest(values.number, values.agent),
+            rt,
+          )
+        : null;
+    const exitCode = membership && membership.exitCode !== 0 ? 2 : result.exitCode;
     await output(
       values.json
-        ? JSON.stringify({ schemaVersion: 1, ...result }, null, 2) + "\n"
-        : claimText(result, values.dryRun),
+        ? JSON.stringify(
+            {
+              schemaVersion: 1,
+              ...result,
+              ...(membership ? { reworkMembership: membership, exitCode } : {}),
+            },
+            null,
+            2,
+          ) + "\n"
+        : claimText(result, values.dryRun) + (membership ? deliverablesText(membership) : ""),
     );
-    return result.exitCode;
+    return exitCode;
   }
   if (args[0] === "team") {
     const { values } = parseArgs({

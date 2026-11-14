@@ -13,7 +13,7 @@
 import { parseArgs } from "node:util";
 import { workflow } from "./briefing.js";
 import { claimPolicy, shellQuote } from "./claims.js";
-import type { Comment, GhRun, GraphQuery, PlanStep } from "./claims.js";
+import type { Comment, GhRun, GraphQuery, PlanStep, ReworkAuthority } from "./claims.js";
 import {
   attestApplicability,
   deliverableKey,
@@ -68,6 +68,8 @@ export interface DeliverablesRequest {
   comment: string | null;
   /** `reset --as ready|incomplete`. */
   as: "ready" | "incomplete" | null;
+  /** `membership open` written by `claim --rework` after the claim (doc "Rework authority"). */
+  rework?: boolean;
 }
 
 /** Injected boundaries: GraphQL reads, `gh` writes, REST reads, the authority rule and a clock. */
@@ -1225,6 +1227,35 @@ export async function planDeliverables(
       );
     }
     case "membership": {
+      if (r.rework) {
+        if (!fold.hasTrustedRecord)
+          return noop(
+            "Legacy rework: no delivery record exists, so there is no membership to reopen.",
+          );
+        if (!holds)
+          return refuse(
+            "NOT_CLAIMED",
+            facts,
+            `${agent} holds no claim on #${number}; the rework membership record follows the claim.`,
+            [cmd(`claim ${number} --agent ${agent} --rework`)],
+          );
+        if (!ticketResponsible)
+          return notResponsible(
+            "is not ticket-responsible, so it cannot reopen membership for rework",
+          );
+        const last = fold.applied.at(-1);
+        const lastRecord = last
+          ? trustedRecords.find((t) => String(t.comment.databaseId) === last.comment)?.record
+          : undefined;
+        if (
+          lastRecord?.op === "membership" &&
+          lastRecord.agent === agent &&
+          lastRecord.membership === "open" &&
+          lastRecord.reason === reworkReason
+        )
+          return noop(`Rework membership already recorded (comment ${last!.comment}).`);
+        return accepted(draft({ membership: "open" }), "membership open (rework claim)");
+      }
       const override = !holds && !ticketResponsible;
       if (others.length)
         return claimHeld(others, "membership cannot change under another agent's claim");
@@ -1404,6 +1435,103 @@ export async function planDeliverables(
     return null;
   }
 }
+
+/**
+ * `claim --rework` authority from the delivery records (doc "Rework authority"): legacy rules
+ * only while no trusted delivery record exists; otherwise only the ticket-responsible agent. An
+ * unknown fold refuses MARKER_UNVERIFIED and never falls back to the v1 done handoff.
+ */
+export async function reworkAuthority(
+  repository: string,
+  number: number,
+  agent: string,
+  rt: DeliverablesRuntime,
+): Promise<ReworkAuthority> {
+  const cmd = (text: string): string => `github-triage ${text} --repo ${repository}`;
+  const refusal = (error: string, prerequisite: string, recovery: string[]): ReworkAuthority => ({
+    refusal: { error, prerequisite, recovery },
+  });
+  let read: Awaited<ReturnType<typeof readIssue>>;
+  try {
+    read = await readIssue(repository, number, rt.query);
+  } catch (error) {
+    return refusal(
+      "EVIDENCE_INCOMPLETE",
+      `The delivery records of #${number} could not be read (${error instanceof Error ? error.message : "unknown error"}), so rework authority is unknown; nothing is changed.`,
+      [cmd(`--issue ${number}`), cmd(`claim ${number} --agent ${agent} --rework`)],
+    );
+  }
+  const item = read.item;
+  // Not an issue (or missing): the claim's own checks refuse it.
+  if (!item || item.__typename !== "Issue") return { path: "legacy" };
+  const history = await readDeliveryComments(repository, number, item.comments, rt.query);
+  const { fold } = await readDeliveryFold(
+    history.comments,
+    history.complete,
+    { repository, issue: number },
+    rt.trust,
+  );
+  if (fold.recordsUnknown)
+    return refusal(
+      "MARKER_UNVERIFIED",
+      `The delivery records of #${number} cannot all be verified (${fold.unknownBecause.join("; ")}), so rework authority is unknown; it never falls back to an older record. Nothing is changed.`,
+      [cmd(`who ${number}`), cmd(`--issue ${number}`)],
+    );
+  if (!fold.hasTrustedRecord) return { path: "legacy" };
+  if (fold.ticketResponsible !== agent)
+    return refusal(
+      "NOT_RESPONSIBLE",
+      `${agent} is not ticket-responsible for #${number} (responsible: ${fold.ticketResponsible ?? "none"}); once a delivery record exists, only the ticket-responsible agent may claim rework, and a v1 done handoff no longer authorises it.`,
+      [
+        cmd(`who ${number}`),
+        ...(fold.ticketResponsible
+          ? [
+              cmd(
+                `deliverables ${number} handoff --agent ${fold.ticketResponsible} --to ${agent} --reason TEXT`,
+              ),
+            ]
+          : []),
+        cmd(`deliverables ${number} reassign --agent MAINTAINER --to ${agent} --reason TEXT`),
+        cmd(`deliverables ${number} reset --agent MAINTAINER --as ready --reason TEXT`),
+      ],
+    );
+  // The claim is followed by a delivery record, so the account must be able to write one.
+  const self: Comment = {
+    body: "",
+    author: read.viewer ?? undefined,
+    lastEditedAt: null,
+    includesCreatedEdit: false,
+    editor: null,
+  };
+  const authority = read.viewer?.login
+    ? await rt.trust(self)
+    : { status: "unknown" as const, why: "the authenticated account could not be read" };
+  if (authority.status !== "trusted")
+    return refusal(
+      "MARKER_UNVERIFIED",
+      `The authenticated account ${read.viewer?.login ?? "(unknown)"} must have write, maintain or admin permission on ${repository} to record the rework (${authority.why}); nothing is changed.`,
+      [cmd(`who ${number}`)],
+    );
+  return { path: "delivery" };
+}
+
+/** The membership request `claim --rework` applies after its claim on the delivery path. */
+export const reworkMembershipRequest = (number: number, agent: string): DeliverablesRequest => ({
+  number,
+  action: "membership",
+  agent,
+  prs: [],
+  commits: [],
+  target: null,
+  reason: reworkReason,
+  to: null,
+  membership: "open",
+  legacy: false,
+  evidence: null,
+  comment: null,
+  as: null,
+  rework: true,
+});
 
 /**
  * Apply a plan one write at a time. Before every write the issue is re-read, re-folded and
