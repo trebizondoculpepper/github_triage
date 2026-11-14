@@ -3,6 +3,7 @@
  * (doc/design/impact-estimation.md). Injected gh GraphQL, clock, filesystem, git and trust;
  * no live mutations.
  */
+import { join } from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 import { readAssessment } from "./assessments.js";
 import type { AssessmentSubject } from "./assessments.js";
@@ -13,7 +14,7 @@ import {
   suggestedMetricSize,
   suggestedSize,
 } from "./complexitylabels.js";
-import { CONFIG_KEYS, loadConfig } from "./config.js";
+import { CONFIG_KEYS, TOML_CONFIG_PATH, loadConfig } from "./config.js";
 import type { ConfigFileSystem, GitRunner } from "./config.js";
 import type { TrustDecision } from "./delivery.js";
 import {
@@ -83,7 +84,7 @@ function harness(
   } = {},
 ) {
   const files = new Map<string, string>();
-  if (options.config) files.set("/repo/.github/triage.toml", options.config);
+  if (options.config) files.set(join("/repo", TOML_CONFIG_PATH), options.config);
   const fs: ConfigFileSystem = {
     readText: async (file) => files.get(file) ?? null,
     writeText: async () => {
