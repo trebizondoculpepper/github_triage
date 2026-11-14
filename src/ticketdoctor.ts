@@ -9,8 +9,8 @@
 import { owners, workflow } from "./briefing.js";
 import { dependencyDrift, nativeKnown } from "./github/dependencies.js";
 import { teamView } from "./team.js";
-import { complexityLabelFindings, metricLabelFindings } from "./complexitylabels.js";
-import { impactMetric } from "./metrics.js";
+import { complexityLabelFindings, metricLabelFindings } from "./estimation/complexitylabels.js";
+import { impactMetric } from "./estimation/metrics.js";
 import { closingPrEvidence } from "./ranking.js";
 import type { Issue, PullRequest, Snapshot } from "./github/types.js";
 import type { DeliveryDiagnosis, IssueDeliveryDiagnosis } from "./deliverydoctor.js";

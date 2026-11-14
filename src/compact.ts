@@ -2,16 +2,16 @@
 import { isParked, owners, excerpt } from "./briefing.js";
 import type { BriefingProcess } from "./process.js";
 import type { Briefing, BriefingOptions, Bounded, CheckOutcome } from "./briefing.js";
-import { estimateLine } from "./estimation.js";
+import { estimateLine } from "./estimation/estimation.js";
 import { assessmentsText, provenanceText } from "./assessments.js";
 import type { MetricAvailability, SubjectAssessments } from "./assessments.js";
-import type { EstimateEntry } from "./estimation.js";
+import type { EstimateEntry } from "./estimation/estimation.js";
 import { compareImpact, impactLookup, urgencyBand } from "./ranking.js";
 import { followUpRules, roleSectionRows, roleView } from "./roles.js";
 import type { RoleContext } from "./roles.js";
 import { designFollowUpSections, rankActions, roleCandidates } from "./blended.js";
 import type { BlendedRole, RankedActions } from "./blended.js";
-import { impactGuidance } from "./impact.js";
+import { impactGuidance } from "./estimation/impact.js";
 import type { RoleView } from "./roles.js";
 import type { Action, Issue, PullRequest, Snapshot } from "./github/types.js";
 

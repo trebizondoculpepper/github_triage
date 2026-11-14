@@ -27,8 +27,8 @@ import { parseArgs } from "node:util";
 import { COMPLEXITY_SIZES, complexityGuidance } from "./complexity.js";
 import type { ComplexitySize } from "./complexity.js";
 import { classifyMetricLabels, metricLabelName, metricLabelSize } from "./complexitylabels.js";
-import type { Comment } from "./claims.js";
-import type { TrustDecision } from "./delivery.js";
+import type { Comment } from "../claims.js";
+import type { TrustDecision } from "../delivery.js";
 import { COMPLEXITY_LABEL_COLOR, METRICS, complexityMetric, impactMetric } from "./metrics.js";
 import type { EstimateMetric, MetricDescriptor } from "./metrics.js";
 import {
@@ -38,10 +38,10 @@ import {
   nodeGit,
   resolveRepositoryTarget,
   settingFor,
-} from "./config/config.js";
-import type { ConfigFileSystem, GitRunner } from "./config/config.js";
-import { ghGraphqlApi, isRecord, prop } from "./github/github.js";
-import type { GraphqlAnswer, GraphqlApi } from "./github/github.js";
+} from "../config/config.js";
+import type { ConfigFileSystem, GitRunner } from "../config/config.js";
+import { ghGraphqlApi, isRecord, prop } from "../github/github.js";
+import type { GraphqlAnswer, GraphqlApi } from "../github/github.js";
 
 export const estimateUsage = `Usage: pdb estimate N [--metric complexity|impact] --size SIZE --rationale TEXT
          [--assumption TEXT]... [--reference REF]... [--agent NAME] [--replace SIZE]

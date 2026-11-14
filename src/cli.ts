@@ -56,11 +56,11 @@ import {
 import type { GuideRuntime } from "./process.js";
 import { pickupOrders } from "./ranking.js";
 import type { PickupOrder } from "./ranking.js";
-import { complexityGuidanceJson, complexityGuidanceText } from "./complexity.js";
-import { impactGuidanceJson, impactGuidanceText } from "./impact.js";
+import { complexityGuidanceJson, complexityGuidanceText } from "./estimation/complexity.js";
+import { impactGuidanceJson, impactGuidanceText } from "./estimation/impact.js";
 import { runConfig } from "./config/configcli.js";
 import type { ConfigRuntime } from "./config/configcli.js";
-import { estimateUsage, runEstimate } from "./estimate.js";
+import { estimateUsage, runEstimate } from "./estimation/estimate.js";
 import {
   applyDeliverables,
   deliverablesArguments,
@@ -80,10 +80,10 @@ import {
   completeText,
   planComplete,
 } from "./completion.js";
-import type { LabelEstimationRuntime } from "./complexitylabels.js";
-import { metricStatus } from "./complexitylabels.js";
-import { impactMetric } from "./metrics.js";
-import type { EstimateRuntime } from "./estimate.js";
+import type { LabelEstimationRuntime } from "./estimation/complexitylabels.js";
+import { metricStatus } from "./estimation/complexitylabels.js";
+import { impactMetric } from "./estimation/metrics.js";
+import type { EstimateRuntime } from "./estimation/estimate.js";
 import { localDoctor, localDoctorExitCode, localDoctorText } from "./config/localdoctor.js";
 import type { LocalDoctorRuntime } from "./config/localdoctor.js";
 import type { GhRun } from "./github/dependencies.js";

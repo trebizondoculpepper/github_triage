@@ -14,7 +14,7 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import * as z from "zod";
 import { collect, currentRepository, ghRest } from "./github/github.js";
 import { dependencyReport } from "./github/dependencies.js";
-import { impactGuidanceSummary } from "./impact.js";
+import { impactGuidanceSummary } from "./estimation/impact.js";
 import { readBriefing, readDependencies } from "./service.js";
 import { catchUp, catchUpLimits, catchUpText } from "./catchup.js";
 import { collectBriefing, WindowRefusal } from "./catchupcli.js";

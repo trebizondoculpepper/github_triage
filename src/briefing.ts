@@ -8,11 +8,11 @@ import {
   urgencyBand,
 } from "./ranking.js";
 import type { PickupOrder } from "./ranking.js";
-import { estimationText } from "./estimation.js";
+import { estimationText } from "./estimation/estimation.js";
 import { assessmentsText } from "./assessments.js";
 import type { SubjectAssessments } from "./assessments.js";
-import { labelEstimationReport } from "./complexitylabels.js";
-import type { LabelEstimationInput } from "./complexitylabels.js";
+import { labelEstimationReport } from "./estimation/complexitylabels.js";
+import type { LabelEstimationInput } from "./estimation/complexitylabels.js";
 import type { Action, Dependency, Issue, PullRequest, Snapshot } from "./github/types.js";
 import { headReviewed } from "./reviewevidence.js";
 
