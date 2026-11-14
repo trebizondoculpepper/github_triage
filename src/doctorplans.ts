@@ -118,11 +118,19 @@ export function planCommands(repository: string) {
         ),
         { choice: extra.choice ?? outcome, runBy: claimant(agent), preconditions: [own(agent)] },
       ),
-    estimate: (n: number) =>
+    estimate: (n: number, metric: "complexity" | "impact" = "complexity") =>
       step(
         "command",
-        `Record the size of #${n} you judge correct; it replaces every other size label.`,
-        triage("estimate", String(n), "--size", "<SIZE>", "--rationale", "<RATIONALE>"),
+        `Record the ${metric === "impact" ? "impact " : ""}size of #${n} you judge correct; it replaces every other ${metric === "impact" ? "impact " : ""}size label.`,
+        triage(
+          "estimate",
+          String(n),
+          ...(metric === "impact" ? ["--metric", "impact"] : []),
+          "--size",
+          "<SIZE>",
+          "--rationale",
+          "<RATIONALE>",
+        ),
         {
           preconditions: [
             "Justify the size you assign; earlier estimates need no explanation or permission.",
@@ -130,13 +138,18 @@ export function planCommands(repository: string) {
         },
       ),
     /** #178: record the judged size and remove invalid `complexity:*` labels in one write. */
-    estimateReplaceInvalid: (n: number, invalid: readonly string[]) =>
+    estimateReplaceInvalid: (
+      n: number,
+      invalid: readonly string[],
+      metric: "complexity" | "impact" = "complexity",
+    ) =>
       step(
         "command",
-        `Record the size of #${n} you judge correct, removing the invalid label(s) ${invalid.join(", ")}; it also replaces every other size label.`,
+        `Record the ${metric === "impact" ? "impact " : ""}size of #${n} you judge correct, removing the invalid label(s) ${invalid.join(", ")}; it also replaces every other ${metric === "impact" ? "impact " : ""}size label.`,
         triage(
           "estimate",
           String(n),
+          ...(metric === "impact" ? ["--metric", "impact"] : []),
           "--size",
           "<SIZE>",
           "--rationale",

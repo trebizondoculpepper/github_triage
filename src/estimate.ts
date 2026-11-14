@@ -26,11 +26,11 @@
 import { parseArgs } from "node:util";
 import { COMPLEXITY_SIZES, complexityGuidance } from "./complexity.js";
 import type { ComplexitySize } from "./complexity.js";
-import {
-  classifyComplexityLabels,
-  complexityLabelName,
-  complexityLabelSize,
-} from "./complexitylabels.js";
+import { classifyMetricLabels, metricLabelName, metricLabelSize } from "./complexitylabels.js";
+import type { Comment } from "./claims.js";
+import type { TrustDecision } from "./delivery.js";
+import { COMPLEXITY_LABEL_COLOR, METRICS, complexityMetric, impactMetric } from "./metrics.js";
+import type { EstimateMetric, MetricDescriptor } from "./metrics.js";
 import {
   ConfigError,
   loadConfig,
@@ -43,13 +43,16 @@ import type { ConfigFileSystem, GitRunner } from "./config.js";
 import { ghGraphqlApi, isRecord, prop } from "./github.js";
 import type { GraphqlAnswer, GraphqlApi } from "./github.js";
 
-export const estimateUsage = `Usage: github-triage estimate N --size SIZE --rationale TEXT [--assumption TEXT]...
-         [--reference REF]... [--agent NAME] [--replace SIZE] [--replace-invalid] [--json]
-         [--repo owner/name]
+export const estimateUsage = `Usage: github-triage estimate N [--metric complexity|impact] --size SIZE --rationale TEXT
+         [--assumption TEXT]... [--reference REF]... [--agent NAME] [--replace SIZE]
+         [--replace-invalid] [--json] [--repo owner/name]
        github-triage estimate --help [--json]
 (From a source checkout, use npm run triage -- estimate ...)
 Record a complexity size for issue N as the label complexity:SIZE, with its provenance in an
 issue comment (marker github-triage:complexity-estimate v2).
+  --metric METRIC       complexity (default; effort) or impact (judged benefit, recorded as
+                        impact:SIZE with marker github-triage:impact-estimate v1). The same
+                        rules apply to each metric; neither touches the other's labels.
   --size SIZE           One of ${COMPLEXITY_SIZES.join(", ")} (an unestimated ticket has no size label)
   --rationale TEXT      Required: why this size; which dimensions triggered the band (<= 1000 chars).
                         Justify the size you assign; earlier estimates need no explanation.
@@ -61,7 +64,7 @@ issue comment (marker github-triage:complexity-estimate v2).
   --replace-invalid     Also remove complexity: labels that are not a recognized size (e.g.
                         complexity:huge); they are listed in the provenance. Without it they
                         are refused, never guessed.
-  --json                Versioned structured output (kind complexity-estimate)
+  --json                Versioned structured output (kind complexity-estimate or impact-estimate)
   --repo owner/name     Refuse unless this checkout is that repository
 Creates the requested label only if the repository lacks it (existing labels are reused as-is),
 removes other complexity size labels from the ticket and preserves every other label.
@@ -80,6 +83,13 @@ export interface EstimateRuntime {
   /** The authenticated gh GraphQL boundary (production: gh api graphql). */
   readonly api?: GraphqlApi;
   readonly now?: () => Date;
+  /**
+   * Impact provenance authority (#215 rule) for the resolved repository: only a comment whose
+   * author and any editor are trusted counts as a recorded impact estimate. The CLI supplies the
+   * #212 rule over a per-run permission cache; without it every impact marker is unverified (never
+   * trusted). Complexity provenance is read without a trust check, as before (#269).
+   */
+  readonly trust?: (repository: string) => TrustDecision;
 }
 
 /** Label-backed provenance stored in the v2 marker comment. */
@@ -101,29 +111,43 @@ export interface LabelEstimateProvenance {
   readonly replacedInvalid?: readonly string[];
 }
 
-const MARKER = "github-triage:complexity-estimate v2";
-const MARKER_PATTERN = /<!-- github-triage:complexity-estimate v2 (\{.*?\}) -->/s;
+/** Label-backed impact provenance stored in the v1 impact marker comment (#245). */
+export interface ImpactEstimateProvenance extends Omit<
+  LabelEstimateProvenance,
+  "schemaVersion" | "kind"
+> {
+  readonly schemaVersion: 1;
+  readonly kind: "impact-estimate";
+}
+
+/** Either metric's provenance record. */
+export type MetricProvenance = LabelEstimateProvenance | ImpactEstimateProvenance;
+
+const markerPattern = (d: MetricDescriptor): RegExp =>
+  new RegExp(`<!-- ${d.marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} (\\{.*?\\}) -->`, "s");
 
 /** JSON safe inside an HTML comment: no "--" or ">" can terminate it early. */
 const commentSafe = (value: unknown): string =>
   JSON.stringify(value).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/-/g, "\\u002d");
 
-export function provenanceComment(p: LabelEstimateProvenance): string {
+export function provenanceComment(p: MetricProvenance): string {
+  const d = p.kind === "impact-estimate" ? impactMetric : complexityMetric;
+  const title = d === impactMetric ? "Impact" : "Complexity";
   const lines = [
-    `<!-- ${MARKER} ${commentSafe(p)} -->`,
-    `**Complexity estimate: ${p.size}**${p.previous.length ? ` (was ${p.previous.join(", ")})` : ""} — recorded with github-triage, guidance version ${p.guidanceVersion}.`,
+    `<!-- ${d.marker} ${commentSafe(p)} -->`,
+    `**${title} estimate: ${p.size}**${p.previous.length ? ` (was ${p.previous.join(", ")})` : ""} — recorded with github-triage, guidance version ${p.guidanceVersion}.`,
     "",
     `Rationale: ${p.rationale}`,
   ];
   if (p.assumptions.length) lines.push("", "Assumptions:", ...p.assumptions.map((a) => `- ${a}`));
   if (p.references.length) lines.push("", `Reference anchors: ${p.references.join(", ")}`);
   if (p.replacedInvalid?.length)
-    lines.push("", `Replaced invalid complexity label(s): ${p.replacedInvalid.join(", ")}`);
+    lines.push("", `Replaced invalid ${d.metric} label(s): ${p.replacedInvalid.join(", ")}`);
   lines.push(
     "",
     `Estimator: ${p.estimator ?? "not given"} · Revision: ${p.revision ?? "unknown"}`,
     "",
-    `The label ${complexityLabelName(p.size)} is the current size; this comment records why. Estimating does not claim, unblock or re-rank this ticket.`,
+    `The label ${metricLabelName(d, p.size)} is the current ${d === impactMetric ? "benefit estimate" : "size"}; this comment records why. Estimating does not claim, unblock or re-rank this ticket.`,
   );
   return lines.join("\n");
 }
@@ -131,23 +155,60 @@ export function provenanceComment(p: LabelEstimateProvenance): string {
 const strings = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every((item) => typeof item === "string");
 
+const nullableString = (value: unknown): boolean => value === null || typeof value === "string";
+/** An ISO-8601 instant that `Date.parse` accepts; missing or unparsable is malformed. */
+const validInstant = (value: unknown): value is string =>
+  typeof value === "string" &&
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
+  Number.isFinite(Date.parse(value));
+
+/**
+ * Impact-only required provenance fields (doc/design/impact-estimation.md "Provenance"): a
+ * malformed timestamp, guidance version or provenance field makes the whole record malformed,
+ * so freshness is never judged from unavailable evidence. Complexity keeps its existing
+ * compatibility behaviour.
+ */
+const validImpactFields = (value: Record<string, unknown>): boolean =>
+  validInstant(value.recordedAt) &&
+  typeof value.guidanceVersion === "number" &&
+  Number.isInteger(value.guidanceVersion) &&
+  value.guidanceVersion >= 0 &&
+  nullableString(value.estimator) &&
+  nullableString(value.revision) &&
+  (value.replacedInvalid === undefined || strings(value.replacedInvalid));
+
 /** Parse a v2 (label-backed) marker comment; anything malformed is ignored, never trusted. */
 export function parseLabelProvenance(body: string): LabelEstimateProvenance | null {
-  const match = MARKER_PATTERN.exec(body);
+  return parseMetricProvenance(complexityMetric, body) as LabelEstimateProvenance | null;
+}
+
+/** Parse a v1 impact marker comment; anything malformed is ignored, never trusted. */
+export function parseImpactProvenance(body: string): ImpactEstimateProvenance | null {
+  return parseMetricProvenance(impactMetric, body) as ImpactEstimateProvenance | null;
+}
+
+/**
+ * Parse one metric's marker comment. Markers are metric-exclusive: a complexity parser never
+ * accepts an impact marker and vice versa. Impact accepts only its known schema version.
+ */
+export function parseMetricProvenance(d: MetricDescriptor, body: string): MetricProvenance | null {
+  const match = markerPattern(d).exec(body);
   if (!match) return null;
   try {
     const value: unknown = JSON.parse(match[1]!);
     if (
       isRecord(value) &&
-      value.kind === "complexity-estimate" &&
+      value.kind === d.provenanceKind &&
+      (d === complexityMetric || value.schemaVersion === d.provenanceSchemaVersion) &&
       value.storage === "labels" &&
       COMPLEXITY_SIZES.includes(value.size as ComplexitySize) &&
       typeof value.rationale === "string" &&
       strings(value.previous) &&
       strings(value.assumptions) &&
-      strings(value.references)
+      strings(value.references) &&
+      (d === complexityMetric || validImpactFields(value))
     )
-      return value as unknown as LabelEstimateProvenance;
+      return value as unknown as MetricProvenance;
   } catch {
     // Not ours or corrupted.
   }
@@ -183,26 +244,37 @@ interface IssueState {
   readonly sizes: readonly ComplexitySize[];
   /** Labels with the complexity prefix but no recognized size (allowed only with the flag). */
   readonly invalid: readonly LabelNode[];
-  readonly provenance: LabelEstimateProvenance | null;
+  readonly provenance: MetricProvenance | null;
+  /** Impact only: the issue description's last edit time (null: never edited). */
+  readonly edited?: string | null;
 }
 
-const issueQuery = (number: number) => `query($owner: String!, $name: String!, $label: String!) {
+/** Impact reads comment author/edit evidence (#215) and the description edit time (staleness). */
+const commentNode = (d: MetricDescriptor) =>
+  d === complexityMetric
+    ? "body"
+    : "body createdAt author { __typename login } lastEditedAt includesCreatedEdit editor { __typename login }";
+const issueQuery = (
+  number: number,
+  d: MetricDescriptor = complexityMetric,
+) => `query($owner: String!, $name: String!, $label: String!) {
   repository(owner: $owner, name: $name) { id label(name: $label) { id name }
-    issue(number: ${number}) { id state labels(first: 100) { pageInfo { hasNextPage } nodes { id name } }
-      comments(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { body } } } } }`;
+    issue(number: ${number}) { id state ${d === complexityMetric ? "" : "lastEditedAt "}labels(first: 100) { pageInfo { hasNextPage } nodes { id name } }
+      comments(last: 100) { pageInfo { hasPreviousPage startCursor } nodes { ${commentNode(d)} } } } } }`;
 
 /** Older comment pages, newest first, read only until the newest valid marker is found. */
 const commentsPageQuery = (
   number: number,
+  d: MetricDescriptor = complexityMetric,
 ) => `query($owner: String!, $name: String!, $before: String!) {
   repository(owner: $owner, name: $name) { issue(number: ${number}) {
-    comments(last: 100, before: $before) { pageInfo { hasPreviousPage startCursor } nodes { body } } } } }`;
+    comments(last: 100, before: $before) { pageInfo { hasPreviousPage startCursor } nodes { ${commentNode(d)} } } } } }`;
 
 /** Bound on extra comment pages (100 comments each) searched for an older marker. */
 export const MAX_COMMENT_PAGES = 20;
 
 /** Neutral colour for a created size label; existing definitions are never restyled. */
-export const COMPLEXITY_LABEL_COLOR = "c5def5";
+export { COMPLEXITY_LABEL_COLOR };
 
 const CREATE_LABEL = `mutation($repository: ID!, $name: String!, $color: String!, $description: String!) {
   createLabel(input: { repositoryId: $repository, name: $name, color: $color, description: $description }) {
@@ -233,15 +305,48 @@ const unknownProvenance = (number: number, why: string) =>
     "Retry the same command; missing comment history is never treated as no provenance.",
   );
 
-/** Newest valid label-backed marker among comment nodes (oldest-first order), or null. */
-function newestMarker(nodes: unknown): LabelEstimateProvenance | null {
-  let provenance: LabelEstimateProvenance | null = null;
-  for (const node of Array.isArray(nodes) ? nodes : []) {
-    const parsed = parseLabelProvenance(text(prop(node, "body")));
-    if (parsed) provenance = parsed; // last (newest) wins
+/** Result of scanning comments newest-first for the newest relevant provenance marker. */
+export type ProvenanceScan<N> =
+  | {
+      readonly status: "trusted";
+      readonly provenance: MetricProvenance;
+      readonly node: N;
+      readonly ignored: string[];
+    }
+  | { readonly status: "unknown"; readonly why: string; readonly ignored: string[] }
+  | { readonly status: "none"; readonly ignored: string[] };
+
+/**
+ * The newest relevant provenance among comment nodes (oldest-first order), shared by the writer
+ * and the trusted-provenance reader so they cannot diverge (#245). With a trust decision
+ * (impact), a confirmed-untrusted marker is skipped (noted in `ignored`) and the search goes on;
+ * a marker whose author or editor authority is unknown stops the search as `unknown`, so an older
+ * trusted record is never accepted behind it. Without a trust decision (complexity, #269) the
+ * newest valid marker is taken as before.
+ */
+export async function scanProvenance<N>(
+  d: MetricDescriptor,
+  nodes: readonly N[],
+  trust: TrustDecision | undefined,
+): Promise<ProvenanceScan<N>> {
+  const ignored: string[] = [];
+  for (const node of [...nodes].reverse()) {
+    const provenance = parseMetricProvenance(d, text(prop(node, "body")));
+    if (!provenance) continue;
+    const authority = trust
+      ? await trust(node as unknown as Comment)
+      : { status: "trusted" as const };
+    if (authority.status === "trusted") return { status: "trusted", provenance, node, ignored };
+    if (authority.status === "unknown") return { status: "unknown", why: authority.why, ignored };
+    ignored.push(`untrusted provenance ignored (${authority.why})`);
   }
-  return provenance;
+  return { status: "none", ignored };
 }
+
+const nodesOf = (comments: unknown): unknown[] => {
+  const nodes = prop(comments, "nodes");
+  return Array.isArray(nodes) ? nodes : [];
+};
 
 /** Cursor for older comments, or null when history is exhausted; throws when unreadable. */
 function olderCursor(comments: unknown, number: number): string | null {
@@ -266,7 +371,8 @@ function readIssue(
   number: number,
   size: ComplexitySize,
   replaceInvalid: boolean,
-): IssueState & { olderCursor: string | null } {
+  d: MetricDescriptor,
+): IssueState & { comments: unknown } {
   const repository = prop(answer.data, "repository");
   const issue = prop(repository, "issue");
   const repositoryId = prop(repository, "id");
@@ -300,8 +406,8 @@ function readIssue(
   const found = prop(repository, "label");
   const candidate = labelNode(found);
   // GitHub label identity is case-insensitive; accept only a definition naming this size.
-  const definition = candidate && complexityLabelSize(candidate.name) === size ? candidate : null;
-  const classification = classifyComplexityLabels({
+  const definition = candidate && metricLabelSize(d, candidate.name) === size ? candidate : null;
+  const classification = classifyMetricLabels(d, {
     labels: { nodes: labels, pageInfo: { hasNextPage: false, endCursor: null } },
   });
   if (classification.unrecognized.length && !replaceInvalid)
@@ -309,11 +415,10 @@ function readIssue(
       "unrecognized-label",
       "refused:unrecognized",
       1,
-      `#${number} carries unrecognized complexity label(s) ${classification.unrecognized.join(", ")}; only ${COMPLEXITY_SIZES.map(complexityLabelName).join(", ")} are managed, so nothing was written.`,
+      `#${number} carries unrecognized ${d.metric} label(s) ${classification.unrecognized.join(", ")}; only ${COMPLEXITY_SIZES.map((s) => metricLabelName(d, s)).join(", ")} are managed, so nothing was written.`,
       `Read the ticket, choose the size, then re-run with --replace-invalid to remove them while recording it (or remove them yourself with gh issue edit ${number} --remove-label LABEL).`,
     );
-  const comments = prop(issue, "comments");
-  const provenance = newestMarker(prop(comments, "nodes"));
+  const edited = prop(issue, "lastEditedAt");
   return {
     repositoryId,
     issueId: issue.id,
@@ -322,8 +427,9 @@ function readIssue(
     labels,
     sizes: classification.sizes,
     invalid: labels.filter((l) => classification.unrecognized.includes(l.name)),
-    provenance,
-    olderCursor: provenance ? null : olderCursor(comments, number),
+    provenance: null,
+    ...(d === complexityMetric ? {} : { edited: typeof edited === "string" ? edited : null }),
+    comments: prop(issue, "comments"),
   };
 }
 
@@ -353,6 +459,7 @@ export async function runEstimate(
       args,
       allowPositionals: true,
       options: {
+        metric: { type: "string" },
         size: { type: "string" },
         rationale: { type: "string" },
         assumption: { type: "string", multiple: true },
@@ -373,6 +480,13 @@ export async function runEstimate(
     throw new Error(
       `--size is required; an unestimated ticket has no size label.\n${estimateUsage}`,
     );
+  const metricName = values.metric ?? "complexity";
+  if (!Object.hasOwn(METRICS, metricName))
+    throw new Error(`--metric must be one of ${Object.keys(METRICS).join(", ")}.`);
+  const d = METRICS[metricName as EstimateMetric];
+  const impact = d === impactMetric;
+  const Title = impact ? "Impact" : "Complexity";
+  const none = impact ? "unassessed" : "unestimated";
   const number = Number(positionals[0]);
   const size = asSize(values.size, "--size");
   const replace = values.replace === undefined ? undefined : asSize(values.replace, "--replace");
@@ -393,10 +507,10 @@ export async function runEstimate(
   const fs = runtime.fs ?? nodeFileSystem;
   const git = runtime.git ?? nodeGit;
   const api = runtime.api ?? ghGraphqlApi;
-  const label = complexityLabelName(size);
+  const label = metricLabelName(d, size);
   const result: Record<string, unknown> = {
-    schemaVersion: 2,
-    kind: "complexity-estimate",
+    schemaVersion: impact ? 1 : 2,
+    kind: d.provenanceKind,
     issue: number,
     size,
     label,
@@ -404,8 +518,7 @@ export async function runEstimate(
   const lines: string[] = [];
   const finish = async (status: string, code: number) => {
     result.status = status;
-    result.boundaries =
-      "Only complexity size labels and one provenance comment were touched; no claim, blocker, readiness or ranking was changed.";
+    result.boundaries = `Only ${d.metric} size labels and one provenance comment were touched; no claim, blocker, readiness or ranking was changed.`;
     await output(
       json
         ? JSON.stringify(result, null, 2) + "\n"
@@ -418,38 +531,49 @@ export async function runEstimate(
     const target = await resolveRepositoryTarget(runtime.cwd ?? process.cwd(), values.repo, git);
     result.repository = target.repository;
     const config = await loadConfig(target.root, fs);
-    if (settingFor(config, "complexity.enabled").value === false)
+    if (settingFor(config, d.enabledKey).value === false)
       throw new Refusal(
         "disabled",
         "disabled",
         2,
-        `Complexity is disabled for ${target.repository} (complexity.enabled = false); nothing was recorded.`,
-        "Opt in with: github-triage config set complexity.enabled true",
+        `${Title} is disabled for ${target.repository} (${d.enabledKey} = false); nothing was recorded.`,
+        `Opt in with: github-triage config set ${d.enabledKey} true`,
       );
+    const trust: TrustDecision | undefined = impact
+      ? (runtime.trust?.(target.repository) ??
+        (async () => ({ status: "unknown", why: "no trust boundary supplied" })))
+      : undefined;
 
     const [owner, name] = target.repository.split("/") as [string, string];
     const vars = { owner, name, label };
     /** Fresh read, paging comments backward until the newest marker or exhausted history. */
     const read = async (): Promise<IssueState> => {
-      const answer = await safely(api.query(issueQuery(number), vars));
-      let state = readIssue(answer, number, size, replaceInvalid);
-      let cursor = state.olderCursor;
+      const answer = await safely(api.query(issueQuery(number, d), vars));
+      const { comments: firstPage, ...first } = readIssue(answer, number, size, replaceInvalid, d);
+      // Paging stops at the first relevant marker: trusted (recorded) or unknown authority. An
+      // unknown marker leaves `provenance` null, so it never matches and fresh provenance is
+      // recorded, exactly where readAssessment reports `unknown` (doc/design/impact-estimation.md).
+      let scan = await scanProvenance(d, nodesOf(firstPage), trust);
+      let cursor = scan.status === "none" ? olderCursor(firstPage, number) : null;
       let pages = 0;
-      while (!state.provenance && cursor !== null) {
+      while (scan.status === "none" && cursor !== null) {
         if (pages >= MAX_COMMENT_PAGES)
           throw unknownProvenance(number, `more than ${MAX_COMMENT_PAGES + 1} pages of comments`);
         pages += 1;
         const page = await safely(
-          api.query(commentsPageQuery(number), { owner, name, before: cursor }),
+          api.query(commentsPageQuery(number, d), { owner, name, before: cursor }),
         );
         if (page.errors.length)
           throw unknownProvenance(number, denied(page) ?? "GitHub returned errors");
         const comments = prop(page.data, "repository", "issue", "comments");
-        const provenance = newestMarker(prop(comments, "nodes"));
+        scan = await scanProvenance(d, nodesOf(comments), trust);
         const next = olderCursor(comments, number);
-        state = { ...state, provenance };
-        cursor = provenance ? null : next;
+        cursor = scan.status === "none" ? next : null;
       }
+      const state: IssueState = {
+        ...first,
+        provenance: scan.status === "trusted" ? scan.provenance : null,
+      };
       return state;
     };
     const onlyTarget = (sizes: readonly ComplexitySize[]) =>
@@ -462,9 +586,9 @@ export async function runEstimate(
     result.issueState = before.state;
     const revisionText = await git(["rev-parse", "HEAD"], target.root).catch(() => "");
     const revision = /^[0-9a-f]{40}$/.test(revisionText.trim()) ? revisionText.trim() : null;
-    const provenance: LabelEstimateProvenance = {
-      schemaVersion: 2,
-      kind: "complexity-estimate",
+    const provenance = {
+      schemaVersion: d.provenanceSchemaVersion,
+      kind: d.provenanceKind,
       storage: "labels",
       size,
       // Record only observed evidence: the sizes this run read, or, on a retry after a partial
@@ -477,11 +601,11 @@ export async function runEstimate(
       references,
       estimator,
       revision,
-      guidanceVersion: complexityGuidance.guidanceVersion,
+      guidanceVersion: d.guidance.guidanceVersion,
       recordedAt: (runtime.now?.() ?? new Date()).toISOString(),
       // Only invalid labels this run observed; a retry after they were removed records none.
       ...(before.invalid.length ? { replacedInvalid: invalidNames(before) } : {}),
-    };
+    } as MetricProvenance;
     result.provenance = provenance;
     const retryGuard = before.sizes.filter((observed) => observed !== size);
     const retryHint =
@@ -490,7 +614,7 @@ export async function runEstimate(
         : "";
 
     lines.push(
-      `Complexity estimate for ${target.repository}#${number}: ${before.sizes.join(", ") || "unestimated"} -> ${size}`,
+      `${Title} estimate for ${target.repository}#${number}: ${before.sizes.join(", ") || none} -> ${size}`,
     );
 
     // The optional guard: the target already applied (a retry) is not stale.
@@ -504,14 +628,29 @@ export async function runEstimate(
       );
 
     const recorded = before.provenance;
-    /** Whether a stored record is this same assessment (size, reasons and estimator). */
-    const isThisAssessment = (stored: typeof recorded) =>
-      stored?.size === size &&
+    /**
+     * Impact only: a record is stale when its guidance version is not current or the description
+     * was edited after it. An identical stale record is re-recorded, which clears the staleness.
+     */
+    const stale = (stored: MetricProvenance, state: IssueState) => {
+      if (!impact) return false;
+      if (stored.guidanceVersion !== d.guidance.guidanceVersion) return true;
+      const edited = state.edited ? Date.parse(state.edited) : NaN;
+      return edited > Date.parse(stored.recordedAt);
+    };
+    /**
+     * Whether a stored record is this same assessment (size, reasons and estimator, and for impact
+     * not stale). Replaced invalid labels are not part of identity: a retry cannot observe them.
+     */
+    const isThisAssessment = (stored: MetricProvenance | null, state: IssueState) =>
+      !!stored &&
+      !stale(stored, state) &&
+      stored.size === size &&
       stored.rationale === rationale &&
       (stored.estimator ?? null) === estimator &&
       sameList(stored.assumptions, assumptions) &&
       sameList(stored.references, references);
-    const provenanceMatches = isThisAssessment(recorded);
+    const provenanceMatches = isThisAssessment(recorded, before);
     if (onlyTarget(before.sizes) && !before.invalid.length && provenanceMatches) {
       // Nothing is written, so report the stored provenance (its real time and revision).
       result.provenance = recorded;
@@ -527,8 +666,8 @@ export async function runEstimate(
         api.mutate(CREATE_LABEL, {
           repository: before.repositoryId,
           name: label,
-          color: COMPLEXITY_LABEL_COLOR,
-          description: `Complexity estimate ${size} (github-triage estimate)`,
+          color: d.labelColor,
+          description: `${Title} estimate ${size} (github-triage estimate)`,
         }),
       );
       const node = labelNode(prop(created.data, "createLabel", "label"));
@@ -565,7 +704,7 @@ export async function runEstimate(
         1,
         !sameList(latest.sizes, before.sizes) ||
           !sameList(invalidNames(latest), invalidNames(before))
-          ? `#${number} changed from ${before.sizes.join(", ") || "unestimated"} to ${latest.sizes.join(", ") || "unestimated"} while recording; the ticket was not changed.`
+          ? `#${number} changed from ${before.sizes.join(", ") || none} to ${latest.sizes.join(", ") || none} while recording; the ticket was not changed.`
           : `#${number} received new estimate provenance while recording; the ticket was not changed.`,
         "Re-run the command after reading the new estimate and its rationale.",
       );
@@ -575,7 +714,7 @@ export async function runEstimate(
     const failed: string[] = [];
     result.labelsAdded = added;
     result.labelsRemoved = removed;
-    if (!latest.labels.some((l) => complexityLabelSize(l.name) === size)) {
+    if (!latest.labels.some((l) => metricLabelSize(d, l.name) === size)) {
       const add = await safely(
         api.mutate(ADD_LABEL, { issue: latest.issueId, label: definition.id }),
       );
@@ -590,7 +729,7 @@ export async function runEstimate(
       added.push(definition.name);
     }
     for (const other of latest.labels) {
-      const otherSize = complexityLabelSize(other.name);
+      const otherSize = metricLabelSize(d, other.name);
       const invalid = latest.invalid.some((l) => l.id === other.id);
       if (!invalid && (!otherSize || otherSize === size)) continue;
       const remove = await safely(
@@ -634,7 +773,7 @@ export async function runEstimate(
     // final read. A new record that is this same assessment means it is already recorded (do not
     // duplicate it); a different one is a concurrent estimate this run must not talk over.
     if (JSON.stringify(final.provenance ?? null) !== JSON.stringify(recorded ?? null)) {
-      if (isThisAssessment(final.provenance)) {
+      if (isThisAssessment(final.provenance, final)) {
         result.provenance = final.provenance;
         result.provenanceWritten = false;
         lines.push("Already recorded: a concurrent run completed this same assessment.");

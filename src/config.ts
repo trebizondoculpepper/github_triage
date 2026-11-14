@@ -80,6 +80,14 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
       "Whether complexity estimation (complexity:XS..complexity:XXL labels) is active for this repository. Disabling it keeps existing labels and estimates.",
   },
   {
+    key: "impact.enabled",
+    type: "boolean",
+    nullable: false,
+    defaultValue: true,
+    description:
+      "Whether impact estimation (impact:XS..impact:XXL labels) is active for this repository. Disabling it hides impact assessment and findings but keeps existing labels and estimates.",
+  },
+  {
     key: "processGuide",
     type: "boolean",
     nullable: false,

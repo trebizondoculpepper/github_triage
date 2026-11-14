@@ -67,6 +67,8 @@ import {
 } from "./deliverables.js";
 import { markerTrust } from "./delivery.js";
 import type { LabelEstimationRuntime } from "./complexitylabels.js";
+import { metricStatus } from "./complexitylabels.js";
+import { impactMetric } from "./metrics.js";
 import type { EstimateRuntime } from "./estimate.js";
 import { localDoctor, localDoctorExitCode, localDoctorText } from "./localdoctor.js";
 import type { LocalDoctorRuntime } from "./localdoctor.js";
@@ -130,7 +132,8 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   deps add|remove N --on M --note WHY [--dry-run]  Change native dependencies
   estimate --help       Complexity sizing guidance (XS..XXL)
   estimate N --size S --rationale TEXT [--assumption A]... [--replace OLD]  Record a size
-                        as a complexity:S label with provenance (estimate --help)
+                        as a complexity:S label with provenance (estimate --help);
+                        --metric impact records a benefit estimate as impact:S
   pr N                  Why is pull request N not progressing? Every blocker at once
   pr N --history        Why does PR N keep failing review? Rounds, findings, recurring files
   claim N --agent NAME [--branch B] [--platform P] [--rework] [--dry-run]  Claim an eligible ticket;
@@ -642,11 +645,15 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
       ? await cachedSnapshot(values.cache ?? "", values.repo)
       : await runtime.collect(values.repo ?? (await runtime.currentRepository()), {});
     if (!values.offline && values.cache) await atomicJson(values.cache, snapshot);
+    const impact = await metricStatus(impactMetric, snapshot.repository, runtime.estimation).catch(
+      () => "unknown" as const,
+    );
     const report = ticketDoctor(snapshot, {
       staleHours,
       limit,
       now: runtime.now?.() ?? new Date(),
       offline: !!values.offline,
+      impactEnabled: impact !== "disabled",
     });
     await output(values.json ? JSON.stringify(report, null, 2) + "\n" : ticketDoctorText(report));
     return report.completeness.complete ? 0 : 2;
@@ -787,7 +794,12 @@ async function run(args: string[], output: Output, runtime: Runtime): Promise<nu
       );
       return 0;
     }
-    return runEstimate(rest, output, { now: runtime.now, ...runtime.estimate });
+    return runEstimate(rest, output, {
+      now: runtime.now,
+      // #245: impact provenance authority, the #212 rule over a per-run permission cache.
+      trust: (repository) => markerTrust(permissionLookup(repository, runtime.rest ?? ghRest)),
+      ...runtime.estimate,
+    });
   }
   if (args[0] === "pr") {
     const { values, positionals } = parseArgs({

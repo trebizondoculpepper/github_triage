@@ -16,6 +16,8 @@
  * or a backend setting; #153 deletes the retired field code.
  */
 import { COMPLEXITY_SIZES } from "./complexity.js";
+import { INVALID_SIZE_SUGGESTIONS, complexityMetric } from "./metrics.js";
+import type { MetricDescriptor } from "./metrics.js";
 import type { ComplexitySize } from "./complexity.js";
 import {
   ConfigError,
@@ -33,23 +35,34 @@ import type { EstimationFinding, EstimationReport, SizeReading, SizeSource } fro
 import type { PickupContext } from "./ranking.js";
 import type { Issue } from "./types.js";
 
-export const COMPLEXITY_LABEL_PREFIX = "complexity:";
+export const COMPLEXITY_LABEL_PREFIX = complexityMetric.labelPrefix;
 
-/** Canonical label name for a size: lowercase prefix, uppercase size suffix. */
-export const complexityLabelName = (size: ComplexitySize): string =>
-  `${COMPLEXITY_LABEL_PREFIX}${size}`;
+/** Canonical label name for a metric's size: lowercase prefix, uppercase size suffix. */
+export const metricLabelName = (d: MetricDescriptor, size: ComplexitySize): string =>
+  `${d.labelPrefix}${size}`;
 
-/** The size a label names, compared case-insensitively like GitHub label identity; else null. */
-export function complexityLabelSize(name: string): ComplexitySize | null {
+/** The size a metric label names, compared case-insensitively like GitHub label identity. */
+export function metricLabelSize(d: MetricDescriptor, name: string): ComplexitySize | null {
   const lower = name.toLowerCase();
-  if (!lower.startsWith(COMPLEXITY_LABEL_PREFIX)) return null;
-  const suffix = name.slice(COMPLEXITY_LABEL_PREFIX.length).toUpperCase();
+  if (!lower.startsWith(d.labelPrefix)) return null;
+  const suffix = name.slice(d.labelPrefix.length).toUpperCase();
   return COMPLEXITY_SIZES.includes(suffix as ComplexitySize) ? (suffix as ComplexitySize) : null;
 }
 
+/** Whether a label carries the metric's prefix (recognized size or not). */
+export const isMetricLabel = (d: MetricDescriptor, name: string): boolean =>
+  name.toLowerCase().startsWith(d.labelPrefix);
+
+/** Canonical label name for a size: lowercase prefix, uppercase size suffix. */
+export const complexityLabelName = (size: ComplexitySize): string =>
+  metricLabelName(complexityMetric, size);
+
+/** The size a label names, compared case-insensitively like GitHub label identity; else null. */
+export const complexityLabelSize = (name: string): ComplexitySize | null =>
+  metricLabelSize(complexityMetric, name);
+
 /** Whether a label carries the complexity prefix (recognized size or not). */
-export const isComplexityLabel = (name: string): boolean =>
-  name.toLowerCase().startsWith(COMPLEXITY_LABEL_PREFIX);
+export const isComplexityLabel = (name: string): boolean => isMetricLabel(complexityMetric, name);
 
 export type LabelClassificationState = "estimated" | "unestimated" | "conflicting" | "unknown";
 
@@ -61,25 +74,31 @@ export interface LabelClassification {
   sizes: ComplexitySize[];
   /** Observed recognized size labels, as spelled on the ticket. */
   labels: string[];
-  /** Observed `complexity:` labels whose suffix is not a recognized size. */
+  /** Observed prefixed labels whose suffix is not a recognized size. */
   unrecognized: string[];
   /** False when the label collection was truncated. */
   complete: boolean;
   detail: string;
 }
 
-/** Classify one issue's current size from its collected labels. Pure; the writer shares it. */
-export function classifyComplexityLabels(issue: Pick<Issue, "labels">): LabelClassification {
+/**
+ * Classify one issue's current size for a metric from its collected labels. Pure; the writer
+ * shares it. Only labels with the metric's prefix are considered (cross-metric isolation).
+ */
+export function classifyMetricLabels(
+  d: MetricDescriptor,
+  issue: Pick<Issue, "labels">,
+): LabelClassification {
   const complete = !issue.labels.pageInfo.hasNextPage;
   const labels: string[] = [];
   const unrecognized: string[] = [];
   const found = new Set<ComplexitySize>();
   for (const { name } of issue.labels.nodes) {
-    const size = complexityLabelSize(name);
+    const size = metricLabelSize(d, name);
     if (size) {
       labels.push(name);
       found.add(size);
-    } else if (isComplexityLabel(name)) unrecognized.push(name);
+    } else if (isMetricLabel(d, name)) unrecognized.push(name);
   }
   const sizes = COMPLEXITY_SIZES.filter((size) => found.has(size));
   const base = { sizes, labels, unrecognized, complete };
@@ -92,7 +111,7 @@ export function classifyComplexityLabels(issue: Pick<Issue, "labels">): LabelCla
       detail: [
         ...(sizes.length > 1 ? [`several size labels (${labels.join(", ")})`] : []),
         ...(unrecognized.length
-          ? [`unrecognized complexity label(s) ${unrecognized.join(", ")}`]
+          ? [`unrecognized ${d.metric} label(s) ${unrecognized.join(", ")}`]
           : []),
       ]
         .join("; ")
@@ -103,13 +122,17 @@ export function classifyComplexityLabels(issue: Pick<Issue, "labels">): LabelCla
       ...base,
       state: "unknown",
       size: null,
-      detail: "labels truncated; complexity unknown, not unestimated",
+      detail: `labels truncated; ${d.metric} unknown, not unestimated`,
     };
   const [size] = sizes;
   return size
     ? { ...base, state: "estimated", size, detail: `size label ${labels[0]}` }
-    : { ...base, state: "unestimated", size: null, detail: "no complexity size label" };
+    : { ...base, state: "unestimated", size: null, detail: `no ${d.metric} size label` };
 }
+
+/** Classify one issue's current complexity size from its collected labels. Pure. */
+export const classifyComplexityLabels = (issue: Pick<Issue, "labels">): LabelClassification =>
+  classifyMetricLabels(complexityMetric, issue);
 
 /** Classification as a size reading for the shared report builder. */
 export function labelSizeReading(issue: Pick<Issue, "labels">): SizeReading {
@@ -154,7 +177,7 @@ export async function collectLabelEstimationInput(
       detail,
       next: [next],
     }));
-    return settingFor(config, "complexity.enabled").value === false
+    return settingFor(config, complexityMetric.enabledKey).value === false
       ? { status: "disabled", unavailable: null, findings }
       : { status: "available", unavailable: null, findings };
   } catch (caught) {
@@ -165,6 +188,30 @@ export async function collectLabelEstimationInput(
       unavailable: `repository configuration not read (${error.message}); complexity state is unknown`,
       findings: [{ rule: "config-unavailable", detail: error.message, next: [error.recovery] }],
     };
+  }
+}
+
+/**
+ * Whether a metric is enabled for the repository (its `enabledKey`, default on). A configuration
+ * that cannot be read is `unknown`, never `disabled`; disabling deletes nothing.
+ */
+export async function metricStatus(
+  d: MetricDescriptor,
+  repository: string,
+  runtime: LabelEstimationRuntime = {},
+): Promise<"available" | "disabled" | "unknown"> {
+  try {
+    const target = await resolveRepositoryTarget(
+      runtime.cwd ?? process.cwd(),
+      repository,
+      runtime.git ?? nodeGit,
+    );
+    const config = await loadConfig(target.root, runtime.fs ?? nodeFileSystem);
+    return settingFor(config, d.enabledKey).value === false ? "disabled" : "available";
+  } catch (caught) {
+    const error = filesystemRefusal(caught) ?? caught;
+    if (!(error instanceof ConfigError)) throw error;
+    return "unknown";
   }
 }
 
@@ -184,70 +231,68 @@ export function labelEstimationReport(
   return sizeReport(issues, source, options);
 }
 
-/**
- * Registered suggestion table (#178): common words people use as an invalid `complexity:`
- * suffix, mapped to the size they usually mean. Data, not conditionals; keys are lowercase and
- * compared case-insensitively. A mapped suffix yields a suggestion only, never an applied size;
- * an unmapped suffix yields no suggestion.
- */
-export const INVALID_SIZE_SUGGESTIONS: Readonly<Record<string, ComplexitySize>> = Object.freeze({
-  tiny: "XS",
-  trivial: "XS",
-  xsmall: "XS",
-  "extra-small": "XS",
-  small: "S",
-  sm: "S",
-  medium: "M",
-  med: "M",
-  large: "L",
-  lg: "L",
-  big: "L",
-  huge: "XL",
-  xlarge: "XL",
-  "extra-large": "XL",
-  xxlarge: "XXL",
-  enormous: "XXL",
-  massive: "XXL",
-});
+/** Registered suggestion table (#178), re-exported from the shared metric data. */
+export { INVALID_SIZE_SUGGESTIONS };
+
+/** The suggested size for an invalid metric label's suffix, or null when unmapped. */
+export function suggestedMetricSize(d: MetricDescriptor, label: string): ComplexitySize | null {
+  if (!isMetricLabel(d, label) || metricLabelSize(d, label)) return null;
+  const suffix = label.slice(d.labelPrefix.length).trim().toLowerCase();
+  return Object.hasOwn(d.suggestionTable, suffix) ? d.suggestionTable[suffix]! : null;
+}
 
 /** The suggested size for an invalid complexity label's suffix, or null when unmapped. */
-export function suggestedSize(label: string): ComplexitySize | null {
-  if (!isComplexityLabel(label) || complexityLabelSize(label)) return null;
-  const suffix = label.slice(COMPLEXITY_LABEL_PREFIX.length).trim().toLowerCase();
-  return Object.hasOwn(INVALID_SIZE_SUGGESTIONS, suffix) ? INVALID_SIZE_SUGGESTIONS[suffix]! : null;
-}
+export const suggestedSize = (label: string): ComplexitySize | null =>
+  suggestedMetricSize(complexityMetric, label);
 
 /** Ticket Doctor inspection finding for one issue's label evidence; never a repair. */
 export interface LabelDoctorFinding {
-  kind: "complexity-label-conflict" | "complexity-label-invalid" | "complexity-labels-incomplete";
+  kind:
+    | "complexity-label-conflict"
+    | "complexity-label-invalid"
+    | "complexity-labels-incomplete"
+    | "impact-label-conflict"
+    | "impact-label-invalid"
+    | "impact-labels-incomplete";
   certainty: "definite" | "unknown";
   detail: string;
-  /** complexity-label-invalid only: the invalid labels, as spelled on the ticket. */
+  /** *-label-invalid only: the invalid labels, as spelled on the ticket. */
   invalid?: string[];
-  /** complexity-label-invalid only: valid size labels also present. */
+  /** *-label-invalid only: valid size labels also present. */
   valid?: string[];
-  /** complexity-label-invalid only: per invalid label, the registered suggestion or null. */
+  /** *-label-invalid only: per invalid label, the registered suggestion or null. */
   suggestions?: { label: string; size: ComplexitySize | null }[];
 }
 
 /**
- * Conflicts, invalid labels and incomplete label evidence; unestimated tickets are not findings.
- * An invalid label seen on a truncated page is still reported, but as unknown (inspection only):
- * the unseen labels may hold more evidence. Pure.
+ * Conflicts, invalid labels and incomplete label evidence for one metric; unestimated tickets are
+ * not findings. An invalid label seen on a truncated page is still reported, but as unknown
+ * (inspection only): the unseen labels may hold more evidence. Pure; suggestions are never applied.
  */
-export function complexityLabelFindings(issue: Pick<Issue, "labels">): LabelDoctorFinding[] {
-  const c = classifyComplexityLabels(issue);
+export function metricLabelFindings(
+  d: MetricDescriptor,
+  issue: Pick<Issue, "labels">,
+): LabelDoctorFinding[] {
+  const c = classifyMetricLabels(d, issue);
+  const kinds = d.invalidFindingKinds as {
+    conflict: LabelDoctorFinding["kind"];
+    invalid: LabelDoctorFinding["kind"];
+    incomplete: LabelDoctorFinding["kind"];
+  };
   const findings: LabelDoctorFinding[] = [];
   if (c.unrecognized.length) {
-    const suggestions = c.unrecognized.map((label) => ({ label, size: suggestedSize(label) }));
+    const suggestions = c.unrecognized.map((label) => ({
+      label,
+      size: suggestedMetricSize(d, label),
+    }));
     const described = suggestions
       .map((s) => (s.size ? `${s.label} (suggested size ${s.size})` : `${s.label} (no suggestion)`))
       .join(", ");
     findings.push({
-      kind: "complexity-label-invalid",
+      kind: kinds.invalid,
       certainty: c.complete ? "definite" : "unknown",
       detail: [
-        `invalid complexity label(s) ${described}`,
+        `invalid ${d.metric} label(s) ${described}`,
         ...(c.labels.length ? [`valid size label(s) also present: ${c.labels.join(", ")}`] : []),
         ...(c.complete ? [] : ["labels truncated, so the full set is unknown"]),
       ].join("; "),
@@ -258,11 +303,15 @@ export function complexityLabelFindings(issue: Pick<Issue, "labels">): LabelDoct
   }
   if (c.sizes.length > 1)
     findings.push({
-      kind: "complexity-label-conflict",
+      kind: kinds.conflict,
       certainty: "definite",
       detail: `several size labels (${c.labels.join(", ")}); inspect, no size is chosen`,
     });
   if (!findings.length && c.state === "unknown")
-    findings.push({ kind: "complexity-labels-incomplete", certainty: "unknown", detail: c.detail });
+    findings.push({ kind: kinds.incomplete, certainty: "unknown", detail: c.detail });
   return findings;
 }
+
+/** Complexity findings (unchanged kinds and wording). */
+export const complexityLabelFindings = (issue: Pick<Issue, "labels">): LabelDoctorFinding[] =>
+  metricLabelFindings(complexityMetric, issue);
