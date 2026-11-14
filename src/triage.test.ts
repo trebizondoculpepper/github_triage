@@ -6740,6 +6740,93 @@ describe("read-only MCP adapter (#25)", async () => {
     await client.close();
   });
 
+  describe("default repository without --project or --repo (#271)", () => {
+    // A host such as Ori launches the server in its daemon's directory, which holds another
+    // project's checkout. Injected cwd, git and filesystem model that launch directory.
+    const daemonRepo = "daemon/elsewhere";
+    const project = "/work/project";
+    const hostRuntime = () => {
+      const lookups: (string | undefined)[] = [];
+      const touched: string[] = [];
+      const runtime = fake({
+        currentRepository: async (cwd?: string) => {
+          lookups.push(cwd);
+          return cwd === project ? repo : daemonRepo;
+        },
+        git: async (args: readonly string[]) => {
+          touched.push(`git ${args.join(" ")}`);
+          return args[0] === "rev-parse"
+            ? "/daemon/cwd\n"
+            : `origin\thttps://github.com/${daemonRepo}.git (fetch)\n`;
+        },
+        fs: {
+          readText: async (path: string) => (touched.push(`read ${path}`), null),
+          writeText: async (path: string) => void touched.push(`write ${path}`),
+          rename: async (_from: string, to: string) => void touched.push(`rename ${to}`),
+          appendText: async (path: string) => void touched.push(`append ${path}`),
+          remove: async (path: string) => void touched.push(`remove ${path}`),
+          makeDirectory: async (path: string) => void touched.push(`mkdir ${path}`),
+        },
+      });
+      return { runtime, lookups, touched };
+    };
+    const calls: [string, Record<string, unknown>][] = [
+      ["triage_briefing", {}],
+      ["triage_briefing", { mode: "briefing" }],
+      ["triage_issue", { number: 1 }],
+      ["triage_dependencies", { number: 1 }],
+    ];
+
+    it("refuses with selection guidance instead of resolving the launch directory, keeping overrides", async () => {
+      const { runtime, lookups, touched } = hostRuntime();
+      const client = await connect(runtime);
+      for (const [name, args] of calls) {
+        const result = await client.callTool({ name, arguments: args });
+        expect(result.isError, name).toBe(true);
+        const envelope = structured(result);
+        expect(envelope).toMatchObject({
+          status: "error",
+          result: null,
+          selection: { repository: null },
+          error: { code: "repository-unresolved" },
+        });
+        const message = envelope.error?.message ?? "";
+        for (const fix of ["repo", "--repo owner/name", "--project /absolute/project/path"])
+          expect(message, name).toContain(fix);
+        const command = /github-triage-mcp [^\n]*/.exec(message)?.[0] ?? "";
+        expect(command).toBe("github-triage-mcp --project /absolute/project/path");
+        expect(message).not.toContain("#");
+        expect(JSON.stringify(result)).not.toContain(daemonRepo);
+      }
+      expect(lookups).toEqual([]);
+      expect(runtime.seen).toEqual([]);
+      expect(touched).toEqual([]);
+      await client.close();
+
+      // Explicit overrides still select: tool repo, then --repo, then --project.
+      const viaTool = await connect(runtime);
+      const tool = await viaTool.callTool({ name: "triage_briefing", arguments: { repo: "o/a" } });
+      expect(structured(tool)).toMatchObject({
+        status: "complete",
+        selection: { repository: "o/a" },
+      });
+      await viaTool.close();
+      const viaStartup = await connect(runtime, { repo: "o/b" });
+      const startup = await viaStartup.callTool({ name: "triage_issue", arguments: { number: 1 } });
+      expect(structured(startup).selection.repository).toBe("o/b");
+      await viaStartup.close();
+      expect(lookups).toEqual([]);
+      const viaProject = await connect(runtime, { project });
+      const configured = await viaProject.callTool({
+        name: "triage_dependencies",
+        arguments: { number: 1 },
+      });
+      expect(structured(configured).selection.repository).toBe(repo);
+      expect(lookups).toEqual([project]);
+      await viaProject.close();
+    });
+  });
+
   describe("read-only identity from the project's agent-inbox.toml", () => {
     const root = "/work/project";
     const identityFile = join(root, "agent-inbox.toml");
