@@ -304,6 +304,29 @@ describe("live run budget (#202)", () => {
     expect(log.find((a) => a.includes("check-runs"))).not.toContain("If-None-Match");
   });
 
+  it("counts only completed check runs and reports pending ones separately", async () => {
+    const report = await liveRun(
+      fakeGitHub([], undefined, (a) =>
+        a.includes("check-runs")
+          ? ok({
+              total_count: 3,
+              check_runs: [
+                { completed_at: "2026-11-15T00:00:00Z" },
+                { completed_at: null },
+                { completed_at: null },
+              ],
+            })
+          : undefined,
+      ),
+      args(tempState()),
+    );
+    expect(report.invalidation).toMatchObject({
+      seen: { check_run_completed: 1 },
+      afterUpdatedAt: { check_run_completed: 1 },
+      checkRunsNotCompleted: 2,
+    });
+  });
+
   it("leaves stale manifest entries out of the invalidation measurements", async () => {
     const state = tempState();
     writeFileSync(

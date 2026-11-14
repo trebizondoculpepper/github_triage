@@ -613,11 +613,20 @@ export async function liveRun(
         (report.invalidation as Record<string, unknown>).checkRuns = "unknown: unexpected body";
       }
       if (body.total_count > body.check_runs.length) truncated.push(`pr#${pr} check runs`);
+      // Only completed runs have a completion time to compare; queued or in-progress runs are
+      // reported separately and never counted as completions.
+      let pending = 0;
       for (const run of body.check_runs) {
+        const t = run.completed_at ? Date.parse(run.completed_at) : NaN;
+        if (Number.isNaN(t)) {
+          pending++;
+          continue;
+        }
         seen["check_run_completed"] = (seen["check_run_completed"] ?? 0) + 1;
-        if (run.completed_at && Date.parse(run.completed_at) > prUpdated + 1000)
+        if (t > prUpdated + 1000)
           late["check_run_completed"] = (late["check_run_completed"] ?? 0) + 1;
       }
+      (report.invalidation as Record<string, unknown>).checkRunsNotCompleted = pending;
     }
   }
 
