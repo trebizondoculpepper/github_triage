@@ -39,7 +39,23 @@ npx tsx doc/reports/examples/datalog-local/run.ts \
   --out /tmp/triage-datalog-result.json
 ```
 
-This runs the synthetic checks without live GitHub access. To evaluate a frozen input, additionally pass `--snapshot PATH` and `--baseline PATH`, using the raw snapshot and its corresponding structured briefing. These must refer to the same collection; keep them unversioned. The engine path explicitly loads trusted local executable code.
+This runs the synthetic checks without live GitHub access. The frozen comparison used the normal CLI cache and an offline designer briefing from that same cache. To collect a new equivalent pair (not recreate the historical snapshot), use the same source revision for both commands:
+
+```sh
+npm run --silent triage -- --repo OWNER/REPOSITORY \
+  --cache /tmp/pdb-snapshot.json --json --no-update-check > /tmp/pdb-live-report.json
+npm run --silent triage -- --repo OWNER/REPOSITORY \
+  --offline --cache /tmp/pdb-snapshot.json --role designer \
+  --agent YOUR_AGENT --platform codex --json --no-update-check > /tmp/pdb-baseline.json
+npx tsx doc/reports/examples/datalog-local/run.ts \
+  --engine-module /tmp/triage-datalog-engine/node_modules/datascript \
+  --snapshot /tmp/pdb-snapshot.json --baseline /tmp/pdb-baseline.json \
+  --out /tmp/pdb-comparison.json
+```
+
+Replace the repository and agent placeholders. These collection commands read GitHub and save local files; the offline command does not fetch newer facts. A fresh collection will naturally differ from the historical 43-ticket input. The historical snapshot and baseline are intentionally not committed.
+
+To evaluate an already frozen input, additionally pass `--snapshot PATH` and `--baseline PATH`, using the raw snapshot and its corresponding structured briefing. These must refer to the same collection; keep them unversioned. The engine path explicitly loads trusted local executable code.
 
 ## Recommendation
 
