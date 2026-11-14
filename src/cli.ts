@@ -179,16 +179,23 @@ Read-only LLM action briefing. Requires authenticated gh and Node 26+.
   --role NAME           Shape the compact briefing for implementer (attention, PR follow-up,
                         own work, pickup, unblock candidates, stale claims) or designer
                         (attention, decisions, documentation, design review, new design).
-                        Presentation only: never authority; addressed attention always shown
+                        Presentation only: never authority; addressed attention always shown.
+                        Both roles rank NEXT STEPS as one blended queue (rankedActions): attention,
+                        PR follow-up, designer duties, easy wins, assessments (estimate-complexity
+                        or assess-impact, blocked tickets included), ordinary, unfavorable work
   --platform P          Your platform (e.g. claude-code); platform:* tickets need a match.
                         Without it, restricted tickets are inspection context, not pickup
   --order MODE          Pickup order only: impact (default: urgency, immediate unlocks,
                         incomplete first, oldest), or oldest/newest (creation time alone,
                         ignoring urgency/impact; both still shown). Never changes eligibility,
-                        claims, addressed attention or the PR/owned-work groups above pickup
-  --estimate            Present the optional estimation queue (unestimated or stale sizes,
-                        blocked tickets included) first; otherwise it follows higher-priority
-                        work. Never claims or reserves; disabled complexity hides it
+                        claims, addressed attention or the PR/owned-work groups above pickup.
+                        With a role, oldest/newest merges unclaimed easy-win, ordinary and
+                        unfavorable pickup into one age-ordered group; assessments, attention,
+                        PR follow-up, designer duties and own claims keep their positions
+  --estimate            Focus on the estimation queue (unestimated or stale sizes, blocked
+                        tickets included) first. Not needed to see estimates: --role
+                        implementer ranks them in NEXT STEPS. Never claims or reserves;
+                        disabled complexity hides it
   --stale-hours N       Flag claims with no ticket/linked-PR activity for N hours (default 48)
   --max-chars N         Compact text budget (default 10000)
   --limit N             Next steps (default 5 compact, 10 expanded)
