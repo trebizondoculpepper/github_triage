@@ -200,6 +200,10 @@ Ticket Doctor (#192) must replay the same validator and report rejected/conflict
 
 **Versioning.** Delivery records are a new record kind at `v: 1`; release records stay `v: 1` and are unchanged. Readers refuse future versions (`RECORD_UNSUPPORTED`) instead of guessing, and a trusted future-version record makes `recordsUnknown(t)` true (see Folding). Read schemas (`pr-status`, `ticket-doctor`, briefing JSON, MCP) gain additive `delivery`, `responsibility` and `closure` fields within their current `schemaVersion`; no existing field changes meaning.
 
+## Owner clarification addendum
+
+[delivery-owner-clarifications.md](delivery-owner-clarifications.md) specifies the owner-approved replacement defaults for legacy membership, commit correction selectors and ticket-level active-claim handoff, and clarifies explicit off-target progress evidence. It takes precedence over conflicting command examples below when implemented; runtime changes follow review. The existing live target-containment and unknown-evidence rules remain authoritative.
+
 ## Transitions and commands
 
 All commands use the existing refusal shape (stable error ID, facts, failed prerequisite, recovery commands) and text/JSON parity. None is exposed through MCP until a separate reviewed mutation contract.
