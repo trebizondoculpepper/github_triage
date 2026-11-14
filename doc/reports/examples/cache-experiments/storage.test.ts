@@ -18,6 +18,7 @@ import {
   loadSnapshot,
   realFs,
   removeExperimentRoot,
+  sourceOf,
   storeSnapshot,
   syntheticObservation,
   type Context,
@@ -955,4 +956,66 @@ describe("third-round review fixes", () => {
     expect(db.code).toBe(1);
     expect(existsSync(file(root))).toBe(false);
   }, 30_000);
+});
+
+describe("per-source completeness", () => {
+  const issuesOnly = (n: number, status: CoverageStatus = "complete") => {
+    const o = syntheticObservation(n, at());
+    const keep = o.records.filter((r) => sourceOf(r.subject) === "issues");
+    return {
+      ...o,
+      sourceCoverage: { issues: { status, pages: 1, scope: "all states" } },
+      manifest: o.manifest.filter((m) => sourceOf(m.subject) === "issues"),
+      records: keep,
+    };
+  };
+
+  it("a complete issue list prunes issues but keeps PRs when pullRequests is absent", () => {
+    const k = key();
+    const prev = applyObservation(undefined, k, syntheticObservation(9, at()), T0).snapshot;
+    expect(prev.records.filter((r) => r.subject.startsWith("pr:"))).toHaveLength(3);
+    // Issues complete, listing only issue:1; pullRequests not collected at all.
+    const next = applyObservation(prev, k, issuesOnly(1), T0);
+    const subjects = next.snapshot.records.map((r) => r.subject);
+    expect(subjects.filter((x) => x.startsWith("pr:"))).toHaveLength(3);
+    expect(subjects.filter((x) => x.startsWith("issue:"))).toEqual(["issue:1"]);
+    expect(next.omissions.prunedUnseen.every((x) => x.startsWith("issue:"))).toBe(true);
+    // The PR source keeps its entry, marked not re-observed.
+    expect(next.snapshot.sourceCoverage.pullRequests?.status).toBe("unknown");
+  });
+
+  it("a partial PR source keeps PR records while a complete issue source prunes", () => {
+    const k = key();
+    const prev = applyObservation(undefined, k, syntheticObservation(9, at()), T0).snapshot;
+    const obs = syntheticObservation(1, at());
+    obs.sourceCoverage.pullRequests = { status: "partial", pages: 1, scope: "all states" };
+    const next = applyObservation(prev, k, obs, T0);
+    expect(next.snapshot.records.filter((r) => r.subject.startsWith("pr:"))).toHaveLength(3);
+    expect(next.omissions.prunedUnseen.some((x) => x.startsWith("pr:"))).toBe(false);
+  });
+
+  it("evictions are cleared only by a complete manifest of their own source", () => {
+    const k = key();
+    const base = applyObservation(undefined, k, syntheticObservation(300, at()), T0).snapshot;
+    // The cap evicts the alphabetically last subjects (PRs here); add an issue eviction too.
+    const evictedPrs = base.omissions.evicted.filter((x) => x.startsWith("pr:"));
+    expect(evictedPrs.length).toBeGreaterThan(0);
+    const capped = {
+      ...base,
+      manifest: [...base.manifest, { subject: "issue:999", state: "OPEN", updatedAt: at() }],
+      omissions: { ...base.omissions, evicted: [...base.omissions.evicted, "issue:999"] },
+    };
+    // Complete issues listing 1 subject, no PR source: issue evictions clear, PR ones stay.
+    const next = applyObservation(capped, k, issuesOnly(1), T0).snapshot;
+    expect(next.omissions.evicted).toEqual(evictedPrs);
+  });
+
+  it("an unrecognised subject is never pruned", () => {
+    const k = key();
+    const obs = syntheticObservation(1, at());
+    obs.records.push({ ...obs.records[0]!, subject: "discussion:7" });
+    const prev = applyObservation(undefined, k, obs, T0).snapshot;
+    const next = applyObservation(prev, k, syntheticObservation(1, at()), T0);
+    expect(next.snapshot.records.map((r) => r.subject)).toContain("discussion:7");
+  });
 });

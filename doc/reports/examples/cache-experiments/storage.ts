@@ -406,10 +406,22 @@ export interface Omissions {
 }
 
 /**
- * Merge a successful observation into the previous snapshot. Unseen records are pruned only when
- * every source in the observation is complete; otherwise they are kept. Records past 24 hours
+ * Merge a successful observation into the previous snapshot. A subject is pruned as unseen, or
+ * its eviction cleared, only when this observation covers that subject's own source completely
+ * (`sourceOf`); records from a partial, unknown or absent source are kept. A source collected
+ * earlier but missing from this observation keeps its coverage entry, downgraded to "unknown". Records past 24 hours
  * are dropped, then the oldest are evicted above 256. Every removal is reported.
  */
+/**
+ * The coverage source a subject belongs to: `issue:N` to "issues", `pr:N` to "pullRequests".
+ * An unrecognised subject has no source and is therefore never pruned or cleared.
+ */
+export function sourceOf(subject: string): string | undefined {
+  if (subject.startsWith("issue:")) return "issues";
+  if (subject.startsWith("pr:")) return "pullRequests";
+  return undefined;
+}
+
 export function applyObservation(
   previous: Snapshot | undefined,
   key: ContextKey & { ok: true },
@@ -419,13 +431,15 @@ export function applyObservation(
   expiredBefore: string[] = [],
 ): { snapshot: Snapshot; omissions: Omissions } {
   const omissions: Omissions = { prunedUnseen: [], evicted: [], expired: [...expiredBefore] };
-  const complete =
-    Object.keys(obs.sourceCoverage).length > 0 &&
-    Object.values(obs.sourceCoverage).every((c) => c.status === "complete");
+  // Per-source completeness: a complete issue list says nothing about pull requests.
+  const sourceComplete = (subject: string) => {
+    const src = sourceOf(subject);
+    return src !== undefined && obs.sourceCoverage[src]?.status === "complete";
+  };
   const listed = new Set(obs.manifest.map((m) => m.subject));
   const merged = new Map<string, EvidenceRecord>();
   for (const r of previous?.records ?? []) {
-    if (complete && !listed.has(r.subject)) omissions.prunedUnseen.push(r.subject);
+    if (sourceComplete(r.subject) && !listed.has(r.subject)) omissions.prunedUnseen.push(r.subject);
     // Listed again by this successful manifest: renew its listing time only. Its facts,
     // sourceTime and revalidatedAt are unchanged, so they are not claimed as revalidated.
     else if (listed.has(r.subject)) merged.set(r.subject, { ...r, lastSeenAt: obs.observedAt });
@@ -454,8 +468,12 @@ export function applyObservation(
   const evicted = [...new Set([...(previous?.omissions.evicted ?? []), ...omissions.evicted])]
     // Cleared once stored again, or once a complete manifest no longer lists it. A partial
     // manifest that does not list it proves nothing, so the eviction stays on record.
-    .filter((x) => !kept.has(x) && (listedNow.has(x) || !complete))
+    .filter((x) => !kept.has(x) && (listedNow.has(x) || !sourceComplete(x)))
     .sort();
+  // Sources collected before but absent now: keep their entry, marked not re-observed.
+  const sourceCoverage: Record<string, SourceCoverage> = { ...obs.sourceCoverage };
+  for (const [src, cov] of Object.entries(previous?.sourceCoverage ?? {}))
+    if (!(src in sourceCoverage)) sourceCoverage[src] = { ...cov, status: "unknown" };
   const c = key.canonical;
   return {
     snapshot: {
@@ -469,7 +487,7 @@ export function applyObservation(
       profileVersion: PROFILE_VERSION,
       observedAt: obs.observedAt,
       lastSuccessfulAt: obs.observedAt,
-      sourceCoverage: obs.sourceCoverage,
+      sourceCoverage,
       manifest,
       records,
       omissions: {
