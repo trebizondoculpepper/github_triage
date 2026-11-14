@@ -311,7 +311,9 @@ export function compactBriefing(
         ])
       : [],
   );
-  // Additive blended ranking (#248); the legacy `actions` and `role.next` are unchanged.
+  // Blended ranking (#248). Since #259 the legacy `actions` and `role.next` of the blended
+  // roles are its first-occurrence target projection (doc/design/blended-action-queues.md
+  // "Output and compatibility"); views without a blended ranking keep their previous order.
   const blendedRole: BlendedRole | null =
     role && (role.name === "implementer" || role.name === "designer") ? role.name : null;
   const fullRanking: RankedActions | null =
@@ -366,13 +368,48 @@ export function compactBriefing(
     fullRanking && blendedRole === "designer" && assessments
       ? impactEstimationReport(impactStatus, assessments, fullRanking.items, shownRanked)
       : null;
-  const ordered = role
-    ? role.next.map(({ url }) => ({ target: url, findings: grouped.get(url) ?? [] }))
-    : next;
+  const projection = fullRanking ? [...new Set(fullRanking.items.map((i) => i.target))] : null;
+  const ordered = projection
+    ? projection.map((target) => ({ target, findings: grouped.get(target) ?? [] }))
+    : role
+      ? role.next.map(({ url }) => ({ target: url, findings: grouped.get(url) ?? [] }))
+      : next;
   const actions = bound(ordered, options.limit);
+  // `role.next` keeps its `{url, reason}` row shape: the shown projection, each target with its
+  // role-section reason, or (assessment-only targets) the first ranked action's kind and reasons.
+  // Every row the selectors placed (before section budgets), so a projected target keeps its reason.
+  const roleReason = new Map(
+    [...rowsBySection.values()].flat().map((r): [string, string] => [r.url, r.reason]),
+  );
+  const projectedRole: RoleView | null =
+    role && fullRanking
+      ? {
+          ...role,
+          next: actions.items.map(({ target }) => {
+            const first = defined(fullRanking.items.find((i) => i.target === target));
+            return {
+              url: target,
+              reason:
+                roleReason.get(target) ?? `Ranked ${first.kind} (${first.reasonCodes.join(", ")}).`,
+            };
+          }),
+        }
+      : role;
   // Estimation is offered automatically only when no higher-priority group (addressed
   // attention, PR follow-up, own work, eligible pickup) exists; explicit requests always see it.
   const higher = next.some((group) => tier(group) <= 4);
+  // Implementer complexity assessment counts (#259), shaped like `impactEstimation`: `offered`
+  // means at least one estimate entered the ranked queue, regardless of the display limit.
+  const complexityCounts =
+    fullRanking && blendedRole === "implementer" && assessments
+      ? {
+          eligible: [...assessments.values()].filter((a) =>
+            ["unassessed", "stale"].includes(a.complexity.state),
+          ).length,
+          ranked: fullRanking.items.filter((i) => i.kind === "estimate-complexity").length,
+          shown: shownRanked.filter((i) => i.kind === "estimate-complexity").length,
+        }
+      : null;
   const estimates = new Map(facts.estimation.entries.map((e) => [e.url, e]));
   const { entries: _entries, queue, conflicts, ...estimationFacts } = facts.estimation;
   const shownQueue = queue?.items.slice(0, options.limit) ?? [];
@@ -384,15 +421,18 @@ export function compactBriefing(
       omitted: conflicts.length - shownConflicts.length,
       items: shownConflicts,
     },
-    offered: estimationFacts.requested || (!higher && !!queue?.total),
+    offered: complexityCounts
+      ? estimationFacts.requested || complexityCounts.ranked > 0
+      : estimationFacts.requested || (!higher && !!queue?.total),
+    ...(complexityCounts ?? {}),
     queue: queue
       ? { total: queue.total, omitted: queue.total - shownQueue.length, items: shownQueue }
       : null,
   };
   const urls = new Set([
     ...actions.items.map((item) => item.target),
-    // Designer NEXT STEPS renders the ranked actions (#246); their subjects must be present.
-    ...(impactEstimation ? (rankedActions?.items.map((item) => item.target) ?? []) : []),
+    // NEXT STEPS renders the ranked actions (#246, #259); their subjects must be present.
+    ...(rankedActions?.items.map((item) => item.target) ?? []),
     ...Object.values(sections).flatMap((s) => s.items),
     ...(role?.sections.flatMap((s) => s.items.map((row) => row.url)) ?? []),
   ]);
@@ -444,7 +484,7 @@ export function compactBriefing(
     },
     actions: { ...actions, items: actions.items.map(({ target }) => target) },
     sections,
-    role,
+    role: projectedRole,
     rankedActions,
     // Additive and designer-only (#246): other views keep their exact previous shape.
     ...(impactEstimation ? { impactEstimation } : {}),
@@ -525,7 +565,7 @@ export function compactText(
   const estimationRows = (): void => {
     if (estimation.status === "disabled") return;
     rows.push(
-      `\nESTIMATION${estimation.requested ? " (requested)" : " (optional; after the work above)"} (${estimation.queue?.total ?? "unavailable"}; ${estimation.queue?.omitted ?? 0} omitted)`,
+      `\nESTIMATION${estimation.requested ? " (requested)" : ranked && report.role?.name === "implementer" ? " (detail; estimates are ranked in NEXT STEPS)" : " (optional; after the work above)"} (${estimation.queue?.total ?? "unavailable"}; ${estimation.queue?.omitted ?? 0} omitted)`,
       `- ${estimation.detail}`,
       ...estimation.findings.map((f) => `- ${f.rule}: ${f.detail} Next: ${f.next.join(" | ")}`),
       ...(estimation.queue?.items ?? []).map(
@@ -534,11 +574,12 @@ export function compactText(
       `- ${estimation.boundaries} Guidance: github-triage estimate --help`,
     );
   };
+  const ranked = report.rankedActions;
   if (estimation.requested) estimationRows();
-  // Designer NEXT STEPS (#246): the blended ranked actions, with kind, why, the paired
+  // Role NEXT STEPS (designer #246, implementer #259): the blended ranked actions, with kind, why, the paired
   // assessments and the exact next command. Role sections below still give each subject's
   // detail, so these rows do not mark subjects as shown.
-  const rankedRows = (ranked: RankedActions, impact: ImpactEstimation): void => {
+  const rankedRows = (ranked: RankedActions, impact: ImpactEstimation | undefined): void => {
     rows.push(`\nNEXT STEPS (${ranked.total}; ${ranked.omitted} omitted)`);
     for (const item of ranked.items) {
       const s = defined(subjects.get(item.target));
@@ -548,9 +589,14 @@ export function compactText(
       );
     }
     // Hidden, never deleted, when impact.enabled is false.
-    if (impact.status !== "disabled")
+    if (impact && impact.status !== "disabled")
       rows.push(
         `- Impact assessment: ${impact.eligible} eligible, ${impact.ranked} ranked, ${impact.shown} shown; ${impact.conflicts} conflicting, ${impact.invalid} invalid, ${impact.unknown} unknown${impact.status === "unknown" ? " (impact.enabled unreadable)" : ""}. Guidance: ${impact.guidance}`,
+      );
+    // Implementer counts (#259); hidden, never deleted, when complexity.enabled is false.
+    if ("ranked" in estimation && estimation.status !== "disabled")
+      rows.push(
+        `- Complexity assessment: ${estimation.eligible} eligible, ${estimation.ranked} ranked, ${estimation.shown} shown; ${estimation.conflicts.total} conflicting. Guidance: github-triage estimate --help`,
       );
   };
   const roleReasons = new Map(
@@ -559,9 +605,10 @@ export function compactText(
     ) ?? [],
   );
   const impact = "impactEstimation" in report ? report.impactEstimation : undefined;
-  if (impact && report.rankedActions) rankedRows(report.rankedActions, impact);
+  if (ranked) rankedRows(ranked, impact);
   else add("NEXT STEPS", report.actions, roleReasons);
-  if (estimation.offered && !estimation.requested)
+  // With a ranked queue, estimates appear in NEXT STEPS itself; no "offered below" pointer.
+  if (!ranked && estimation.offered && !estimation.requested)
     rows.push("- No higher-priority work: estimation is offered below (optional).");
   if (report.role) {
     lines.push(`Role ${report.role.name}: ${report.role.question}`);

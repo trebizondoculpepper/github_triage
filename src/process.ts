@@ -121,7 +121,7 @@ export function guideRules(): GuideRule[] {
       parameters: { orders: pickupOrders, urgency: pickupPolicy.urgency },
       summary: `Default order: ${pickupPolicy.urgency.high} first, then most immediate unlocks; --order ${pickupOrders.filter((o) => o !== "impact").join("|")} sorts by age only.`,
       detail:
-        "Ordering never changes eligibility, claims or addressed attention; there is no automatic bug-first override.",
+        "Ordering never changes eligibility, claims or addressed attention; there is no automatic bug-first override. Role views rank one blended NEXT STEPS queue (rankedActions): known easy wins (impact L+ and complexity XS/S) precede assessments, assessments precede ordinary work, known unfavorable pairs (impact XS/S, complexity L+) come last; age order applies to unclaimed pickup only. Assessing acquires no claim and never unblocks.",
     },
     {
       id: "one-claim",

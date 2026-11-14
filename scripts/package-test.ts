@@ -108,6 +108,9 @@ try {
     const help = await cli(["--help"]);
     if (!help.stdout.startsWith("Usage:"))
       throw new Error(`Installed bin printed no help in ${cwd}.`);
+    // Blended role queues (#259): help names the ranked queue and its assessment kinds.
+    if (!help.stdout.includes("rankedActions") || !help.stdout.includes("estimate-complexity"))
+      throw new Error(`Installed bin help does not describe the blended queue in ${cwd}.`);
     // The bundled complexity guidance must ship inside the packed artifact.
     const guidance = await cli(["estimate", "--help"]);
     if (!/XS[\s\S]*XXL/.test(guidance.stdout) || !guidance.stdout.includes("guidance (version"))
